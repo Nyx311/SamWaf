@@ -1,0 +1,58 @@
+name: Manual Linux Build
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download SamWafWeb
+        run: |
+          curl -L https://github.com/samwafgo/SamWafWeb/releases/latest/download/dist.tar.gz -o dist.tar.gz
+          tar -zxvf dist.tar.gz
+          rm -rf public/dist
+          mv -f dist public
+          rm -rf dist.tar.gz
+
+      - name: Set up QEMU
+        if: matrix.arch == 'arm64'
+        uses: docker/setup-qemu-action@v3
+
+      - name: Build Linux binary (${{ matrix.arch }})
+        run: |
+          BUILDTIME=$(date +'%Y%m%d')
+          if [ "${{ matrix.arch }}" = "amd64" ]; then
+            OUT_NAME="SamWafLinuxAmd64"
+          else
+            OUT_NAME="SamWafLinuxArm64"
+          fi
+          echo "OUT_NAME=${OUT_NAME}" >> "$GITHUB_ENV"
+
+          mkdir -p release
+          docker run --rm --platform linux/${{ matrix.arch }} \
+            -v "$PWD":/src -w /src \
+            -e CGO_ENABLED=1 -e GOOS=linux -e GOARCH=${{ matrix.arch }} \
+            -e GOPROXY=https://goproxy.cn,direct \
+            golang:1.24.7 sh -c "go build -ldflags='-X SamWaf/global.GWAF_RELEASE=true -X SamWaf/global.GWAF_RUNTIME_WIN7_VERSION=false -X SamWaf/global.GWAF_RELEASE_VERSION_NAME=${BUILDTIME} -X SamWaf/global.GWAF_RELEASE_VERSION=v1.3.19 -s -w -extldflags \"-static\"' -o /src/release/${OUT_NAME} ./cmd/samwaf/main.go"
+
+      - name: Upload Linux binary (${{ matrix.arch }})
+        uses: actions/upload-artifact@v4
+        with:
+          name: SamWafLinux-${{ matrix.arch }}-${{ github.sha }}
+          path: release/${{ env.OUT_NAME }}
+          if-no-files-found: error
+          retention-days: 3
