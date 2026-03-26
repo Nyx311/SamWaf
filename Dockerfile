@@ -6,8 +6,9 @@ WORKDIR /app
 # 设置默认时区为上海
 ENV TZ=Asia/Shanghai
 
-# 更新并安装时区数据
-RUN apk update && \
+# 更新并安装时区数据（使用阿里云镜像加速）
+RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories && \
+    apk update && \
     apk add --no-cache tzdata && \
     ln -sf /usr/share/zoneinfo/${TZ} /etc/localtime && \
     echo "${TZ}" > /etc/timezone
