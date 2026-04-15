@@ -114,7 +114,7 @@ func Auth() gin.HandlerFunc {
 				ae := c.GetHeader("Accept-Encoding")
 				zlog.Error(fmt.Sprintf("[FP-MISMATCH] host=%s uri=%s loginType=%s oldIP=%v curIP=%v oldFP=%v curFP=%v ua=%q al=%q ae=%q",
 					c.Request.Host, c.Request.RequestURI, c.GetHeader("X-Login-Type"),
-					tokenInfo.LoginIp, currentIP, tokenInfo.DeviceFingerprint, currentFingerprint, ua, al, ae))
+					tokenInfo.LoginIp, currentIP, tokenInfo.DeviceFingerprint, utils.GenerateFingerprint(c.Request), ua, al, ae))
 					//令牌有效但是指纹不匹配，删除缓存
 					global.GCACHE_WAFCACHE.Remove(enums.CACHE_TOKEN + tokenStr)
 					response.AuthFailWithMessage("设备验证失败，需要重新登录", c)
