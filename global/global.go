@@ -76,8 +76,9 @@ var (
 	GWAF_TENANT_ID          string   = "SamWafCom" // 当前租户ID
 
 	//管理端访问控制
-	GWAF_IP_WHITELIST string = "0.0.0.0/0,::/0" //IP白名单 后台默认放行所有
-	GWAF_SSL_ENABLE   bool   = false            //是否启用SSL证书
+	GWAF_IP_WHITELIST         string = "0.0.0.0/0,::/0" //IP白名单 后台默认放行所有
+	GWAF_SSL_ENABLE           bool   = false            //是否启用SSL证书
+	GWAF_FINGERPRINT_DEBUG_LOG bool  = false            //是否开启指纹详细调试日志
 
 	//zlog 日志相关信息
 	GWAF_LOG_OUTPUT_FORMAT       string              = "console"  //zlog输出格式 控制台格式console,json格式

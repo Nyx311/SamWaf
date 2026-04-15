@@ -136,12 +136,12 @@ func (w *WafLoginApi) LoginApi(c *gin.Context) {
 			//生成设备指纹
 			deviceFingerprint := ""
 			if global.GCONFIG_ENABLE_DEVICE_FINGERPRINT == 1 {
-				deviceFingerprint = utils.GenerateFingerprint(c.Request)
-				ua := c.Request.UserAgent()
-				al := c.GetHeader("Accept-Language")
-				ae := c.GetHeader("Accept-Encoding")
-				zlog.Warn(fmt.Sprintf("[FP-LOGIN] host=%s uri=%s ip=%s ua=%q al=%q ae=%q fp=%s",
-					c.Request.Host, c.Request.RequestURI, c.ClientIP(), ua, al, ae, deviceFingerprint))
+				fpInfo := utils.GetFingerprintDebugInfo(c.Request)
+				deviceFingerprint = fpInfo.Hash
+				if global.GWAF_FINGERPRINT_DEBUG_LOG {
+					zlog.Warn(fmt.Sprintf("[FP-LOGIN-DEBUG] host=%s uri=%s ip=%s rawUA=%q rawAL=%q rawAE=%q normUA=%q normAL=%q normAE=%q data=%q fp=%s",
+						c.Request.Host, c.Request.RequestURI, c.ClientIP(), fpInfo.RawUA, fpInfo.RawAL, fpInfo.RawAE, fpInfo.NormUA, fpInfo.NormAL, fpInfo.NormAE, fpInfo.Data, fpInfo.Hash))
+				}
 			}
 
 			//记录状态

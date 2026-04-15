@@ -133,6 +133,14 @@ func LoadAndInitConfig() {
 		config.Set("security.ssl_enable", global.GWAF_SSL_ENABLE)
 		configChanged = true
 	}
+
+	// 指纹详细调试日志开关
+	if config.IsSet("security.fingerprint_debug_log") {
+		global.GWAF_FINGERPRINT_DEBUG_LOG = config.GetBool("security.fingerprint_debug_log")
+	} else {
+		config.Set("security.fingerprint_debug_log", global.GWAF_FINGERPRINT_DEBUG_LOG)
+		configChanged = true
+	}
 	// 只有在配置发生变化时才写入文件
 	if configChanged {
 		err := config.WriteConfig()
