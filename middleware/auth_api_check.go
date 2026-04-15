@@ -109,8 +109,12 @@ func Auth() gin.HandlerFunc {
 
 				// 如果指纹不匹配，则拒绝请求
 				if !fingerprintMatched {
-					zlog.Error(fmt.Sprintf("设备指纹都不匹配，请求拒绝。原IP:%v 当前IP:%v 原指纹:%v 当前指纹:%v",
-						tokenInfo.LoginIp, currentIP, tokenInfo.DeviceFingerprint, utils.GenerateFingerprint(c.Request)))
+					ua := c.Request.UserAgent()
+				al := c.GetHeader("Accept-Language")
+				ae := c.GetHeader("Accept-Encoding")
+				zlog.Error(fmt.Sprintf("[FP-MISMATCH] host=%s uri=%s loginType=%s oldIP=%v curIP=%v oldFP=%v curFP=%v ua=%q al=%q ae=%q",
+					c.Request.Host, c.Request.RequestURI, c.GetHeader("X-Login-Type"),
+					tokenInfo.LoginIp, currentIP, tokenInfo.DeviceFingerprint, currentFingerprint, ua, al, ae))
 					//令牌有效但是指纹不匹配，删除缓存
 					global.GCACHE_WAFCACHE.Remove(enums.CACHE_TOKEN + tokenStr)
 					response.AuthFailWithMessage("设备验证失败，需要重新登录", c)
