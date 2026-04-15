@@ -5,6 +5,7 @@ import (
 	"SamWaf/model/waftunnelmodel"
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -283,8 +284,15 @@ func (waf *WafTunnelEngine) handleTCPConnection(clientConn net.Conn, port int) {
 		// 使用io.Copy，当连接断开时会自动返回
 		_, err := io.Copy(targetConn, clientConn)
 		if err != nil {
-			zlog.Error(fmt.Sprintf("客户端->目标 数据转发结束 [客户端IP:%s 客户端端口:%s 服务端口:%s 错误:%s]",
-				clientIP, clientPort, serverPort, err.Error()))
+			if !errors.Is(err, net.ErrClosed) {
+				if ne, ok := err.(net.Error); ok && ne.Timeout() {
+					zlog.Warn(fmt.Sprintf("客户端->目标 数据转发超时结束 [客户端IP:%s 客户端端口:%s 服务端口:%s 错误:%s]",
+						clientIP, clientPort, serverPort, err.Error()))
+				} else {
+					zlog.Error(fmt.Sprintf("客户端->目标 数据转发结束 [客户端IP:%s 客户端端口:%s 服务端口:%s 错误:%s]",
+						clientIP, clientPort, serverPort, err.Error()))
+				}
+			}
 		} else {
 			zlog.Debug(fmt.Sprintf("客户端->目标 数据转发正常结束 [客户端IP:%s 客户端端口:%s 服务端口:%s]",
 				clientIP, clientPort, serverPort))
@@ -299,8 +307,15 @@ func (waf *WafTunnelEngine) handleTCPConnection(clientConn net.Conn, port int) {
 		// 使用io.Copy，当连接断开时会自动返回
 		_, err := io.Copy(clientConn, targetConn)
 		if err != nil {
-			zlog.Error(fmt.Sprintf("目标->客户端 数据转发结束 [客户端IP:%s 客户端端口:%s 服务端口:%s 错误:%s]",
-				clientIP, clientPort, serverPort, err.Error()))
+			if !errors.Is(err, net.ErrClosed) {
+				if ne, ok := err.(net.Error); ok && ne.Timeout() {
+					zlog.Warn(fmt.Sprintf("目标->客户端 数据转发超时结束 [客户端IP:%s 客户端端口:%s 服务端口:%s 错误:%s]",
+						clientIP, clientPort, serverPort, err.Error()))
+				} else {
+					zlog.Error(fmt.Sprintf("目标->客户端 数据转发结束 [客户端IP:%s 客户端端口:%s 服务端口:%s 错误:%s]",
+						clientIP, clientPort, serverPort, err.Error()))
+				}
+			}
 		} else {
 			zlog.Debug(fmt.Sprintf("目标->客户端 数据转发正常结束 [客户端IP:%s 客户端端口:%s 服务端口:%s]",
 				clientIP, clientPort, serverPort))
