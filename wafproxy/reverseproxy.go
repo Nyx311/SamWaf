@@ -7,6 +7,8 @@
 package wafproxy
 
 import (
+	"SamWaf/common/zlog"
+	"SamWaf/global"
 	"SamWaf/wafproxy/inner/ascii"
 	"context"
 	"fmt"
@@ -264,6 +266,10 @@ func (p *ReverseProxy) modifyResponse(rw http.ResponseWriter, res *http.Response
 }
 
 func (p *ReverseProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
+	if global.GWAF_FINGERPRINT_DEBUG_LOG {
+		zlog.Warn(fmt.Sprintf("[FP-PROXY-IN] host=%s uri=%s upgrade=%q ae=%q ua=%q al=%q",
+			req.Host, req.RequestURI, req.Header.Get("Upgrade"), req.Header.Get("Accept-Encoding"), req.UserAgent(), req.Header.Get("Accept-Language")))
+	}
 	transport := p.Transport
 	if transport == nil {
 		transport = http.DefaultTransport
@@ -321,6 +327,10 @@ func (p *ReverseProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		}
 	}*/
 	p.Director(outreq)
+	if global.GWAF_FINGERPRINT_DEBUG_LOG {
+		zlog.Warn(fmt.Sprintf("[FP-PROXY-AFTER-DIRECTOR] host=%s uri=%s upgrade=%q ae=%q ua=%q al=%q",
+			outreq.Host, outreq.RequestURI, outreq.Header.Get("Upgrade"), outreq.Header.Get("Accept-Encoding"), outreq.UserAgent(), outreq.Header.Get("Accept-Language")))
+	}
 	outreq.Close = false
 
 	reqUpType := upgradeType(outreq.Header)
