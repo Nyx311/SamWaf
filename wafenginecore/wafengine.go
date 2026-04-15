@@ -864,6 +864,13 @@ func (waf *WafEngine) errorResponse() func(http.ResponseWriter, *http.Request, e
 			weblogReq := wafHttpContext.Weblog
 
 			requestInfo := fmt.Sprintf("Method: %s \r\nURL: %s   \r\nHeaders: %v", req.Method, req.URL.String(), req.Header)
+
+			// context canceled 是客户端主动断开，不记为故障ERROR，只记debug
+			if req.Context().Err() == context.Canceled {
+				zlog.Debug("客户端断开连接 [URL: " + req.URL.String() + "]")
+				return
+			}
+
 			zlog.Error("服务不可用 response:", zap.Any("err", err.Error()), zap.String("request_info", requestInfo))
 
 			resBytes := []byte("<html><head><title>服务不可用</title></head><body><center><h1>服务不可用</h1> <br><h3></h3></center></body> </html>")
