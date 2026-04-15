@@ -7,7 +7,6 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"strconv"
 	"strings"
@@ -237,7 +236,11 @@ func (waf *WafTunnelEngine) handleTCPConnection(clientConn net.Conn, port int) {
 
 	// 连接到目标服务器
 	targetAddr := tunnelInfo.Tunnel.RemoteIp + ":" + strconv.Itoa(tunnelInfo.Tunnel.RemotePort)
-	targetConn, err := net.Dial("tcp", targetAddr)
+	dialer := net.Dialer{}
+	if tunnelInfo.Tunnel.ConnTimeout > 0 {
+		dialer.Timeout = time.Duration(tunnelInfo.Tunnel.ConnTimeout) * time.Second
+	}
+	targetConn, err := dialer.Dial("tcp", targetAddr)
 	if err != nil {
 		zlog.Error(fmt.Sprintf("连接目标服务器失败 [客户端IP:%s 客户端端口:%s 服务端口:%s 目标地址:%s 错误:%s]",
 			clientIP, clientPort, serverPort, targetAddr, err.Error()))
@@ -251,22 +254,36 @@ func (waf *WafTunnelEngine) handleTCPConnection(clientConn net.Conn, port int) {
 		waf.TCPConnections.RemoveConn(port, targetConn)
 	}()
 
-	// 设置超时
-	if tunnelInfo.Tunnel.ConnTimeout > 0 {
-		clientConn.SetDeadline(time.Now().Add(time.Duration(tunnelInfo.Tunnel.ConnTimeout) * time.Second))
-		targetConn.SetDeadline(time.Now().Add(time.Duration(tunnelInfo.Tunnel.ConnTimeout) * time.Second))
-	}
+	// 使用空闲超时（每次读写前刷新deadline）
+	readTimeoutSeconds := tunnelInfo.Tunnel.ReadTimeout
+	writeTimeoutSeconds := tunnelInfo.Tunnel.WriteTimeout
+	copyWithIdleTimeout := func(dst net.Conn, src net.Conn) error {
+		buf := make([]byte, 32*1024)
+		for {
+			if readTimeoutSeconds > 0 {
+				_ = src.SetReadDeadline(time.Now().Add(time.Duration(readTimeoutSeconds) * time.Second))
+			}
 
-	// 设置读取超时
-	if tunnelInfo.Tunnel.ReadTimeout > 0 {
-		clientConn.SetReadDeadline(time.Now().Add(time.Duration(tunnelInfo.Tunnel.ReadTimeout) * time.Second))
-		targetConn.SetReadDeadline(time.Now().Add(time.Duration(tunnelInfo.Tunnel.ReadTimeout) * time.Second))
-	}
+			n, err := src.Read(buf)
+			if n > 0 {
+				if writeTimeoutSeconds > 0 {
+					_ = dst.SetWriteDeadline(time.Now().Add(time.Duration(writeTimeoutSeconds) * time.Second))
+				}
 
-	// 设置写入超时
-	if tunnelInfo.Tunnel.WriteTimeout > 0 {
-		clientConn.SetWriteDeadline(time.Now().Add(time.Duration(tunnelInfo.Tunnel.WriteTimeout) * time.Second))
-		targetConn.SetWriteDeadline(time.Now().Add(time.Duration(tunnelInfo.Tunnel.WriteTimeout) * time.Second))
+				written := 0
+				for written < n {
+					m, writeErr := dst.Write(buf[written:n])
+					if writeErr != nil {
+						return writeErr
+					}
+					written += m
+				}
+			}
+
+			if err != nil {
+				return err
+			}
+		}
 	}
 
 	// 使用context和WaitGroup管理连接生命周期
@@ -281,8 +298,8 @@ func (waf *WafTunnelEngine) handleTCPConnection(clientConn net.Conn, port int) {
 		defer wg.Done()
 		defer cancel() // 任一方向断开时取消context
 
-		// 使用io.Copy，当连接断开时会自动返回
-		_, err := io.Copy(targetConn, clientConn)
+		// 使用自定义拷贝，支持空闲超时
+		err := copyWithIdleTimeout(targetConn, clientConn)
 		if err != nil {
 			if !errors.Is(err, net.ErrClosed) {
 				if ne, ok := err.(net.Error); ok && ne.Timeout() {
@@ -304,8 +321,8 @@ func (waf *WafTunnelEngine) handleTCPConnection(clientConn net.Conn, port int) {
 		defer wg.Done()
 		defer cancel() // 任一方向断开时取消context
 
-		// 使用io.Copy，当连接断开时会自动返回
-		_, err := io.Copy(clientConn, targetConn)
+		// 使用自定义拷贝，支持空闲超时
+		err := copyWithIdleTimeout(clientConn, targetConn)
 		if err != nil {
 			if !errors.Is(err, net.ErrClosed) {
 				if ne, ok := err.(net.Error); ok && ne.Timeout() {

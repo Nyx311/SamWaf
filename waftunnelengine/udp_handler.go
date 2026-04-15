@@ -187,20 +187,26 @@ func (waf *WafTunnelEngine) handleUDPData(serverConn *net.UDPConn, clientAddr *n
 
 	// 连接到目标服务器
 	targetAddr := tunnelInfo.Tunnel.RemoteIp + ":" + strconv.Itoa(tunnelInfo.Tunnel.RemotePort)
-	raddr, err := net.ResolveUDPAddr("udp", targetAddr)
-	if err != nil {
-		zlog.Error(fmt.Sprintf("解析目标地址失败 [客户端IP:%s 客户端端口:%s 服务端口:%s 目标地址:%s 错误:%s]",
-			clientIP, clientPort, serverPort, targetAddr, err.Error()))
-		return
-	}
 
-	// 创建到目标的连接
-	targetConn, err := net.DialUDP("udp", nil, raddr)
+	// 创建到目标的连接（ConnTimeout仅用于拨号阶段）
+	dialer := net.Dialer{}
+	if tunnelInfo.Tunnel.ConnTimeout > 0 {
+		dialer.Timeout = time.Duration(tunnelInfo.Tunnel.ConnTimeout) * time.Second
+	}
+	targetConnRaw, err := dialer.Dial("udp", targetAddr)
 	if err != nil {
 		zlog.Error(fmt.Sprintf("连接目标服务器失败 [客户端IP:%s 客户端端口:%s 服务端口:%s 目标地址:%s 错误:%s]",
 			clientIP, clientPort, serverPort, targetAddr, err.Error()))
 		return
 	}
+	targetConn, ok := targetConnRaw.(*net.UDPConn)
+	if !ok {
+		targetConnRaw.Close()
+		zlog.Error(fmt.Sprintf("创建UDP目标连接失败 [客户端IP:%s 客户端端口:%s 服务端口:%s 目标地址:%s]",
+			clientIP, clientPort, serverPort, targetAddr))
+		return
+	}
+
 
 	// 将目标连接添加到活动连接列表，标记为目标连接
 	waf.UDPConnections.AddConn(port, targetConn, waftunnelmodel.ConnTypeTarget)
@@ -209,35 +215,40 @@ func (waf *WafTunnelEngine) handleUDPData(serverConn *net.UDPConn, clientAddr *n
 		waf.UDPConnections.RemoveConn(port, targetConn)
 	}()
 
-	// 设置超时
-	if tunnelInfo.Tunnel.ConnTimeout > 0 {
-		targetConn.SetDeadline(time.Now().Add(time.Duration(tunnelInfo.Tunnel.ConnTimeout) * time.Second))
-	}
-
-	// 设置读取超时
-	if tunnelInfo.Tunnel.ReadTimeout > 0 {
-		targetConn.SetReadDeadline(time.Now().Add(time.Duration(tunnelInfo.Tunnel.ReadTimeout) * time.Second))
-	}
-
-	// 设置写入超时
-	if tunnelInfo.Tunnel.WriteTimeout > 0 {
-		targetConn.SetWriteDeadline(time.Now().Add(time.Duration(tunnelInfo.Tunnel.WriteTimeout) * time.Second))
-	}
+	// 使用空闲超时（按每次读写操作设置deadline）
+	readTimeoutSeconds := tunnelInfo.Tunnel.ReadTimeout
+	writeTimeoutSeconds := tunnelInfo.Tunnel.WriteTimeout
 
 	// 发送数据到目标
+	if writeTimeoutSeconds > 0 {
+		_ = targetConn.SetWriteDeadline(time.Now().Add(time.Duration(writeTimeoutSeconds) * time.Second))
+	}
 	_, err = targetConn.Write(data)
 	if err != nil {
-		zlog.Error(fmt.Sprintf("发送数据到目标失败 [客户端IP:%s 客户端端口:%s 服务端口:%s 错误:%s]",
-			clientIP, clientPort, serverPort, err.Error()))
+		if ne, ok := err.(net.Error); ok && ne.Timeout() {
+			zlog.Warn(fmt.Sprintf("发送数据到目标超时 [客户端IP:%s 客户端端口:%s 服务端口:%s 错误:%s]",
+				clientIP, clientPort, serverPort, err.Error()))
+		} else {
+			zlog.Error(fmt.Sprintf("发送数据到目标失败 [客户端IP:%s 客户端端口:%s 服务端口:%s 错误:%s]",
+				clientIP, clientPort, serverPort, err.Error()))
+		}
 		return
 	}
 
 	// 接收目标响应
 	buffer := make([]byte, 4096)
+	if readTimeoutSeconds > 0 {
+		_ = targetConn.SetReadDeadline(time.Now().Add(time.Duration(readTimeoutSeconds) * time.Second))
+	}
 	n, _, err := targetConn.ReadFromUDP(buffer)
 	if err != nil {
-		zlog.Error(fmt.Sprintf("从目标接收数据失败 [客户端IP:%s 客户端端口:%s 服务端口:%s 错误:%s]",
-			clientIP, clientPort, serverPort, err.Error()))
+		if ne, ok := err.(net.Error); ok && ne.Timeout() {
+			zlog.Warn(fmt.Sprintf("从目标接收数据超时 [客户端IP:%s 客户端端口:%s 服务端口:%s 错误:%s]",
+				clientIP, clientPort, serverPort, err.Error()))
+		} else {
+			zlog.Error(fmt.Sprintf("从目标接收数据失败 [客户端IP:%s 客户端端口:%s 服务端口:%s 错误:%s]",
+				clientIP, clientPort, serverPort, err.Error()))
+		}
 		return
 	}
 
