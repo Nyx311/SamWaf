@@ -23,10 +23,12 @@ func (waf *WafEngine) CheckOwasp(r *http.Request, weblogbean *innerbean.WebLog, 
 		isInteeruption, interruption, err := global.GWAF_OWASP.ProcessRequest(r, *weblogbean)
 		if err == nil && isInteeruption {
 			result.IsBlock = true
-			// 使用中断对象中的详细信息
+			// 使用中断对象中的详细信息，附带请求URL便于排查
+			ruleDetail := "OWASP:" + strconv.Itoa(interruption.RuleID)
 			if interruption.Data != "" {
-				result.Title = "OWASP:" + strconv.Itoa(interruption.RuleID) + interruption.Data
+				ruleDetail += interruption.Data
 			}
+			result.Title = ruleDetail + " [URL:" + weblogbean.URL + "]"
 			result.Content = "访问不合法"
 			weblogbean.RISK_LEVEL = 2
 		}

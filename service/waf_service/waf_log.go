@@ -35,6 +35,7 @@ func (receiver *WafLogService) GetDetailApi(req request.WafAttackLogDetailReq) (
 	return weblog, nil
 }
 func (receiver *WafLogService) GetListApi(req request.WafAttackLogSearch) ([]innerbean.WebLog, int64, error) {
+	req.ClampPageSize()
 	var total int64 = 0
 	var weblogs []innerbean.WebLog
 
@@ -196,6 +197,7 @@ func (receiver *WafLogService) GetListApi(req request.WafAttackLogSearch) ([]inn
 	return weblogs, total, nil
 }
 func (receiver *WafLogService) GetListByHostCodeApi(log request.WafAttackLogSearch) ([]innerbean.WebLog, int64, error) {
+	log.ClampPageSize()
 	var total int64 = 0
 	var weblogs []innerbean.WebLog
 	global.GWAF_LOCAL_LOG_DB.Where("host_code = ? ", global.GWAF_TENANT_ID, global.GWAF_USER_CODE, log.HostCode).Limit(log.PageSize).Offset(log.PageSize * (log.PageIndex - 1)).Order("create_time desc").Find(&weblogs)

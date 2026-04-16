@@ -10,6 +10,7 @@ import (
 
 // GetAttackIpListApi 访问IP列表
 func (receiver *WafLogService) GetAttackIpListApi(req request.WafAttackIpTagSearch) ([]model.AttackIPTag, int64, error) {
+	req.ClampPageSize()
 	var results []model.AttackIPTag
 	var total int64
 
