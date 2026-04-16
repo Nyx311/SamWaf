@@ -2,7 +2,6 @@ package api
 
 import (
 	"SamWaf/common/uuid"
-	"SamWaf/common/zlog"
 	"SamWaf/customtype"
 	"SamWaf/enums"
 	"SamWaf/global"
@@ -136,12 +135,7 @@ func (w *WafLoginApi) LoginApi(c *gin.Context) {
 			//生成设备指纹
 			deviceFingerprint := ""
 			if global.GCONFIG_ENABLE_DEVICE_FINGERPRINT == 1 {
-				fpInfo := utils.GetFingerprintDebugInfo(c.Request)
-				deviceFingerprint = fpInfo.Hash
-				if global.GWAF_FINGERPRINT_DEBUG_LOG {
-					zlog.Warn(fmt.Sprintf("[FP-LOGIN-DEBUG] host=%s uri=%s ip=%s rawUA=%q rawAL=%q rawAE=%q normUA=%q normAL=%q normAE=%q data=%q fp=%s",
-						c.Request.Host, c.Request.RequestURI, c.ClientIP(), fpInfo.RawUA, fpInfo.RawAL, fpInfo.RawAE, fpInfo.NormUA, fpInfo.NormAL, fpInfo.NormAE, fpInfo.Data, fpInfo.Hash))
-				}
+				deviceFingerprint = utils.GenerateFingerprint(c.Request)
 			}
 
 			//记录状态

@@ -82,7 +82,7 @@ func (w *WafOWASP) ProcessRequest(r *http.Request, weblog innerbean.WebLog) (boo
 
 	// 4. 检查请求头阶段的中断
 	if it := tx.ProcessRequestHeaders(); it != nil {
-		return w.handleInterruption(tx, it)
+		return w.handleInterruption(tx, it, weblog)
 	}
 
 	// 5. 处理请求体
@@ -94,13 +94,13 @@ func (w *WafOWASP) ProcessRequest(r *http.Request, weblog innerbean.WebLog) (boo
 	if it, err := tx.ProcessRequestBody(); err != nil {
 		return false, nil, fmt.Errorf("request body processing error: %v", err)
 	} else if it != nil {
-		return w.handleInterruption(tx, it)
+		return w.handleInterruption(tx, it, weblog)
 	}
 
 	// 7. 检查最终的中断状态
 	if tx.IsInterrupted() {
 		if it := tx.Interruption(); it != nil {
-			return w.handleInterruption(tx, it)
+			return w.handleInterruption(tx, it, weblog)
 		}
 		return true, nil, nil
 	}
@@ -212,9 +212,14 @@ func (w *WafOWASP) processRequestBody(tx types.Transaction, r *http.Request, web
 }
 
 // handleInterruption 处理中断情况
-func (w *WafOWASP) handleInterruption(tx types.Transaction, it *types.Interruption) (bool, *types.Interruption, error) {
+func (w *WafOWASP) handleInterruption(tx types.Transaction, it *types.Interruption, weblog innerbean.WebLog) (bool, *types.Interruption, error) {
 	// 收集详细信息用于日志记录
 	details := w.collectTransactionDetails(tx)
+
+	// 在日志最前面输出请求域名、URI 和唯一标识符
+	details["domain"] = weblog.HOST
+	details["uri"] = weblog.URL
+	details["req_uuid"] = weblog.REQ_UUID
 
 	// 记录详细的日志信息
 	w.logger.Error("OWASP WAF Interruption", details)
