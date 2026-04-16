@@ -1,13 +1,13 @@
-package waf_service
+﻿package waf_service
 
 import (
 	"SamWaf/common/validfield"
+	"SamWaf/common/zlog"
 	"SamWaf/global"
 	"SamWaf/innerbean"
 	"SamWaf/model/request"
 	"SamWaf/wafdb"
 	"errors"
-	"fmt"
 	"strconv"
 	"strings"
 )
@@ -41,13 +41,13 @@ func (receiver *WafLogService) GetListApi(req request.WafAttackLogSearch) ([]inn
 
 	splitFilterBys := strings.Split(req.FilterBy, "|")
 	splitFilterValues := strings.Split(req.FilterValue, "|")
-	/*强制索引*/
+	/*寮哄埗绱㈠紩*/
 	var forceIndex = "web_logs"
-	/*where条件*/
+	/*where鏉′欢*/
 	var whereField = ""
 	var whereValues []interface{}
 
-	//where字段
+	//where瀛楁
 	{
 		whereField = whereField + " (unix_add_time>=? and unix_add_time<=?)"
 		if len(req.HostCode) > 0 {
@@ -102,7 +102,7 @@ func (receiver *WafLogService) GetListApi(req request.WafAttackLogSearch) ([]inn
 
 			if len(by) > 0 {
 				if !validfield.IsValidWebLogFilterField(by) {
-					return nil, 0, errors.New("输入过滤字段不合法")
+					return nil, 0, errors.New("杈撳叆杩囨护瀛楁涓嶅悎娉?)
 				}
 				if len(whereField) > 0 {
 					whereField = whereField + " and "
@@ -114,7 +114,7 @@ func (receiver *WafLogService) GetListApi(req request.WafAttackLogSearch) ([]inn
 			}
 		}
 	}
-	//强制索引
+	//寮哄埗绱㈠紩
 	{
 		if strings.Contains(whereField, "unix_add_time") && !strings.Contains(whereField, "src_ip") {
 			forceIndex = "web_logs INDEXED BY  idx_web_time_desc_tenant_user_code"
@@ -123,20 +123,20 @@ func (receiver *WafLogService) GetListApi(req request.WafAttackLogSearch) ([]inn
 		}
 	}
 
-	// 将字符串转换为 int64 类型
+	// 灏嗗瓧绗︿覆杞崲涓?int64 绫诲瀷
 	unixBegin, err := strconv.ParseInt(req.UnixAddTimeBegin, 10, 64)
 	if err != nil {
-		fmt.Println("Error converting UnixAddTimeBegin to int64:", err)
+		zlog.Warn("WafLogService parse UnixAddTimeBegin failed", "value", req.UnixAddTimeBegin, "err", err.Error())
 
 	}
 
 	unixEnd, err := strconv.ParseInt(req.UnixAddTimeEnd, 10, 64)
 	if err != nil {
-		fmt.Println("Error converting UnixAddTimeEnd to int64:", err)
+		zlog.Warn("WafLogService parse UnixAddTimeEnd failed", "value", req.UnixAddTimeEnd, "err", err.Error())
 
 	}
 
-	//where字段赋值
+	//where瀛楁璧嬪€?
 	{
 		whereValues = append(whereValues, unixBegin)
 		whereValues = append(whereValues, unixEnd)
@@ -174,7 +174,7 @@ func (receiver *WafLogService) GetListApi(req request.WafAttackLogSearch) ([]inn
 	orderInfo := ""
 
 	/**
-	排序
+	鎺掑簭
 	*/
 	if receiver.isValidSortField(req.SortBy) {
 		if req.SortDescending == "desc" {
@@ -183,8 +183,9 @@ func (receiver *WafLogService) GetListApi(req request.WafAttackLogSearch) ([]inn
 			orderInfo = req.SortBy + " asc"
 		}
 	} else {
-		return nil, 0, errors.New("输入排序字段不合法")
+		return nil, 0, errors.New("杈撳叆鎺掑簭瀛楁涓嶅悎娉?)
 	}
+	zlog.Debug("WafLogService query info", "db", req.CurrrentDbName, "force_index", forceIndex, "where", whereField, "where_value_count", len(whereValues), "unix_begin", unixBegin, "unix_end", unixEnd, "page_index", req.PageIndex, "page_size", req.PageSize, "order", orderInfo)
 	if len(req.CurrrentDbName) == 0 || req.CurrrentDbName == "local_log.db" {
 		global.GWAF_LOCAL_LOG_DB.Table(forceIndex).Limit(req.PageSize).Where(whereField, whereValues...).Offset(req.PageSize * (req.PageIndex - 1)).Order(orderInfo).Find(&weblogs)
 		global.GWAF_LOCAL_LOG_DB.Table(forceIndex).Where(whereField, whereValues...).Count(&total)
@@ -194,6 +195,7 @@ func (receiver *WafLogService) GetListApi(req request.WafAttackLogSearch) ([]inn
 		global.GDATA_CURRENT_LOG_DB_MAP[req.CurrrentDbName].Table(forceIndex).Where(whereField, whereValues...).Count(&total)
 
 	}
+	zlog.Debug("WafLogService query result", "rows", len(weblogs), "total", total)
 	return weblogs, total, nil
 }
 func (receiver *WafLogService) GetListByHostCodeApi(log request.WafAttackLogSearch) ([]innerbean.WebLog, int64, error) {
@@ -208,7 +210,7 @@ func (receiver *WafLogService) DeleteHistory(day string) {
 	global.GWAF_LOCAL_LOG_DB.Where("create_time < ?", day).Delete(&innerbean.WebLog{})
 }
 
-// GetUnixTimeByCounter 依据开始时间和到期时间获取一个最新的时间戳
+// GetUnixTimeByCounter 渚濇嵁寮€濮嬫椂闂村拰鍒版湡鏃堕棿鑾峰彇涓€涓渶鏂扮殑鏃堕棿鎴?
 func (receiver *WafLogService) GetUnixTimeByCounter(lastStartCreateUnix int64, lastEndCreateUnix int64) innerbean.WebLog {
 	var weblog innerbean.WebLog
 	forceIndex := "web_logs INDEXED BY  idx_web_time_desc_tenant_user_code"
@@ -219,7 +221,7 @@ func (receiver *WafLogService) GetUnixTimeByCounter(lastStartCreateUnix int64, l
 
 /*
 *
-判断是否合法
+鍒ゆ柇鏄惁鍚堟硶
 */
 func (receiver *WafLogService) isValidSortField(field string) bool {
 	var allowedSortFields = []string{"time_spent", "create_time", "unix_add_time"}

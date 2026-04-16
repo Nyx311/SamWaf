@@ -1,4 +1,4 @@
-package api
+﻿package api
 
 import (
 	"SamWaf/common/zlog"
@@ -24,16 +24,16 @@ import (
 type WafLogAPi struct {
 }
 
-// GetDetailApi 获取攻击日志详情
-// @Summary      获取攻击日志详情
-// @Description  根据 req_uuid 获取单条攻击日志详情（含请求体、响应体）
-// @Tags         日志-攻击日志
+// GetDetailApi 鑾峰彇鏀诲嚮鏃ュ織璇︽儏
+// @Summary      鑾峰彇鏀诲嚮鏃ュ織璇︽儏
+// @Description  鏍规嵁 req_uuid 鑾峰彇鍗曟潯鏀诲嚮鏃ュ織璇︽儏锛堝惈璇锋眰浣撱€佸搷搴斾綋锛?
+// @Tags         鏃ュ織-鏀诲嚮鏃ュ織
 // @Accept       json
 // @Produce      json
-// @Param        req_uuid         query  string  true   "请求UUID"
-// @Param        current_db_name  query  string  false  "数据库名称，默认 local_log"
-// @Param        output_format    query  string  false  "输出格式：raw 或 curl"
-// @Success      200  {object}  response.Response  "获取成功"
+// @Param        req_uuid         query  string  true   "璇锋眰UUID"
+// @Param        current_db_name  query  string  false  "鏁版嵁搴撳悕绉帮紝榛樿 local_log"
+// @Param        output_format    query  string  false  "杈撳嚭鏍煎紡锛歳aw 鎴?curl"
+// @Success      200  {object}  response.Response  "鑾峰彇鎴愬姛"
 // @Security     ApiKeyAuth
 // @Router       /waflog/attack/detail [get]
 func (w *WafLogAPi) GetDetailApi(c *gin.Context) {
@@ -41,112 +41,115 @@ func (w *WafLogAPi) GetDetailApi(c *gin.Context) {
 	err := c.ShouldBind(&req)
 	if err == nil {
 		if global.GDATA_CURRENT_CHANGE {
-			//如果正在切换库 跳过
-			response.FailWithMessage("正在切换数据库请等待", c)
+			//濡傛灉姝ｅ湪鍒囨崲搴?璺宠繃
+			response.FailWithMessage("姝ｅ湪鍒囨崲鏁版嵁搴撹绛夊緟", c)
 			return
 		}
 		wafLog, _ := wafLogService.GetDetailApi(req)
-		response.OkWithDetailed(wafLog, "获取成功", c)
+		response.OkWithDetailed(wafLog, "鑾峰彇鎴愬姛", c)
 	} else {
-		response.FailWithMessage("解析失败", c)
+		response.FailWithMessage("瑙ｆ瀽澶辫触", c)
 	}
 }
 
-// GetListApi 获取攻击日志列表
-// @Summary      获取攻击日志列表
-// @Description  分页查询攻击日志，支持按主机码、规则、IP、时间范围等过滤
-// @Tags         日志-攻击日志
+// GetListApi 鑾峰彇鏀诲嚮鏃ュ織鍒楄〃
+// @Summary      鑾峰彇鏀诲嚮鏃ュ織鍒楄〃
+// @Description  鍒嗛〉鏌ヨ鏀诲嚮鏃ュ織锛屾敮鎸佹寜涓绘満鐮併€佽鍒欍€両P銆佹椂闂磋寖鍥寸瓑杩囨护
+// @Tags         鏃ュ織-鏀诲嚮鏃ュ織
 // @Accept       json
 // @Produce      json
-// @Param        data  body      request.WafAttackLogSearch  true  "查询参数"
-// @Success      200   {object}  response.Response{data=response.PageResult}  "获取成功"
+// @Param        data  body      request.WafAttackLogSearch  true  "鏌ヨ鍙傛暟"
+// @Success      200   {object}  response.Response{data=response.PageResult}  "鑾峰彇鎴愬姛"
 // @Security     ApiKeyAuth
 // @Router       /waflog/attack/list [post]
 func (w *WafLogAPi) GetListApi(c *gin.Context) {
 	var req request.WafAttackLogSearch
 	err := c.ShouldBindJSON(&req)
 	if err == nil {
+		zlog.Debug("WafLogAPI GetListApi req", "host_code", req.HostCode, "src_ip", req.SrcIp, "rule", req.Rule, "action", req.Action, "db", req.CurrrentDbName, "time_begin", req.UnixAddTimeBegin, "time_end", req.UnixAddTimeEnd, "page_index", req.PageIndex, "page_size", req.PageSize, "sort_by", req.SortBy, "sort_desc", req.SortDescending, "filter_by", req.FilterBy, "filter_value_len", len(req.FilterValue))
 		if global.GDATA_CURRENT_CHANGE {
-			//如果正在切换库 跳过
-			response.FailWithMessage("正在切换数据库请等待", c)
+			//濡傛灉姝ｅ湪鍒囨崲搴?璺宠繃
+			response.FailWithMessage("姝ｅ湪鍒囨崲鏁版嵁搴撹绛夊緟", c)
 			return
 		}
 		wafLogs, total, err2 := wafLogService.GetListApi(req)
 		if err2 != nil {
-			response.FailWithMessage("访问列表失败:"+err2.Error(), c)
+			zlog.Warn("WafLogAPI GetListApi failed", "err", err2.Error())
+			response.FailWithMessage("璁块棶鍒楄〃澶辫触:"+err2.Error(), c)
 		} else {
+			zlog.Debug("WafLogAPI GetListApi ok", "rows", len(wafLogs), "total", total)
 			response.OkWithDetailed(response.PageResult{
 				List:      wafLogs,
 				Total:     total,
 				PageIndex: req.PageIndex,
 				PageSize:  req.PageSize,
-			}, "获取成功", c)
+			}, "鑾峰彇鎴愬姛", c)
 		}
 
 	} else {
-		response.FailWithMessage("解析失败", c)
+		response.FailWithMessage("瑙ｆ瀽澶辫触", c)
 	}
 }
 func (w *WafLogAPi) ExportDBApi(c *gin.Context) {
 	if global.GWAF_CAN_EXPORT_DOWNLOAD_LOG == false {
-		// 使用操作结果消息格式
+		// 浣跨敤鎿嶄綔缁撴灉娑堟伅鏍煎紡
 		serverName := global.GWAF_CUSTOM_SERVER_NAME
 		if serverName == "" {
-			serverName = "未命名服务器"
+			serverName = "鏈懡鍚嶆湇鍔″櫒"
 		}
 		global.GQEQUE_MESSAGE_DB.Enqueue(innerbean.OpResultMessageInfo{
 			BaseMessageInfo: innerbean.BaseMessageInfo{
-				OperaType: "导出失败",
+				OperaType: "瀵煎嚭澶辫触",
 				Server:    serverName,
 			},
-			Msg:     "当前不允许导出",
+			Msg:     "褰撳墠涓嶅厑璁稿鍑?,
 			Success: "false",
 		})
-		response.FailWithMessage("当前不允许导出", c)
+		response.FailWithMessage("褰撳墠涓嶅厑璁稿鍑?, c)
 		return
 	}
 	if global.GDATA_CURRENT_CHANGE {
-		//如果正在切换库 跳过
-		response.FailWithMessage("正在切换数据库请等待", c)
+		//濡傛灉姝ｅ湪鍒囨崲搴?璺宠繃
+		response.FailWithMessage("姝ｅ湪鍒囨崲鏁版嵁搴撹绛夊緟", c)
 		return
 	}
-	//TODO 必须再验证一次权限
-	//是否生成了 还没下载
+	//TODO 蹇呴』鍐嶉獙璇佷竴娆℃潈闄?
+	//鏄惁鐢熸垚浜?杩樻病涓嬭浇
 	if len(global.GWAF_RUNTIME_CURRENT_EXPORT_DB_LOG_FILE_PATH) > 0 {
-		response.FailWithMessage("文件还未下载请等待", c)
+		response.FailWithMessage("鏂囦欢杩樻湭涓嬭浇璇风瓑寰?, c)
 		return
 	}
 
 	go func() {
 		currentDir := utils.GetCurrentDir()
 		downLoadDir := currentDir + "/download"
-		// 判断备份目录是否存在，不存在则创建
+		// 鍒ゆ柇澶囦唤鐩綍鏄惁瀛樺湪锛屼笉瀛樺湪鍒欏垱寤?
 		if _, err := os.Stat(downLoadDir); os.IsNotExist(err) {
 			if err := os.MkdirAll(downLoadDir, os.ModePerm); err != nil {
-				zlog.Error("创建下载目录失败:", err)
+				zlog.Error("鍒涘缓涓嬭浇鐩綍澶辫触:", err)
 				return
 			}
 		}
-		//处理老旧数据
+		//澶勭悊鑰佹棫鏁版嵁
 		duration := 30 * time.Minute
 		utils.DeleteOldFiles(downLoadDir, duration)
 
-		// 创建下载文件
+		// 鍒涘缓涓嬭浇鏂囦欢
 		downloadFileName := fmt.Sprintf("local_log_backup_%s.db", time.Now().Format("20060102150405"))
 		downloadFilePath := filepath.Join(downLoadDir, downloadFileName)
 		err := wafdb.BackupDatabase(global.GWAF_LOCAL_LOG_DB, downloadFilePath)
 		if err != nil {
 			global.GQEQUE_MESSAGE_DB.Enqueue(innerbean.OpResultMessageInfo{
 				BaseMessageInfo: innerbean.BaseMessageInfo{OperaType: "DOWNLOAD_LOG", Server: global.GWAF_CUSTOM_SERVER_NAME},
-				Msg:             "导出失败",
+				Msg:             "瀵煎嚭澶辫触",
 				Success:         "true",
 			})
 		} else {
 			global.GWAF_RUNTIME_CURRENT_EXPORT_DB_LOG_FILE_PATH = downloadFilePath
-			//发送websocket 推送消息
+			//鍙戦€亀ebsocket 鎺ㄩ€佹秷鎭?
 			global.GQEQUE_MESSAGE_DB.Enqueue(innerbean.ExportResultMessageInfo{
 				BaseMessageInfo: innerbean.BaseMessageInfo{OperaType: "DOWNLOAD_LOG", Server: global.GWAF_CUSTOM_SERVER_NAME},
-				Msg:             "导出完毕",
+				Msg:             "瀵煎嚭瀹屾瘯",
 				Success:         "true",
 			})
 		}
@@ -154,31 +157,31 @@ func (w *WafLogAPi) ExportDBApi(c *gin.Context) {
 }
 func (w *WafLogAPi) DownloadApi(c *gin.Context) {
 	if global.GWAF_CAN_EXPORT_DOWNLOAD_LOG == false {
-		// 使用操作结果消息格式
+		// 浣跨敤鎿嶄綔缁撴灉娑堟伅鏍煎紡
 		serverName := global.GWAF_CUSTOM_SERVER_NAME
 		if serverName == "" {
-			serverName = "未命名服务器"
+			serverName = "鏈懡鍚嶆湇鍔″櫒"
 		}
 		global.GQEQUE_MESSAGE_DB.Enqueue(innerbean.OpResultMessageInfo{
 			BaseMessageInfo: innerbean.BaseMessageInfo{
-				OperaType: "下载失败",
+				OperaType: "涓嬭浇澶辫触",
 				Server:    serverName,
 			},
-			Msg:     "当前不允许下载",
+			Msg:     "褰撳墠涓嶅厑璁镐笅杞?,
 			Success: "false",
 		})
-		c.JSON(http.StatusInternalServerError, gin.H{"message": "当前不允许下载"})
+		c.JSON(http.StatusInternalServerError, gin.H{"message": "褰撳墠涓嶅厑璁镐笅杞?})
 		return
 	}
 	if len(global.GWAF_RUNTIME_CURRENT_EXPORT_DB_LOG_FILE_PATH) == 0 {
 		c.JSON(http.StatusInternalServerError, gin.H{"message": "Failed to download file,not find file"})
 		return
 	}
-	// 提供文件下载
+	// 鎻愪緵鏂囦欢涓嬭浇
 	c.FileAttachment(global.GWAF_RUNTIME_CURRENT_EXPORT_DB_LOG_FILE_PATH, "log.db")
 
 	global.GWAF_RUNTIME_CURRENT_EXPORT_DB_LOG_FILE_PATH = ""
-	// 下载完成后删除文件
+	// 涓嬭浇瀹屾垚鍚庡垹闄ゆ枃浠?
 	err := os.Remove(global.GWAF_RUNTIME_CURRENT_EXPORT_DB_LOG_FILE_PATH)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"message": "Failed to delete file"})
@@ -190,8 +193,8 @@ func (w *WafLogAPi) GetListByHostCodeApi(c *gin.Context) {
 	err := c.ShouldBind(&req)
 	if err == nil {
 		if global.GDATA_CURRENT_CHANGE {
-			//如果正在切换库 跳过
-			response.FailWithMessage("正在切换数据库请等待", c)
+			//濡傛灉姝ｅ湪鍒囨崲搴?璺宠繃
+			response.FailWithMessage("姝ｅ湪鍒囨崲鏁版嵁搴撹绛夊緟", c)
 			return
 		}
 		wafLogs, total, _ := wafLogService.GetListByHostCodeApi(req)
@@ -200,15 +203,15 @@ func (w *WafLogAPi) GetListByHostCodeApi(c *gin.Context) {
 			Total:     total,
 			PageIndex: req.PageIndex,
 			PageSize:  req.PageSize,
-		}, "获取成功", c)
+		}, "鑾峰彇鎴愬姛", c)
 	} else {
-		response.FailWithMessage("解析失败", c)
+		response.FailWithMessage("瑙ｆ瀽澶辫触", c)
 	}
 }
 
 func (w *WafLogAPi) GetAllShareDbApi(c *gin.Context) {
 	wafShareList, _ := wafShareDbService.GetAllShareDbApi()
-	allShareDbRep := make([]response2.AllShareDbRep, len(wafShareList)) // 创建数组
+	allShareDbRep := make([]response2.AllShareDbRep, len(wafShareList)) // 鍒涘缓鏁扮粍
 	for i, _ := range wafShareList {
 
 		allShareDbRep[i] = response2.AllShareDbRep{
@@ -219,95 +222,95 @@ func (w *WafLogAPi) GetAllShareDbApi(c *gin.Context) {
 		}
 
 	}
-	response.OkWithDetailed(allShareDbRep, "获取成功", c)
+	response.OkWithDetailed(allShareDbRep, "鑾峰彇鎴愬姛", c)
 }
 
-// http 原始请求并进行脱敏处理
+// http 鍘熷璇锋眰骞惰繘琛岃劚鏁忓鐞?
 func (w *WafLogAPi) GetHttpCopyMaskApi(c *gin.Context) {
 	var req request.WafAttackLogDetailReq
 	err := c.ShouldBind(&req)
 	if err == nil {
 		if global.GDATA_CURRENT_CHANGE {
-			//如果正在切换库 跳过
-			response.FailWithMessage("正在切换数据库请等待", c)
+			//濡傛灉姝ｅ湪鍒囨崲搴?璺宠繃
+			response.FailWithMessage("姝ｅ湪鍒囨崲鏁版嵁搴撹绛夊緟", c)
 			return
 		}
 		wafLog, _ := wafLogService.GetDetailApi(req)
 
 		if req.OutputFormat == "curl" {
-			response.OkWithDetailed(GenerateCurlRequest(wafLog), "获取成功", c)
+			response.OkWithDetailed(GenerateCurlRequest(wafLog), "鑾峰彇鎴愬姛", c)
 		} else {
-			response.OkWithDetailed(GenerateRawHTTPRequest(wafLog), "获取成功", c)
+			response.OkWithDetailed(GenerateRawHTTPRequest(wafLog), "鑾峰彇鎴愬姛", c)
 		}
 
 	} else {
-		response.FailWithMessage("解析失败", c)
+		response.FailWithMessage("瑙ｆ瀽澶辫触", c)
 	}
 }
 
-// GetAttackIPListApi 获取风险数据列表
+// GetAttackIPListApi 鑾峰彇椋庨櫓鏁版嵁鍒楄〃
 func (w *WafLogAPi) GetAttackIPListApi(c *gin.Context) {
 	var req request.WafAttackIpTagSearch
 	err := c.ShouldBindJSON(&req)
 	if err == nil {
 		ipAttackTags, total, err2 := wafLogService.GetAttackIpListApi(req)
 		if err2 != nil {
-			response.FailWithMessage("访问列表失败:"+err2.Error(), c)
+			response.FailWithMessage("璁块棶鍒楄〃澶辫触:"+err2.Error(), c)
 		} else {
 			response.OkWithDetailed(response.PageResult{
 				List:      ipAttackTags,
 				Total:     total,
 				PageIndex: req.PageIndex,
 				PageSize:  req.PageSize,
-			}, "获取成功", c)
+			}, "鑾峰彇鎴愬姛", c)
 		}
 
 	} else {
-		response.FailWithMessage("解析失败", c)
+		response.FailWithMessage("瑙ｆ瀽澶辫触", c)
 	}
 }
 
-// GetAllIpTagApi 获取所有ip tag
+// GetAllIpTagApi 鑾峰彇鎵€鏈塱p tag
 func (w *WafLogAPi) GetAllIpTagApi(c *gin.Context) {
 
 	ipAttackTags, err2 := wafLogService.GetAllAttackIPTagListApi()
 	if err2 != nil {
-		response.FailWithMessage("访问ip tag 失败:"+err2.Error(), c)
+		response.FailWithMessage("璁块棶ip tag 澶辫触:"+err2.Error(), c)
 	} else {
-		response.OkWithDetailed(ipAttackTags, "获取成功", c)
+		response.OkWithDetailed(ipAttackTags, "鑾峰彇鎴愬姛", c)
 	}
 }
 
-// DeleteTagByNameApi 删除指定标签
+// DeleteTagByNameApi 鍒犻櫎鎸囧畾鏍囩
 func (w *WafLogAPi) DeleteTagByNameApi(c *gin.Context) {
 	var req request.WafAttackTagDeleteReq
 	err := c.ShouldBindJSON(&req)
 	if err != nil {
-		response.FailWithMessage("参数解析失败: "+err.Error(), c)
+		response.FailWithMessage("鍙傛暟瑙ｆ瀽澶辫触: "+err.Error(), c)
 		return
 	}
 
 	if global.GDATA_CURRENT_CHANGE {
-		//如果正在切换库 跳过
-		response.FailWithMessage("正在切换数据库请等待", c)
+		//濡傛灉姝ｅ湪鍒囨崲搴?璺宠繃
+		response.FailWithMessage("姝ｅ湪鍒囨崲鏁版嵁搴撹绛夊緟", c)
 		return
 	}
 
-	// 验证标签名称
-	if req.TagName == "" || req.TagName == "正常" {
-		response.FailWithMessage("无效的标签名称", c)
+	// 楠岃瘉鏍囩鍚嶇О
+	if req.TagName == "" || req.TagName == "姝ｅ父" {
+		response.FailWithMessage("鏃犳晥鐨勬爣绛惧悕绉?, c)
 		return
 	}
 
-	// 执行删除
+	// 鎵ц鍒犻櫎
 	err2 := wafLogService.DeleteTagByNameApi(req.TagName, req.DeleteLogs)
 	if err2 != nil {
-		response.FailWithMessage("删除失败: "+err2.Error(), c)
+		response.FailWithMessage("鍒犻櫎澶辫触: "+err2.Error(), c)
 	} else {
 		if req.DeleteLogs {
-			response.OkWithMessage("标签及相关日志删除成功", c)
+			response.OkWithMessage("鏍囩鍙婄浉鍏虫棩蹇楀垹闄ゆ垚鍔?, c)
 		} else {
-			response.OkWithMessage("标签统计数据删除成功", c)
+			response.OkWithMessage("鏍囩缁熻鏁版嵁鍒犻櫎鎴愬姛", c)
 		}
 	}
 }
@@ -322,27 +325,27 @@ func GenerateRawHTTPRequest(weblog innerbean.WebLog) string {
 		return ""
 	}
 
-	// 构建请求行
+	// 鏋勫缓璇锋眰琛?
 	pathWithQuery := parsedURL.Path
 	if parsedURL.RawQuery != "" {
 		pathWithQuery += "?" + parsedURL.RawQuery
 	}
 
-	// 根据协议确定 HTTP 版本
+	// 鏍规嵁鍗忚纭畾 HTTP 鐗堟湰
 	httpVersion := "HTTP/1.1"
 	if weblog.Scheme != "" {
 		httpVersion = weblog.Scheme
 	}
 
-	// 处理敏感头信息
+	// 澶勭悊鏁忔劅澶翠俊鎭?
 	maskedHeaders := maskSensitiveHeader(weblog.HEADER)
 	headers := strings.Split(maskedHeaders, "\n")
 
-	// 处理 Cookie
+	// 澶勭悊 Cookie
 	maskedCookies := maskSensitiveCookies(weblog.COOKIES)
 	if maskedCookies != "" {
 		cookieHeader := fmt.Sprintf("Cookie: %s", maskedCookies)
-		// 替换或添加 Cookie 头
+		// 鏇挎崲鎴栨坊鍔?Cookie 澶?
 		cookieFound := false
 		for i, h := range headers {
 			if strings.HasPrefix(strings.TrimSpace(h), "Cookie:") {
@@ -356,7 +359,7 @@ func GenerateRawHTTPRequest(weblog innerbean.WebLog) string {
 		}
 	}
 
-	// 确保 Host 头存在
+	// 纭繚 Host 澶村瓨鍦?
 	host := parsedURL.Host
 	if host != "" {
 		hostExists := false
@@ -371,7 +374,7 @@ func GenerateRawHTTPRequest(weblog innerbean.WebLog) string {
 		}
 	}
 
-	// 构建最终 header
+	// 鏋勫缓鏈€缁?header
 	var cleanHeaders []string
 	for _, h := range headers {
 		if trimmed := strings.TrimSpace(h); trimmed != "" {
@@ -379,7 +382,7 @@ func GenerateRawHTTPRequest(weblog innerbean.WebLog) string {
 		}
 	}
 
-	// 构建完整请求
+	// 鏋勫缓瀹屾暣璇锋眰
 	requestLines := []string{
 		fmt.Sprintf("%s %s %s",
 			weblog.METHOD,
@@ -389,7 +392,7 @@ func GenerateRawHTTPRequest(weblog innerbean.WebLog) string {
 	}
 	requestLines = append(requestLines, cleanHeaders...)
 
-	// 添加 body（如果有）
+	// 娣诲姞 body锛堝鏋滄湁锛?
 	if weblog.BODY != "" {
 		requestLines = append(requestLines, "", weblog.BODY)
 	}

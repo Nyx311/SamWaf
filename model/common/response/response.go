@@ -1,11 +1,14 @@
-package response
+﻿package response
 
 import (
+	"SamWaf/common/zlog"
 	"SamWaf/global"
 	"SamWaf/wafsec"
 	"encoding/json"
-	"github.com/gin-gonic/gin"
 	"net/http"
+	"strings"
+
+	"github.com/gin-gonic/gin"
 )
 
 type Response struct {
@@ -23,23 +26,20 @@ const (
 )
 
 func Result(code int, data interface{}, msg string, c *gin.Context) {
-	// OpenAPI 请求直接返回明文 JSON，不做 AES 加密
 	if isOpenApi, exists := c.Get("is_openapi"); exists && isOpenApi == true {
-		c.JSON(http.StatusOK, Response{
-			code,
-			data,
-			msg,
-		})
+		c.JSON(http.StatusOK, Response{code, data, msg})
 		return
 	}
-	result, _ := json.Marshal(data) //将数据转换为json
-	encryptStr, _ := wafsec.AesEncrypt(result, global.GWAF_COMMUNICATION_KEY)
-	// 开始时间
-	c.JSON(http.StatusOK, Response{
-		code,
-		encryptStr,
-		msg,
-	})
+
+	result, _ := json.Marshal(data)
+	encryptStr, encErr := wafsec.AesEncrypt(result, global.GWAF_COMMUNICATION_KEY)
+	if encErr != nil {
+		zlog.Warn("Response AES encrypt failed", "path", c.Request.URL.Path, "code", code, "msg", msg, "plain_len", len(result), "err", encErr.Error())
+	} else if c != nil && strings.HasPrefix(c.Request.URL.Path, "/api/v1/waflog/attack/") {
+		zlog.Debug("Response AES encrypt ok", "path", c.Request.URL.Path, "code", code, "msg", msg, "plain_len", len(result), "cipher_len", len(encryptStr))
+	}
+
+	c.JSON(http.StatusOK, Response{code, encryptStr, msg})
 }
 
 func Ok(c *gin.Context) {
@@ -69,12 +69,15 @@ func FailWithMessage(message string, c *gin.Context) {
 func FailWithDetailed(data interface{}, message string, c *gin.Context) {
 	Result(ERROR, data, message, c)
 }
+
 func AuthFailWithMessage(message string, c *gin.Context) {
 	Result(AUTHFAIL, map[string]interface{}{}, message, c)
 }
+
 func SecretCodeFailWithMessage(message string, c *gin.Context) {
 	Result(INPUT_SECRET_CODE, map[string]interface{}{}, message, c)
 }
+
 func NeedBind2FAWithMessage(message string, c *gin.Context) {
 	Result(NEED_BIND_2FA, map[string]interface{}{}, message, c)
 }
