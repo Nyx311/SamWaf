@@ -76,9 +76,10 @@ var (
 	GWAF_TENANT_ID          string   = "SamWafCom" // 当前租户ID
 
 	//管理端访问控制
-	GWAF_IP_WHITELIST         string = "0.0.0.0/0,::/0" //IP白名单 后台默认放行所有
-	GWAF_SSL_ENABLE           bool   = false            //是否启用SSL证书
-	GWAF_FINGERPRINT_DEBUG_LOG bool  = false            //是否开启指纹详细调试日志
+	GWAF_IP_WHITELIST          string = "0.0.0.0/0,::/0" //IP白名单 后台默认放行所有
+	GWAF_SSL_ENABLE            bool   = false            //是否启用SSL证书
+	GWAF_SECURITY_ENTRY_ENABLE bool   = false            //是否启用安全路径入口
+	GWAF_SECURITY_ENTRY_PATH   string = ""               //安全路径（18位随机码）
 
 	//zlog 日志相关信息
 	GWAF_LOG_OUTPUT_FORMAT       string              = "console"  //zlog输出格式 控制台格式console,json格式
@@ -89,6 +90,7 @@ var (
 	GWAF_RELEASE_VERSION         string              = "v1.0.0"   // 发行版的版本号
 	GWAF_LAST_UPDATE_TIME        time.Time                        // 上次时间
 	GWAF_NOTICE_ENABLE           bool                = false      // 是否开启通知
+	GWAF_NOTICE_TITLE            string                           // 通知消息标题前缀（用于区分多实例，默认使用 custom_server_name）
 	GWAF_CAN_EXPORT_DOWNLOAD_LOG bool                = false      //是否可以导出下载日志
 	GWAF_DLP                     dlpheader.EngineAPI              // 脱敏引擎
 	GWAF_DLP_CONFIG              string                           // 脱敏引擎配置数据

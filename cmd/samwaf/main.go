@@ -3,6 +3,7 @@ package main
 import (
 	"SamWaf/cache"
 	"SamWaf/common/gwebsocket"
+	"SamWaf/common/tasklog"
 	"SamWaf/common/zlog"
 	"SamWaf/enums"
 	"SamWaf/global"
@@ -51,6 +52,7 @@ import (
 	dlp "github.com/bytedance/godlp"
 	"github.com/kardianos/service"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"gorm.io/gorm"
 )
 
@@ -323,6 +325,11 @@ func (m *wafSystenService) run() {
 
 	//初始化一次系统参数信息
 	waftask.TaskLoadSetting(true)
+	// 初始化任务日志管理器（需在 TaskLoadSetting 后执行，以获取正确的 retainDays 配置）
+	taskLogDir := filepath.Join(utils.GetCurrentDir(), "logs", "task")
+	tasklog.InitGlobalTaskLogManager(taskLogDir, int(global.GCONFIG_TASK_LOG_RETAIN_DAYS))
+	// 将 TaskZapCore 挂到全局 zlog，使任务执行期间的 zlog 输出同步写入任务日志文件
+	zlog.AddCore(tasklog.NewTaskZapCore(zapcore.DebugLevel))
 	//启动通知相关程序
 	global.GNOTIFY_KAKFA_SERVICE = wafnotify.InitNotifyKafkaEngine(global.GCONFIG_RECORD_KAFKA_ENABLE, global.GCONFIG_RECORD_KAFKA_URL, global.GCONFIG_RECORD_KAFKA_TOPIC) //kafka
 	// 日志文件写入
@@ -399,6 +406,7 @@ func (m *wafSystenService) run() {
 	globalobj.GWAF_RUNTIME_OBJ_WAF_TaskRegistry.RegisterTask(enums.TASK_STATS_PUSH, waftask.TaskStatsPush)
 	globalobj.GWAF_RUNTIME_OBJ_WAF_TaskRegistry.RegisterTask(enums.TASK_DB_MONITOR, waftask.TaskDatabaseMonitor)
 	globalobj.GWAF_RUNTIME_OBJ_WAF_TaskRegistry.RegisterTask(enums.TASK_FIREWALL_CLEAN_EXPIRED, waftask.TaskFirewallCleanExpired)
+	globalobj.GWAF_RUNTIME_OBJ_WAF_TaskRegistry.RegisterTask(enums.TASK_STATS_DATA_CLEANUP, waftask.TaskStatsDataCleanup)
 
 	go waftask.TaskShareDbInfo()
 
@@ -455,7 +463,13 @@ func (m *wafSystenService) run() {
 		zlog.Info("regInfo", err)
 	}
 
-	zlog.Info("SamWaf has started successfully.You can open http://127.0.0.1:" + strconv.Itoa(global.GWAF_LOCAL_SERVER_PORT) + " in your Browser")
+	if global.GWAF_SECURITY_ENTRY_ENABLE && global.GWAF_SECURITY_ENTRY_PATH != "" {
+		zlog.Info("SamWaf has started successfully.")
+		zlog.Info("Security Entry Path Enabled! Your access code is: " + global.GWAF_SECURITY_ENTRY_PATH)
+		zlog.Info("Access URL: http://127.0.0.1:" + strconv.Itoa(global.GWAF_LOCAL_SERVER_PORT) + "/" + global.GWAF_SECURITY_ENTRY_PATH + "/")
+	} else {
+		zlog.Info("SamWaf has started successfully.You can open http://127.0.0.1:" + strconv.Itoa(global.GWAF_LOCAL_SERVER_PORT) + " in your Browser")
+	}
 	for {
 		select {
 		case msg := <-global.GWAF_CHAN_MSG:

@@ -17,10 +17,14 @@ type WafStatApi struct {
 // @Produce      json
 // @Success      200  {object}  response.Response  "获取成功"
 // @Security     ApiKeyAuth
-// @Router       /stat/sysinfo [get]
+// @Router       /statsysinfo [get]
 func (w *WafStatApi) StatSysinfoApi(c *gin.Context) {
-
-	response.OkWithDetailed(wafStatService.StatHomeSysinfo(c), "获取成功", c)
+	data, err := wafStatService.StatHomeSysinfo(c)
+	if err != nil {
+		response.FailWithMessage(err.Error(), c)
+		return
+	}
+	response.OkWithDetailed(data, "获取成功", c)
 }
 
 // StatRumtimeSysinfoApi 获取运行时系统基本信息
@@ -30,7 +34,7 @@ func (w *WafStatApi) StatSysinfoApi(c *gin.Context) {
 // @Produce      json
 // @Success      200  {object}  response.Response  "获取成功"
 // @Security     ApiKeyAuth
-// @Router       /stat/runtimesysinfo [get]
+// @Router       /statrumtimesysinfo [get]
 func (w *WafStatApi) StatRumtimeSysinfoApi(c *gin.Context) {
 
 	response.OkWithDetailed(wafStatService.StatHomeRumtimeSysinfo(), "获取成功", c)
@@ -43,7 +47,7 @@ func (w *WafStatApi) StatRumtimeSysinfoApi(c *gin.Context) {
 // @Produce      json
 // @Success      200  {object}  response.Response  "获取成功"
 // @Security     ApiKeyAuth
-// @Router       /stat/daytotal [get]
+// @Router       /wafstatsumday [get]
 func (w *WafStatApi) StatHomeSumDayApi(c *gin.Context) {
 
 	wafStat, _ := wafStatService.StatHomeSumDayApi()
@@ -59,7 +63,7 @@ func (w *WafStatApi) StatHomeSumDayApi(c *gin.Context) {
 // @Param        data  body      request.WafStatsDayRangeReq  true  "日期范围参数"
 // @Success      200   {object}  response.Response  "获取成功"
 // @Security     ApiKeyAuth
-// @Router       /stat/dayrangecount [post]
+// @Router       /wafstatsumdayrange [get]
 func (w *WafStatApi) StatHomeSumDayRangeApi(c *gin.Context) {
 	var req request.WafStatsDayRangeReq
 	err := c.ShouldBind(&req)
@@ -81,7 +85,7 @@ func (w *WafStatApi) StatHomeSumDayRangeApi(c *gin.Context) {
 // @Param        data  body      request.WafStatsDayRangeReq  true  "日期范围参数"
 // @Success      200   {object}  response.Response  "获取成功"
 // @Security     ApiKeyAuth
-// @Router       /stat/ipcount [post]
+// @Router       /wafstatsumdaytopiprange [get]
 func (w *WafStatApi) StatHomeSumDayTopIPRangeApi(c *gin.Context) {
 	var req request.WafStatsDayRangeReq
 	err := c.ShouldBind(&req)
@@ -103,7 +107,7 @@ func (w *WafStatApi) StatHomeSumDayTopIPRangeApi(c *gin.Context) {
 // @Param        end_day    query     string  false  "结束日期 如 20260310"
 // @Success      200        {object}  response.Response  "获取成功"
 // @Security     ApiKeyAuth
-// @Router       /stat/siteoverview [get]
+// @Router       /wafstatsiteoverview [get]
 func (w *WafStatApi) StatSiteOverviewApi(c *gin.Context) {
 	var req request.WafStatsSiteOverviewReq
 	err := c.ShouldBind(&req)
@@ -124,7 +128,7 @@ func (w *WafStatApi) StatSiteOverviewApi(c *gin.Context) {
 // @Param        time_range  query     string  true   "时间范围:  24h | 7d | 30d"
 // @Success      200         {object}  response.Response  "获取成功"
 // @Security     ApiKeyAuth
-// @Router       /stat/sitedetail [get]
+// @Router       /wafstatsitedetail [get]
 func (w *WafStatApi) StatSiteDetailApi(c *gin.Context) {
 	var req request.WafStatsSiteDetailReq
 	err := c.ShouldBind(&req)

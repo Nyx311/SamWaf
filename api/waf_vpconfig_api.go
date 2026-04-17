@@ -11,8 +11,10 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -34,17 +36,49 @@ type WafVpConfigApi struct {
 func (w *WafVpConfigApi) UpdateIpWhitelistApi(c *gin.Context) {
 	var req request.WafVpConfigIpWhitelistUpdateReq
 	err := c.ShouldBindJSON(&req)
-	if err == nil {
-
-		// 调用配置文件更新函数
-		err = wafconfig.UpdateIpWhitelist(req.IpWhitelist)
-		if err != nil {
-			response.FailWithMessage("更新IP白名单失败: "+err.Error(), c)
-		} else {
-			response.OkWithMessage("更新IP白名单成功", c)
-		}
-	} else {
+	if err != nil {
 		response.FailWithMessage("解析请求失败", c)
+		return
+	}
+
+	// 防护1：不允许提交空白名单，避免所有人被锁在外面
+	if strings.TrimSpace(req.IpWhitelist) == "" {
+		response.FailWithMessage("IP白名单不能为空，否则将无法访问管理端", c)
+		return
+	}
+
+	// 防护2：新白名单必须包含当前请求方的 IP，防止把自己锁在外面
+	clientIP := c.ClientIP()
+	entries := strings.Split(req.IpWhitelist, ",")
+	selfIncluded := false
+	for _, entry := range entries {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		if strings.Contains(entry, "/") {
+			// CIDR 格式
+			_, ipNet, cidrErr := net.ParseCIDR(entry)
+			if cidrErr == nil && ipNet.Contains(net.ParseIP(clientIP)) {
+				selfIncluded = true
+				break
+			}
+		} else if entry == clientIP {
+			selfIncluded = true
+			break
+		}
+	}
+	if !selfIncluded {
+		response.FailWithMessage(fmt.Sprintf("当前访问IP(%s)不在新白名单中，保存后将无法访问管理端，请先将自己的IP加入白名单", clientIP), c)
+		return
+	}
+
+	// 调用配置文件更新函数
+	err = wafconfig.UpdateIpWhitelist(req.IpWhitelist)
+	if err != nil {
+		response.FailWithMessage("更新IP白名单失败: "+err.Error(), c)
+	} else {
+		response.OkWithMessage("更新IP白名单成功", c)
 	}
 }
 
@@ -314,6 +348,96 @@ func getCertInfo(certPath string) CertInfo {
 	}
 
 	return info
+}
+
+// GetSecurityEntryApi 获取安全路径入口配置
+// @Summary      获取安全路径入口配置
+// @Description  获取当前安全路径入口的启用状态及访问码
+// @Tags         管理端配置
+// @Accept       json
+// @Produce      json
+// @Success      200  {object}  response.Response  "获取成功"
+// @Security     ApiKeyAuth
+// @Router       /vipconfig/getSecurityEntry [get]
+func (w *WafVpConfigApi) GetSecurityEntryApi(c *gin.Context) {
+	resp := response2.WafVpConfigSecurityEntryGetResp{
+		EntryEnable: global.GWAF_SECURITY_ENTRY_ENABLE,
+		EntryPath:   global.GWAF_SECURITY_ENTRY_PATH,
+	}
+	response.OkWithDetailed(resp, "获取成功", c)
+}
+
+// UpdateSecurityEntryApi 更新安全路径入口配置
+// @Summary      更新安全路径入口配置
+// @Description  开启/关闭安全路径入口，路径为空时自动生成18位随机码，立即生效无需重启
+// @Tags         管理端配置
+// @Accept       json
+// @Produce      json
+// @Param        data  body      request.WafVpConfigSecurityEntryUpdateReq  true  "安全路径配置"
+// @Success      200   {object}  response.Response  "更新成功"
+// @Security     ApiKeyAuth
+// @Router       /vipconfig/updateSecurityEntry [post]
+func (w *WafVpConfigApi) UpdateSecurityEntryApi(c *gin.Context) {
+	var req request.WafVpConfigSecurityEntryUpdateReq
+	err := c.ShouldBindJSON(&req)
+	if err != nil {
+		response.FailWithMessage("解析请求失败", c)
+		return
+	}
+	err = wafconfig.UpdateSecurityEntry(req.EntryEnable, req.EntryPath)
+	if err != nil {
+		response.FailWithMessage("更新安全路径配置失败: "+err.Error(), c)
+		return
+	}
+	resp := response2.WafVpConfigSecurityEntryGetResp{
+		EntryEnable: global.GWAF_SECURITY_ENTRY_ENABLE,
+		EntryPath:   global.GWAF_SECURITY_ENTRY_PATH,
+	}
+	response.OkWithDetailed(resp, "更新安全路径配置成功", c)
+}
+
+// GetNoticeTitleApi 获取通知标题前缀
+// @Summary      获取通知标题前缀
+// @Description  获取当前通知消息的标题前缀，用于区分多个 SamWaf 实例
+// @Tags         管理端配置
+// @Accept       json
+// @Produce      json
+// @Success      200  {object}  response.Response  "获取成功"
+// @Security     ApiKeyAuth
+// @Router       /vipconfig/getNoticeTitle [get]
+func (w *WafVpConfigApi) GetNoticeTitleApi(c *gin.Context) {
+	resp := response2.WafVpConfigNoticeTitleGetResp{
+		NoticeTitle: global.GWAF_NOTICE_TITLE,
+	}
+	response.OkWithDetailed(resp, "获取成功", c)
+}
+
+// UpdateNoticeTitleApi 更新通知标题前缀
+// @Summary      更新通知标题前缀
+// @Description  更新通知消息的标题前缀，立即生效无需重启，用于区分多个 SamWaf 实例
+// @Tags         管理端配置
+// @Accept       json
+// @Produce      json
+// @Param        data  body      request.WafVpConfigNoticeTitleUpdateReq  true  "通知标题配置"
+// @Success      200   {object}  response.Response  "更新成功"
+// @Security     ApiKeyAuth
+// @Router       /vipconfig/updateNoticeTitle [post]
+func (w *WafVpConfigApi) UpdateNoticeTitleApi(c *gin.Context) {
+	var req request.WafVpConfigNoticeTitleUpdateReq
+	err := c.ShouldBindJSON(&req)
+	if err != nil {
+		response.FailWithMessage("解析请求失败", c)
+		return
+	}
+	err = wafconfig.UpdateNoticeTitle(req.NoticeTitle)
+	if err != nil {
+		response.FailWithMessage("更新通知标题失败: "+err.Error(), c)
+		return
+	}
+	resp := response2.WafVpConfigNoticeTitleGetResp{
+		NoticeTitle: global.GWAF_NOTICE_TITLE,
+	}
+	response.OkWithDetailed(resp, "更新通知标题成功", c)
 }
 
 // RestartManagerApi 重启管理端
