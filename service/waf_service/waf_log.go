@@ -1,4 +1,4 @@
-﻿package waf_service
+package waf_service
 
 import (
 	"SamWaf/common/validfield"
@@ -41,13 +41,13 @@ func (receiver *WafLogService) GetListApi(req request.WafAttackLogSearch) ([]inn
 
 	splitFilterBys := strings.Split(req.FilterBy, "|")
 	splitFilterValues := strings.Split(req.FilterValue, "|")
-	/*寮哄埗绱㈠紩*/
+	/*强制索引*/
 	var forceIndex = "web_logs"
-	/*where鏉′欢*/
+	/*where条件*/
 	var whereField = ""
 	var whereValues []interface{}
 
-	//where瀛楁
+	//where字段
 	{
 		whereField = whereField + " (unix_add_time>=? and unix_add_time<=?)"
 		if len(req.HostCode) > 0 {
@@ -114,7 +114,7 @@ func (receiver *WafLogService) GetListApi(req request.WafAttackLogSearch) ([]inn
 			}
 		}
 	}
-	//寮哄埗绱㈠紩
+	//强制索引
 	{
 		if strings.Contains(whereField, "unix_add_time") && !strings.Contains(whereField, "src_ip") {
 			forceIndex = "web_logs INDEXED BY  idx_web_time_desc_tenant_user_code"
@@ -123,7 +123,7 @@ func (receiver *WafLogService) GetListApi(req request.WafAttackLogSearch) ([]inn
 		}
 	}
 
-	// 灏嗗瓧绗︿覆杞崲涓?int64 绫诲瀷
+	// 灏嗗瓧绗︿覆杞崲涓?int64 类型
 	unixBegin, err := strconv.ParseInt(req.UnixAddTimeBegin, 10, 64)
 	if err != nil {
 		zlog.Warn("WafLogService parse UnixAddTimeBegin failed", "value", req.UnixAddTimeBegin, "err", err.Error())
@@ -136,7 +136,7 @@ func (receiver *WafLogService) GetListApi(req request.WafAttackLogSearch) ([]inn
 
 	}
 
-	//where瀛楁璧嬪€?
+	//where字段璧嬪€?
 	{
 		whereValues = append(whereValues, unixBegin)
 		whereValues = append(whereValues, unixEnd)
@@ -174,7 +174,7 @@ func (receiver *WafLogService) GetListApi(req request.WafAttackLogSearch) ([]inn
 	orderInfo := ""
 
 	/**
-	鎺掑簭
+	排序
 	*/
 	if receiver.isValidSortField(req.SortBy) {
 		if req.SortDescending == "desc" {
@@ -210,7 +210,7 @@ func (receiver *WafLogService) DeleteHistory(day string) {
 	global.GWAF_LOCAL_LOG_DB.Where("create_time < ?", day).Delete(&innerbean.WebLog{})
 }
 
-// GetUnixTimeByCounter 渚濇嵁寮€濮嬫椂闂村拰鍒版湡鏃堕棿鑾峰彇涓€涓渶鏂扮殑鏃堕棿鎴?
+// GetUnixTimeByCounter 依据开始时间和到期时间获取一个最新的时间戳
 func (receiver *WafLogService) GetUnixTimeByCounter(lastStartCreateUnix int64, lastEndCreateUnix int64) innerbean.WebLog {
 	var weblog innerbean.WebLog
 	forceIndex := "web_logs INDEXED BY  idx_web_time_desc_tenant_user_code"
@@ -221,7 +221,7 @@ func (receiver *WafLogService) GetUnixTimeByCounter(lastStartCreateUnix int64, l
 
 /*
 *
-鍒ゆ柇鏄惁鍚堟硶
+判断是否合法
 */
 func (receiver *WafLogService) isValidSortField(field string) bool {
 	var allowedSortFields = []string{"time_spent", "create_time", "unix_add_time"}
