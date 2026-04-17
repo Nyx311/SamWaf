@@ -360,6 +360,8 @@ func (m *wafSystenService) run() {
 	//启动隧道
 	globalobj.GWAF_RUNTIME_OBJ_TUNNEL_ENGINE = waftunnelengine.NewWafTunnelEngine()
 	globalobj.GWAF_RUNTIME_OBJ_TUNNEL_ENGINE.StartTunnel()
+	//加载网站IP黑名单数据到隧道引擎
+	globalobj.GWAF_RUNTIME_OBJ_TUNNEL_ENGINE.LoadAllIPBlockLists()
 	//启动管理界面
 	webmanager = &wafmangeweb.WafWebManager{LogName: "WebManager"}
 	go func() {
@@ -476,6 +478,10 @@ func (m *wafSystenService) run() {
 					globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostTarget[globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostCode[msg.HostCode]].IPBlockLists = msg.Content.([]model.IPBlockList)
 					zlog.Debug("远程配置", zap.Any("IPBlockLists", msg))
 					globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostTarget[globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostCode[msg.HostCode]].Mux.Unlock()
+					//通知隧道引擎同步更新IP黑名单数据
+					if globalobj.GWAF_RUNTIME_OBJ_TUNNEL_ENGINE != nil {
+						globalobj.GWAF_RUNTIME_OBJ_TUNNEL_ENGINE.UpdateIPBlockLists(msg.HostCode, msg.Content.([]model.IPBlockList))
+					}
 					break
 				case enums.ChanTypeBlockURL:
 					globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostTarget[globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostCode[msg.HostCode]].Mux.Lock()

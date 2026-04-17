@@ -163,14 +163,18 @@ func (waf *WafTunnelEngine) handleUDPData(serverConn *net.UDPConn, clientAddr *n
 	}
 
 	// 检查IP访问权限
-	if !CheckIPAccess("UDP", clientIP, clientPort, serverPort, tunnelInfo.Tunnel) {
-		zlog.Warn(fmt.Sprintf("UDP数据被拒绝 [客户端IP:%s 客户端端口:%s 服务端口:%s]",
-			clientIP, clientPort, serverPort))
+	ipResult := CheckIPAccess("UDP", clientIP, clientPort, serverPort, tunnelInfo.Tunnel, waf)
+	if !ipResult.Allow {
+		zlog.Warn(fmt.Sprintf("UDP数据被拒绝 [客户端IP:%s 客户端端口:%s 服务端口:%s 原因:%s]",
+			clientIP, clientPort, serverPort, ipResult.RuleName))
+		RecordTunnelBlockLog("UDP", clientIP, clientPort, serverPort, tunnelInfo.Tunnel, ipResult.RuleName)
 		return
 	}
 
 	// 检查时间访问权限
-	if !CheckTimeAccess("UDP", clientIP, clientPort, serverPort, tunnelInfo.Tunnel) {
+	timeResult := CheckTimeAccess("UDP", clientIP, clientPort, serverPort, tunnelInfo.Tunnel)
+	if !timeResult.Allow {
+		RecordTunnelBlockLog("UDP", clientIP, clientPort, serverPort, tunnelInfo.Tunnel, timeResult.RuleName)
 		return
 	}
 

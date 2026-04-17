@@ -102,7 +102,7 @@ func (receiver *WafLogService) GetListApi(req request.WafAttackLogSearch) ([]inn
 
 			if len(by) > 0 {
 				if !validfield.IsValidWebLogFilterField(by) {
-					return nil, 0, errors.New("杈撳叆杩囨护瀛楁涓嶅悎娉?)
+					return nil, 0, errors.New("输入过滤字段不合法")
 				}
 				if len(whereField) > 0 {
 					whereField = whereField + " and "
@@ -183,7 +183,7 @@ func (receiver *WafLogService) GetListApi(req request.WafAttackLogSearch) ([]inn
 			orderInfo = req.SortBy + " asc"
 		}
 	} else {
-		return nil, 0, errors.New("杈撳叆鎺掑簭瀛楁涓嶅悎娉?)
+		return nil, 0, errors.New("输入排序字段不合法")
 	}
 	zlog.Debug("WafLogService query info", "db", req.CurrrentDbName, "force_index", forceIndex, "where", whereField, "where_value_count", len(whereValues), "unix_begin", unixBegin, "unix_end", unixEnd, "page_index", req.PageIndex, "page_size", req.PageSize, "order", orderInfo)
 	if len(req.CurrrentDbName) == 0 || req.CurrrentDbName == "local_log.db" {

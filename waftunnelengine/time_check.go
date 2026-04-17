@@ -120,14 +120,19 @@ func IsTimeAllowed(timeRanges []TimeRange, currentTime time.Time) bool {
 }
 
 // CheckTimeAccess 检查隧道的时间访问权限
-func CheckTimeAccess(protocol string, clientIP string, clientPort string, serverPort string, tunnel model.Tunnel) bool {
+func CheckTimeAccess(protocol string, clientIP string, clientPort string, serverPort string, tunnel model.Tunnel) IPCheckResult {
 	// 解析时间范围
 	timeRanges, err := ParseTimeRanges(tunnel.AllowedTimeRanges)
 	if err != nil {
 		zlog.Error(fmt.Sprintf("解析时间范围失败 [协议:%s 客户端IP:%s 客户端端口:%s 服务端口:%s 错误:%s]",
 			protocol, clientIP, clientPort, serverPort, err.Error()))
 		// 解析失败时，为了安全起见，拒绝访问
-		return false
+		return IPCheckResult{Allow: false, RuleName: "【隧道】时间段配置错误"}
+	}
+
+	// 没有时间限制时，总是允许
+	if len(timeRanges) == 0 {
+		return IPCheckResult{Allow: true, RuleName: ""}
 	}
 
 	// 检查当前时间是否允许访问
@@ -137,7 +142,8 @@ func CheckTimeAccess(protocol string, clientIP string, clientPort string, server
 	if !allowed {
 		zlog.Warn(fmt.Sprintf("%s连接被时间限制拒绝 [客户端IP:%s 客户端端口:%s 服务端口:%s 当前时间:%s 允许时间段:%s]",
 			protocol, clientIP, clientPort, serverPort, currentTime.Format("15:04"), tunnel.AllowedTimeRanges))
+		return IPCheckResult{Allow: false, RuleName: "【隧道】时间段限制"}
 	}
 
-	return allowed
+	return IPCheckResult{Allow: true, RuleName: ""}
 }

@@ -19,14 +19,17 @@ type WafTunnelEngine struct {
 	TCPConnections *waftunnelmodel.SafeTCPConnMap
 	//UDP连接管理
 	UDPConnections *waftunnelmodel.SafeUDPConnMap
+	//网站IP黑名单数据（供隧道引擎联动网站防护黑名单）
+	GlobalIPBlockLists *waftunnelmodel.SafeIPBlockListMap
 }
 
 func NewWafTunnelEngine() *WafTunnelEngine {
 	return &WafTunnelEngine{
-		TunnelTarget:    waftunnelmodel.NewSafeTunnelMap(),
-		NetListerOnline: waftunnelmodel.NewSafeNetMap(),
-		TCPConnections:  waftunnelmodel.NewSafeTCPConnMap(),
-		UDPConnections:  waftunnelmodel.NewSafeUDPConnMap(),
+		TunnelTarget:        waftunnelmodel.NewSafeTunnelMap(),
+		NetListerOnline:     waftunnelmodel.NewSafeNetMap(),
+		TCPConnections:      waftunnelmodel.NewSafeTCPConnMap(),
+		UDPConnections:      waftunnelmodel.NewSafeUDPConnMap(),
+		GlobalIPBlockLists: waftunnelmodel.NewSafeIPBlockListMap(),
 	}
 }
 
@@ -420,4 +423,21 @@ func (waf *WafTunnelEngine) StopTunnelServer(netRuntime waftunnelmodel.NetRunTim
 		waf.TCPConnections.ClosePortConns(netRuntime.Port)
 		waf.UDPConnections.ClosePortConns(netRuntime.Port)
 	}
+}
+
+// LoadAllIPBlockLists 加载所有网站的IP黑名单数据
+func (waf *WafTunnelEngine) LoadAllIPBlockLists() {
+	var hosts []model.Hosts
+	global.GWAF_LOCAL_DB.Find(&hosts)
+
+	for i := 0; i < len(hosts); i++ {
+		var ipblocklist []model.IPBlockList
+		global.GWAF_LOCAL_DB.Where("host_code=? ", hosts[i].Code).Find(&ipblocklist)
+		waf.GlobalIPBlockLists.Update(hosts[i].Code, ipblocklist)
+	}
+}
+
+// UpdateIPBlockLists 更新指定网站的IP黑名单数据（供外部调用）
+func (waf *WafTunnelEngine) UpdateIPBlockLists(hostCode string, blockLists []model.IPBlockList) {
+	waf.GlobalIPBlockLists.Update(hostCode, blockLists)
 }

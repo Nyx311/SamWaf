@@ -204,14 +204,18 @@ func (waf *WafTunnelEngine) handleTCPConnection(clientConn net.Conn, port int) {
 	}
 
 	// 检查IP访问权限
-	if !CheckIPAccess("TCP", clientIP, clientPort, serverPort, tunnelInfo.Tunnel) {
-		zlog.Warn(fmt.Sprintf("TCP连接被拒绝 [客户端IP:%s 客户端端口:%s 服务端口:%s]", clientIP, clientPort, serverPort))
+	ipResult := CheckIPAccess("TCP", clientIP, clientPort, serverPort, tunnelInfo.Tunnel, waf)
+	if !ipResult.Allow {
+		zlog.Warn(fmt.Sprintf("TCP连接被拒绝 [客户端IP:%s 客户端端口:%s 服务端口:%s 原因:%s]", clientIP, clientPort, serverPort, ipResult.RuleName))
+		RecordTunnelBlockLog("TCP", clientIP, clientPort, serverPort, tunnelInfo.Tunnel, ipResult.RuleName)
 		clientConn.Close()
 		return
 	}
 
 	// 检查时间访问权限
-	if !CheckTimeAccess("TCP", clientIP, clientPort, serverPort, tunnelInfo.Tunnel) {
+	timeResult := CheckTimeAccess("TCP", clientIP, clientPort, serverPort, tunnelInfo.Tunnel)
+	if !timeResult.Allow {
+		RecordTunnelBlockLog("TCP", clientIP, clientPort, serverPort, tunnelInfo.Tunnel, timeResult.RuleName)
 		clientConn.Close()
 		return
 	}
