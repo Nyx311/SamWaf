@@ -17,9 +17,9 @@ type StreamProcessor struct {
 	wafEngine      *WafEngine
 	wafContext     innerbean.WafHttpContextData
 	hostCode       string
-	buffer         []byte
-	lineBuffer     strings.Builder
-	isInEvent      bool
+	buffer         []byte // 原始流中尚未按\n分割完毕的数据
+	resultBuffer   []byte // 已处理完毕、等待填入Read()调用方p[]的数据
+	eofReceived    bool   // 标记originalReader是否已返回EOF
 }
 
 // 创建流式处理器
@@ -30,36 +30,80 @@ func (waf *WafEngine) createStreamProcessor(originalBody io.ReadCloser, wafConte
 		wafContext:     wafContext,
 		hostCode:       hostCode,
 		buffer:         make([]byte, 0, 4096),
+		resultBuffer:   make([]byte, 0, 4096),
+		eofReceived:    false,
 	}
 }
 
 // Read 实现io.Reader接口
 func (sp *StreamProcessor) Read(p []byte) (n int, err error) {
-	// 从原始流读取数据
-	tempBuf := make([]byte, len(p))
-	n, err = sp.originalReader.Read(tempBuf)
-	if n > 0 {
-		// 将读取的数据添加到缓冲区
-		sp.buffer = append(sp.buffer, tempBuf[:n]...)
-
-		// 处理完整的行
-		processedData := sp.processStreamData()
-
-		// 将处理后的数据复制到输出缓冲区
-		copyLen := len(processedData)
+	// Step 1: resultBuffer有数据时优先从中填满p，不读原始流
+	if len(sp.resultBuffer) > 0 {
+		copyLen := len(sp.resultBuffer)
 		if copyLen > len(p) {
 			copyLen = len(p)
 		}
-		copy(p, processedData[:copyLen])
+		copy(p, sp.resultBuffer[:copyLen])
+		sp.resultBuffer = sp.resultBuffer[copyLen:]
 
-		// 如果处理后的数据超过了输出缓冲区大小，保留剩余部分
-		if len(processedData) > copyLen {
-			sp.buffer = append(processedData[copyLen:], sp.buffer...)
+		// resultBuffer耗尽后重新分配，避免底层数组无限增长
+		if len(sp.resultBuffer) == 0 {
+			sp.resultBuffer = make([]byte, 0, 4096)
 		}
 
-		return copyLen, err
+		// EOF仅在resultBuffer完全耗尽且原始流已EOF时才返回
+		if len(sp.resultBuffer) == 0 && sp.eofReceived {
+			return copyLen, io.EOF
+		}
+		return copyLen, nil
 	}
-	return n, err
+
+	// Step 2: resultBuffer空，从原始流读取数据到buffer
+	tempBuf := make([]byte, len(p)+4096)
+	readN, readErr := sp.originalReader.Read(tempBuf)
+	if readN > 0 {
+		sp.buffer = append(sp.buffer, tempBuf[:readN]...)
+	}
+	if readErr == io.EOF {
+		sp.eofReceived = true
+		readErr = nil // 不立即传播EOF，可能还有数据需要处理
+	} else if readErr != nil {
+		// 非EOF错误：先处理已积累的数据，再传播错误
+		sp.processAndFillResultBuffer()
+		if len(sp.resultBuffer) > 0 {
+			copyLen := len(sp.resultBuffer)
+			if copyLen > len(p) {
+				copyLen = len(p)
+			}
+			copy(p, sp.resultBuffer[:copyLen])
+			sp.resultBuffer = sp.resultBuffer[copyLen:]
+			return copyLen, readErr
+		}
+		return 0, readErr
+	}
+
+	// Step 3: 处理buffer中的原始数据，结果存入resultBuffer
+	sp.processAndFillResultBuffer()
+
+	// Step 4: 从resultBuffer填满p
+	if len(sp.resultBuffer) > 0 {
+		copyLen := len(sp.resultBuffer)
+		if copyLen > len(p) {
+			copyLen = len(p)
+		}
+		copy(p, sp.resultBuffer[:copyLen])
+		sp.resultBuffer = sp.resultBuffer[copyLen:]
+		if len(sp.resultBuffer) == 0 {
+			sp.resultBuffer = make([]byte, 0, 4096)
+		}
+		return copyLen, nil
+	}
+
+	// Step 5: resultBuffer空且原始流已EOF
+	if sp.eofReceived {
+		return 0, io.EOF
+	}
+	return 0, nil
 }
 
 // Close 实现io.Closer接口
@@ -70,53 +114,91 @@ func (sp *StreamProcessor) Close() error {
 	return nil
 }
 
-// 处理流式数据
-func (sp *StreamProcessor) processStreamData() []byte {
+// 处理buffer中的原始流数据，结果存入resultBuffer
+func (sp *StreamProcessor) processAndFillResultBuffer() {
+	if len(sp.buffer) == 0 {
+		return
+	}
+
 	data := string(sp.buffer)
+
+	// 判断buffer是否以\n结尾，区分完整空行（SSE事件边界）和不完整行
+	endsWithNewline := len(data) > 0 && data[len(data)-1] == '\n'
+
 	lines := strings.Split(data, "\n")
+
 	var processedLines []string
 
-	// 处理除最后一行外的所有完整行(最后一行可能不完整)
-	for i := 0; i < len(lines)-1; i++ {
-		line := lines[i]
-		processedLine := sp.processLine(line)
-		processedLines = append(processedLines, processedLine)
-	}
-
-	// 保留最后一行未完整的数据
-	if len(lines) > 0 {
-		sp.buffer = []byte(lines[len(lines)-1])
+	if endsWithNewline {
+		// 所有分割片段都是完整行（含空行事件边界）
+		// Split("data: hello\n\n", "\n") => ["data: hello", "", ""]
+		// 最后一个""是\n末尾的artifact，倒数第二个""是事件边界空行
+		// 处理 lines[0..len-2] 作为完整行，最后的空串artifact跳过
+		completeLineCount := len(lines) - 1
+		for i := 0; i < completeLineCount; i++ {
+			processedLine := sp.processLine(lines[i])
+			processedLines = append(processedLines, processedLine)
+		}
+		// buffer完全消耗，重新分配
+		sp.buffer = make([]byte, 0, 4096)
 	} else {
-		sp.buffer = sp.buffer[:0]
+		// 不以\n结尾：最后一片段是不完整行，保留在buffer
+		if len(lines) <= 1 {
+			// 没有任何\n，整段都不完整，不处理
+			return
+		}
+		for i := 0; i < len(lines)-1; i++ {
+			processedLine := sp.processLine(lines[i])
+			processedLines = append(processedLines, processedLine)
+		}
+		sp.buffer = []byte(lines[len(lines)-1])
 	}
 
-	result := strings.Join(processedLines, "\n")
+	// 拼接已处理的完整行，每行末尾恢复\n（因为它们原本是\n终止的）
 	if len(processedLines) > 0 {
-		result += "\n"
+		result := strings.Join(processedLines, "\n") + "\n"
+		sp.resultBuffer = append(sp.resultBuffer, []byte(result)...)
 	}
-
-	return []byte(result)
 }
 
 // 处理单行数据
 func (sp *StreamProcessor) processLine(line string) string {
-	// 检查是否是SSE数据行
-	if strings.HasPrefix(line, "data:") {
-		// 提取事件数据
-		eventData := strings.TrimPrefix(line, "data:")
-		eventData = strings.TrimSpace(eventData)
-
-		// 进行隐私保护处理
-		processedData := sp.processPrivacyProtection(eventData)
-
-		// 进行敏感词检测和替换
-		processedData = sp.processSensitiveWords(processedData)
-
-		return "data: " + processedData
+	// SSE空行（事件边界）原样透传
+	if line == "" {
+		return line
 	}
 
-	// 对于非数据行，也进行基本的敏感词检测
-	return sp.processSensitiveWords(line)
+	// data: 行：提取内容做隐私保护+敏感词处理
+	if strings.HasPrefix(line, "data:") {
+		// SSE规范：data:后如果有单个空格则剥离，否则保留
+		eventData := line[5:]
+		if len(eventData) > 0 && eventData[0] == ' ' {
+			eventData = eventData[1:]
+		}
+
+		// 隐私保护处理
+		eventData = sp.processPrivacyProtection(eventData)
+
+		// 敏感词检测和替换（返回纯内容，不带data:前缀和\n）
+		eventData = sp.processSensitiveWords(eventData)
+
+		return "data: " + eventData
+	}
+
+	// event: / id: / retry: 行原样透传，不修改协议字段
+	if strings.HasPrefix(line, "event:") ||
+		strings.HasPrefix(line, "id:") ||
+		strings.HasPrefix(line, "retry:") {
+		return line
+	}
+
+	// SSE注释行（以:开头）原样透传
+	if strings.HasPrefix(line, ":") {
+		return line
+	}
+
+	// 其他未知行原样透传
+	return line
 }
 
 // 隐私保护处理
@@ -202,8 +284,8 @@ func (sp *StreamProcessor) processSensitiveWords(data string) string {
 		if len(detectedWords) > 0 {
 			if hasDenyAction {
 				sp.logSensitiveDetection(detectedWords, "deny", data)
-				// 对于拒绝动作，返回屏蔽信息
-				return "data: [敏感内容已屏蔽]\n"
+				// deny动作返回纯文本屏蔽信息，让processLine负责重组SSE格式
+				return "[敏感内容已屏蔽]"
 			} else {
 				sp.logSensitiveDetection(detectedWords, "replace", data)
 			}
@@ -218,16 +300,15 @@ func (sp *StreamProcessor) processSensitiveWords(data string) string {
 // 记录敏感词检测日志
 func (sp *StreamProcessor) logSensitiveDetection(words []string, action string, data string) {
 	datetimeNow := time.Now()
-	sp.wafContext.Weblog.REQ_UUID = uuid.GenUUID()
-	sp.wafContext.Weblog.RISK_LEVEL = 1
-	sp.wafContext.Weblog.GUEST_IDENTIFICATION = "触发敏感词"
-	sp.wafContext.Weblog.RULE = "敏感词检测：" + strings.Join(words, ",")
-	sp.wafContext.Weblog.CREATE_TIME = datetimeNow.Format("2006-01-02 15:04:05")
-	sp.wafContext.Weblog.UNIX_ADD_TIME = datetimeNow.UnixNano() / 1e6
-	sp.wafContext.Weblog.RES_BODY = data
+	logEntry := *sp.wafContext.Weblog // 先拷贝，避免修改原始Weblog
+	logEntry.REQ_UUID = uuid.GenUUID()
+	logEntry.RISK_LEVEL = 1
+	logEntry.GUEST_IDENTIFICATION = "触发敏感词"
+	logEntry.RULE = "敏感词检测：" + strings.Join(words, ",")
+	logEntry.CREATE_TIME = datetimeNow.Format("2006-01-02 15:04:05")
+	logEntry.UNIX_ADD_TIME = datetimeNow.UnixNano() / 1e6
+	logEntry.RES_BODY = data
 
-	// 可以选择立即记录日志或者累积后统一记录
-	logEntry := *sp.wafContext.Weblog
 	if action == "deny" {
 		logEntry.ACTION = "阻止"
 	} else {

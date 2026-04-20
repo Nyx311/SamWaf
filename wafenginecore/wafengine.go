@@ -1068,10 +1068,9 @@ func (waf *WafEngine) modifyResponse() func(*http.Response) error {
 			//记录静态日志
 			isStaticAssist := utils.IsStaticAssist(resp, respContentType)
 
-			// 检查是否为流式内容
+			// 检查是否为流式内容（仅匹配SSE，不匹配NDJSON）
 			contentType := strings.ToLower(resp.Header.Get("Content-Type"))
-			isStreamContent := strings.Contains(contentType, "text/event-stream") ||
-				strings.Contains(contentType, "application/stream+json")
+			isStreamContent := strings.Contains(contentType, "text/event-stream")
 
 			compressCfg := model.ParseResponseCompressConfig(waf.HostTarget[host].Host.ResponseCompressJSON)
 
@@ -1080,7 +1079,48 @@ func (waf *WafEngine) modifyResponse() func(*http.Response) error {
 
 				// 如果是流式内容，使用流式处理器
 				if isStreamContent {
-					// 创建流式处理器包装原始响应体
+					// 防护关闭时不创建StreamProcessor，SSE流直接透传
+					if waf.HostTarget[host].Host.GUARD_STATUS != 1 {
+						weblogfrist.ACTION = "放行"
+						weblogfrist.STATUS = resp.Status
+						weblogfrist.STATUS_CODE = resp.StatusCode
+						weblogfrist.TASK_FLAG = 1
+
+						resHeader := ""
+						for key, values := range resp.Header {
+							for _, value := range values {
+								resHeader += key + ": " + value + "\r\n"
+							}
+						}
+						weblogfrist.ResHeader = resHeader
+
+						datetimeNow := time.Now()
+						weblogfrist.TimeSpent = datetimeNow.UnixNano()/1e6 - weblogfrist.UNIX_ADD_TIME
+						weblogfrist.BackendCheckCost = time.Now().UnixNano()/1e6 - backendCheckStart
+
+						if global.GWAF_RUNTIME_RECORD_LOG_TYPE == "all" {
+							if waf.HostTarget[host].Host.EXCLUDE_URL_LOG == "" {
+								global.GQEQUE_LOG_DB.Enqueue(weblogfrist)
+							} else {
+								lines := strings.Split(waf.HostTarget[host].Host.EXCLUDE_URL_LOG, "\n")
+								isRecordLog := true
+								for _, line := range lines {
+									if strings.HasPrefix(weblogfrist.URL, line) {
+										isRecordLog = false
+									}
+								}
+								if isRecordLog {
+									global.GQEQUE_LOG_DB.Enqueue(weblogfrist)
+								}
+							}
+						} else if global.GWAF_RUNTIME_RECORD_LOG_TYPE == "abnormal" && weblogfrist.ACTION != "放行" {
+							global.GQEQUE_LOG_DB.Enqueue(weblogfrist)
+						}
+
+						return nil
+					}
+
+					// 防护开启，创建流式处理器包装原始响应体
 					streamProcessor := waf.createStreamProcessor(resp.Body, wafHttpContext, host)
 					resp.Body = io.NopCloser(streamProcessor)
 
