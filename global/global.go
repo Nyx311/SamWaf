@@ -85,6 +85,7 @@ var (
 	GWAF_LOG_OUTPUT_FORMAT       string              = "console"  //zlog输出格式 控制台格式console,json格式
 	GWAF_LOG_DEBUG_ENABLE        bool                = false      //是否开启debug日志，默认关闭
 	GWAF_LOG_DEBUG_DB_ENABLE     bool                = false      //是否开启数据库日志，默认关闭
+	GWAF_FINGERPRINT_DEBUG_LOG   bool                = false      //是否开启指纹详细调试日志，默认关闭
 	GWAF_RELEASE                 string              = "false"    // 当前是否为发行版
 	GWAF_RELEASE_VERSION_NAME    string              = "20241028" // 发行版的版本号名称
 	GWAF_RELEASE_VERSION         string              = "v1.0.0"   // 发行版的版本号
