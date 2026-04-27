@@ -4,6 +4,7 @@ import (
 	"SamWaf/common/uuid"
 	"SamWaf/global"
 	"SamWaf/utils"
+	"SamWaf/wafowasp"
 	"crypto/rand"
 	"fmt"
 	"github.com/denisbrodbeck/machineid"
@@ -134,6 +135,8 @@ func LoadAndInitConfig() {
 		config.Set("zlog.debug_enable", global.GWAF_LOG_DEBUG_ENABLE)
 		configChanged = true
 	}
+	// 同步 OWASP 详情日志开关（debug 开才采集完整 collection，否则热路径零额外开销）
+	wafowasp.SetDebugEnabled(global.GWAF_LOG_DEBUG_ENABLE)
 
 	// 添加数据库日志开关配置
 	if config.IsSet("zlog.db_debug_enable") {
@@ -182,7 +185,6 @@ func LoadAndInitConfig() {
 		configChanged = true
 		fmt.Printf("%s\tINFO\t安全路径入口已启用，自动生成访问码: %s\n", currentTime, global.GWAF_SECURITY_ENTRY_PATH)
 	}
-
 
 	// 指纹详细调试日志开关
 	if config.IsSet("security.fingerprint_debug_log") {

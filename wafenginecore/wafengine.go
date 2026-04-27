@@ -83,6 +83,11 @@ func (waf *WafEngine) Error() string {
 func inferAttackType(ruleTitle string) string {
 	ruleTitle = strings.ToLower(ruleTitle)
 
+	// OWASP CRS 拦截：Title 格式为 "owasp:<ruleID>"，需在其他关键词匹配之前优先处理
+	if strings.HasPrefix(ruleTitle, "owasp:") {
+		return "owasp_attack"
+	}
+
 	// CC攻击
 	if strings.Contains(ruleTitle, "cc") || strings.Contains(ruleTitle, "频次") || strings.Contains(ruleTitle, "rate limit") {
 		return "cc_attack"
@@ -330,26 +335,7 @@ func (waf *WafEngine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		cookies, _ := json.Marshal(r.Cookies())
 
-		hlen := 0
-		for key, values := range r.Header {
-			for _, value := range values {
-				hlen += len(key)
-				hlen += len(": ")
-				hlen += len(value)
-				hlen += len("\r\n")
-			}
-		}
-		var Header strings.Builder
-		Header.Grow(hlen)
-		for key, values := range r.Header {
-			for _, value := range values {
-				Header.WriteString(key)
-				Header.WriteString(": ")
-				Header.WriteString(value)
-				Header.WriteString("\r\n")
-			}
-		}
-		header := Header.String()
+		header := joinHeader(r.Header)
 
 		region := utils.GetCountry(clientIP)
 
@@ -428,15 +414,23 @@ func (waf *WafEngine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if serverName == "" {
 				serverName = "未命名服务器"
 			}
+			banDuration, _ := global.GCACHE_WAFCACHE.GetInt(ccCacheKey)
+			remainingSeconds := 0
+			if expireTime, err := global.GCACHE_WAFCACHE.GetExpireTime(ccCacheKey); err == nil {
+				if r := int(time.Until(expireTime).Seconds()); r > 0 {
+					remainingSeconds = r
+				}
+			}
 			global.GQEQUE_MESSAGE_DB.Enqueue(innerbean.IPBanMessageInfo{
 				BaseMessageInfo: innerbean.BaseMessageInfo{
 					OperaType: "CC封禁提醒",
 					Server:    serverName,
 				},
-				Ip:       ccCheckIP + " (" + regionStr + ")",
-				Reason:   "CC攻击，访问频次过高",
-				Duration: 0, // CC封禁时长由配置决定
-				Time:     time.Now().Format("2006-01-02 15:04:05"),
+				Ip:               ccCheckIP + " (" + regionStr + ")",
+				Reason:           "CC攻击，访问频次过高",
+				Duration:         banDuration,
+				RemainingSeconds: remainingSeconds,
+				Time:             time.Now().Format("2006-01-02 15:04:05"),
 			})
 			EchoErrorInfo(w, r, &weblogbean, "", "当前IP由于访问频次太高暂时无法访问", hostTarget, waf.HostTarget[waf.HostCode[global.GWAF_GLOBAL_HOST_CODE]], false, "cc_attack")
 			return
@@ -567,13 +561,12 @@ func (waf *WafEngine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 						return
 					}
 				}
-				//检测OWASP
-				if hostDefense.DEFENSE_OWASP_SET == 1 {
+				//检测OWASP（全局开关或站点级 owaspset 启用时才进入）
+				if global.GCONFIG_RECORD_ENABLE_OWASP == 1 && hostDefense.DEFENSE_OWASP_SET == 1 {
 					if handleBlock(waf.CheckOwasp) {
 						return
 					}
 				}
-
 				// 添加防盗链检查
 				if handleBlock(waf.CheckAntiLeech) {
 					return
@@ -939,11 +932,7 @@ func (waf *WafEngine) errorResponse() func(http.ResponseWriter, *http.Request, e
 			//记录响应Header信息
 			resHeader := ""
 			if req.Response != nil {
-				for key, values := range req.Response.Header {
-					for _, value := range values {
-						resHeader += key + ": " + value + "\r\n"
-					}
-				}
+				resHeader = joinHeader(req.Response.Header)
 			}
 
 			weblogReq.ResHeader = resHeader
@@ -1009,12 +998,7 @@ func (waf *WafEngine) modifyResponse() func(*http.Response) error {
 				weblogfrist.STATUS_CODE = resp.StatusCode
 				weblogfrist.RES_CONTENT_LENGTH = resp.ContentLength
 
-				resHeader := ""
-				for key, values := range resp.Header {
-					for _, value := range values {
-						resHeader += key + ": " + value + "\r\n"
-					}
-				}
+				resHeader := joinHeader(resp.Header)
 				weblogfrist.ResHeader = resHeader
 
 				datetimeNow := time.Now()
@@ -1134,12 +1118,7 @@ func (waf *WafEngine) modifyResponse() func(*http.Response) error {
 					weblogfrist.TASK_FLAG = 1
 
 					// 记录响应Header信息
-					resHeader := ""
-					for key, values := range resp.Header {
-						for _, value := range values {
-							resHeader += key + ": " + value + "\r\n"
-						}
-					}
+					resHeader := joinHeader(resp.Header)
 					weblogfrist.ResHeader = resHeader
 
 					datetimeNow := time.Now()
@@ -1409,12 +1388,7 @@ func (waf *WafEngine) modifyResponse() func(*http.Response) error {
 						resp.Header.Set("Content-Length", strconv.FormatInt(int64(len(resBytes)), 10))
 
 						// 记录响应Header信息
-						resHeader := ""
-						for key, values := range resp.Header {
-							for _, value := range values {
-								resHeader += key + ": " + value + "\r\n"
-							}
-						}
+						resHeader := joinHeader(resp.Header)
 						weblogfrist.ResHeader = resHeader
 
 						// 记录日志信息
@@ -1452,12 +1426,7 @@ func (waf *WafEngine) modifyResponse() func(*http.Response) error {
 					}
 
 					//记录响应Header信息
-					resHeader := ""
-					for key, values := range resp.Header {
-						for _, value := range values {
-							resHeader += key + ": " + value + "\r\n"
-						}
-					}
+					resHeader := joinHeader(resp.Header)
 					weblogfrist.ResHeader = resHeader
 					weblogfrist.ACTION = "放行"
 					weblogfrist.STATUS = resp.Status
@@ -1492,6 +1461,26 @@ func (waf *WafEngine) modifyResponse() func(*http.Response) error {
 
 		return nil
 	}
+}
+
+func joinHeader(h http.Header) string {
+	var buf strings.Builder
+	blen := 0
+	for key, values := range h {
+		for _, value := range values {
+			blen += len(key) + len(": ") + len(value) + len("\r\n")
+		}
+	}
+	buf.Grow(blen)
+	for key, values := range h {
+		for _, value := range values {
+			buf.WriteString(key)
+			buf.WriteString(": ")
+			buf.WriteString(value)
+			buf.WriteString("\r\n")
+		}
+	}
+	return buf.String()
 }
 
 func (waf *WafEngine) StartWaf() {
