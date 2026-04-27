@@ -1,9 +1,10 @@
 version: '3.8'
 
 services:
-  samwaf-instance:
-    image: samwaf/samwaf
-    container_name: samwaf-instance
+  samwaf:
+    image: samwaf:cus-1.4-beta2
+    container_name: samwaf
+    privileged: true
     ports:
       - "26666:26666"
       - "80:80"
@@ -14,19 +15,4 @@ services:
       - ./logs:/app/logs
       - ./ssl:/app/ssl
 
-    networks:
-      - samwafnet
     restart: always
-
-  nginx:
-    image: nginx:latest
-    container_name: nginx
-    ports:
-      - "8080:80"
-    networks:
-      - samwafnet
-    restart: always
-
-networks:
-  samwafnet:
-    external: false

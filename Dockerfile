@@ -9,7 +9,7 @@ ENV TZ=Asia/Shanghai
 # 更新并安装时区数据（使用阿里云镜像加速）
 RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories && \
     apk update && \
-    apk add --no-cache tzdata && \
+    apk add --no-cache tzdata util-linux && \
     ln -sf /usr/share/zoneinfo/${TZ} /etc/localtime && \
     echo "${TZ}" > /etc/timezone
 
