@@ -568,8 +568,10 @@ func (waf *WafEngine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 				//检测OWASP
-				if handleBlock(waf.CheckOwasp) {
-					return
+				if hostDefense.DEFENSE_OWASP_SET == 1 {
+					if handleBlock(waf.CheckOwasp) {
+						return
+					}
 				}
 
 				// 添加防盗链检查
