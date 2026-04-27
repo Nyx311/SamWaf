@@ -5,6 +5,7 @@ package firewall
 import (
 	"bufio"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -35,8 +36,8 @@ const (
 	FIREWALLD_RICH_RULE_PRIORITY = "10"            // rich rule 优先级
 )
 
-// hostSearchPaths 宿主机上可执行文件的搜索路径
-var hostSearchPaths = []string{
+// searchPaths 可执行文件搜索路径（容器和宿主机通用）
+var searchPaths = []string{
 	"/usr/sbin", "/sbin", "/usr/local/sbin",
 	"/usr/bin", "/bin", "/usr/local/bin",
 }
@@ -52,55 +53,35 @@ type IPBlockInfo struct {
 	Direction string    // 方向
 }
 
-// hostCmd 通过 nsenter 在宿主机命名空间执行命令
-// -t 1: 进入 PID 1（宿主机 init 进程）的命名空间
-// -n: network 命名空间（iptables/firewall-cmd 需要）
-// -m: mount 命名空间（访问宿主机文件）
-func hostCmd(name string, args ...string) *exec.Cmd {
-	fullPath := findHostExecutable(name)
-	nsenterArgs := []string{"-t", "1", "-m", "-n", "--", fullPath}
-	nsenterArgs = append(nsenterArgs, args...)
-	return exec.Command("nsenter", nsenterArgs...)
-}
-
-// findHostExecutable 在宿主机上查找可执行文件的绝对路径
-func findHostExecutable(name string) string {
-	// 通过 nsenter 在宿主机上用 which 查找
-	cmd := exec.Command("nsenter", "-t", "1", "-m", "-n", "--", "which", name)
-	output, err := cmd.CombinedOutput()
-	if err == nil {
-		path := strings.TrimSpace(string(output))
-		if path != "" && !strings.Contains(path, "which: no") {
-			return path
-		}
+// findExecutable 在 PATH 和常见 sbin 目录中查找可执行文件
+func findExecutable(name string) (string, error) {
+	if path, err := exec.LookPath(name); err == nil {
+		return path, nil
 	}
-
-	// which 失败，尝试常见路径
-	for _, dir := range hostSearchPaths {
+	for _, dir := range searchPaths {
 		fullPath := dir + "/" + name
-		cmd := exec.Command("nsenter", "-t", "1", "-m", "-n", "--", "test", "-x", fullPath)
-		if err := cmd.Run(); err == nil {
-			return fullPath
+		info, err := os.Stat(fullPath)
+		if err == nil && !info.IsDir() && info.Mode()&0111 != 0 {
+			return fullPath, nil
 		}
 	}
-
-	return name
+	return "", fmt.Errorf("executable %s not found in PATH or known directories", name)
 }
 
-// detectFirewallBackend 检测宿主机使用的防火墙后端
+// detectFirewallBackend 检测防火墙后端
 func detectFirewallBackend() string {
-	cmd := hostCmd("firewall-cmd", "--state")
-	output, err := cmd.CombinedOutput()
-	if err == nil && strings.TrimSpace(string(output)) == "running" {
-		return "firewalld"
+	path, err := findExecutable("firewall-cmd")
+	if err == nil {
+		output, err := exec.Command(path, "--state").CombinedOutput()
+		if err == nil && strings.TrimSpace(string(output)) == "running" {
+			return "firewalld"
+		}
 	}
 	return "iptables"
 }
 
-// cachedBackend 缓存的防火墙后端类型
 var cachedBackend string
 
-// getFirewallBackend 获取防火墙后端（带缓存）
 func getFirewallBackend() string {
 	if cachedBackend == "" {
 		cachedBackend = detectFirewallBackend()
@@ -112,15 +93,21 @@ func getFirewallBackend() string {
 func (fw *FireWallEngine) IsFirewallEnabled() bool {
 	backend := getFirewallBackend()
 	if backend == "firewalld" {
-		cmd := hostCmd("firewall-cmd", "--state")
-		output, err := cmd.CombinedOutput()
+		path, err := findExecutable("firewall-cmd")
+		if err != nil {
+			return false
+		}
+		output, err := exec.Command(path, "--state").CombinedOutput()
 		if err != nil {
 			return false
 		}
 		return strings.TrimSpace(string(output)) == "running"
 	}
-	cmd := hostCmd("iptables", "-L")
-	out, err := cmd.CombinedOutput()
+	path, err := findExecutable("iptables")
+	if err != nil {
+		return false
+	}
+	out, err := exec.Command(path, "-L").CombinedOutput()
 	if err != nil {
 		return false
 	}
@@ -160,15 +147,17 @@ func (fw *FireWallEngine) executeCommand(cmd *exec.Cmd) (error, string) {
 
 // isIPInRulesFirewalld 通过 firewall-cmd 检查 IP 是否已被封禁
 func (fw *FireWallEngine) isIPInRulesFirewalld(ip string) (bool, error) {
-	cmd := hostCmd("firewall-cmd", "--list-rich-rules")
+	path, err := findExecutable("firewall-cmd")
+	if err != nil {
+		return false, fmt.Errorf("failed to find firewall-cmd: %v", err)
+	}
+	cmd := exec.Command(path, "--list-rich-rules")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return false, fmt.Errorf("failed to list firewalld rich rules: %v", err)
 	}
-
 	outputStr := string(output)
 	ruleName := generateRuleName(ip)
-
 	lines := strings.Split(outputStr, "\n")
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
@@ -179,13 +168,17 @@ func (fw *FireWallEngine) isIPInRulesFirewalld(ip string) (bool, error) {
 			return true, nil
 		}
 	}
-
 	return false, nil
 }
 
 // isIPInRulesIptables 通过 iptables-save 检查 IP 是否已被封禁
 func (fw *FireWallEngine) isIPInRulesIptables(ip string) (bool, error) {
-	cmd := hostCmd("iptables-save")
+	path, err := findExecutable("iptables-save")
+	if err != nil {
+		fmt.Printf("[ERROR] 获取iptables规则失败: %v\n", err)
+		return false, fmt.Errorf("failed to find iptables-save: %v", err)
+	}
+	cmd := exec.Command(path)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		fmt.Printf("[ERROR] 获取iptables规则失败: %v\n", err)
@@ -197,58 +190,56 @@ func (fw *FireWallEngine) isIPInRulesIptables(ip string) (bool, error) {
 	return exists, nil
 }
 
-// isIPInRules 检查IP是否在封禁规则中（自动选择后端）
 func (fw *FireWallEngine) isIPInRules(ip string) (bool, error) {
-	backend := getFirewallBackend()
-	if backend == "firewalld" {
+	if getFirewallBackend() == "firewalld" {
 		return fw.isIPInRulesFirewalld(ip)
 	}
 	return fw.isIPInRulesIptables(ip)
 }
 
-// generateRuleName 生成规则名称
 func generateRuleName(ip string) string {
 	safeName := strings.ReplaceAll(ip, ".", "_")
 	safeName = strings.ReplaceAll(safeName, "/", "_")
 	return RULE_PREFIX + safeName
 }
 
-// AddRule 添加防火墙封禁规则（自动选择后端）
 func (fw *FireWallEngine) AddRule(ruleName, ipToAdd, action, proc, localport string) error {
-	backend := getFirewallBackend()
-	if backend == "firewalld" {
+	if getFirewallBackend() == "firewalld" {
 		return fw.addRuleFirewalld(ruleName, ipToAdd, action, proc, localport)
 	}
 	return fw.addRuleIptables(ipToAdd)
 }
 
-// addRuleFirewalld 通过 firewall-cmd 添加封禁规则
 func (fw *FireWallEngine) addRuleFirewalld(ruleName, ipToAdd, action, proc, localport string) error {
+	path, err := findExecutable("firewall-cmd")
+	if err != nil {
+		return fmt.Errorf("failed to find firewall-cmd: %v", err)
+	}
 	richRule := fmt.Sprintf("rule priority=\"%s\" source address=\"%s\" name=\"%s\" drop",
 		FIREWALLD_RICH_RULE_PRIORITY, ipToAdd, ruleName)
-
-	cmd := hostCmd("firewall-cmd", "--add-rich-rule", richRule)
+	cmd := exec.Command(path, "--add-rich-rule", richRule)
 	fmt.Printf("[DEBUG] 执行命令: firewall-cmd --add-rich-rule '%s'\n", richRule)
-	err, output := fw.executeCommand(cmd)
-	if err != nil {
-		fmt.Printf("[ERROR] 添加运行时规则失败: %v, 输出: %s\n", err, output)
-		return fmt.Errorf("failed to add firewalld runtime rule: %v, output: %s", err, output)
+	err2, output := fw.executeCommand(cmd)
+	if err2 != nil {
+		fmt.Printf("[ERROR] 添加运行时规则失败: %v, 输出: %s\n", err2, output)
+		return fmt.Errorf("failed to add firewalld runtime rule: %v, output: %s", err2, output)
 	}
-
-	cmd = hostCmd("firewall-cmd", "--permanent", "--add-rich-rule", richRule)
+	cmd = exec.Command(path, "--permanent", "--add-rich-rule", richRule)
 	fmt.Printf("[DEBUG] 执行命令: firewall-cmd --permanent --add-rich-rule '%s'\n", richRule)
-	err, output = fw.executeCommand(cmd)
-	if err != nil {
-		fmt.Printf("[WARN] 添加永久规则失败: %v, 输出: %s (运行时规则已生效)\n", err, output)
+	err2, output = fw.executeCommand(cmd)
+	if err2 != nil {
+		fmt.Printf("[WARN] 添加永久规则失败: %v, 输出: %s (运行时规则已生效)\n", err2, output)
 	}
-
 	fmt.Printf("[DEBUG] 添加规则成功\n")
 	return nil
 }
 
-// addRuleIptables 通过 iptables 添加封禁规则
 func (fw *FireWallEngine) addRuleIptables(ipToAdd string) error {
-	cmd := hostCmd("iptables", "-I", "INPUT", "1", "-s", ipToAdd, "-j", "DROP")
+	path, err := findExecutable("iptables")
+	if err != nil {
+		return fmt.Errorf("failed to find iptables: %v", err)
+	}
+	cmd := exec.Command(path, "-I", "INPUT", "1", "-s", ipToAdd, "-j", "DROP")
 	fmt.Printf("[DEBUG] 执行命令: iptables -I INPUT 1 -s %s -j DROP\n", ipToAdd)
 	err, output := fw.executeCommand(cmd)
 	if err != nil {
@@ -263,16 +254,13 @@ func (fw *FireWallEngine) EditRule(ruleNum int, newRule string) error {
 	return fmt.Errorf("editRule is not supported on Linux")
 }
 
-// DeleteRule 删除防火墙规则（自动选择后端）
 func (fw *FireWallEngine) DeleteRule(ruleName string) (bool, error) {
-	backend := getFirewallBackend()
-	if backend == "firewalld" {
+	if getFirewallBackend() == "firewalld" {
 		return fw.deleteRuleFirewalld(ruleName)
 	}
 	return fw.deleteRuleIptables(ruleName)
 }
 
-// deleteRuleFirewalld 通过 firewall-cmd 删除封禁规则
 func (fw *FireWallEngine) deleteRuleFirewalld(ruleName string) (bool, error) {
 	richRule, err := fw.findRichRuleByName(ruleName)
 	if err != nil {
@@ -282,34 +270,37 @@ func (fw *FireWallEngine) deleteRuleFirewalld(ruleName string) (bool, error) {
 		fmt.Printf("[WARN] 规则不存在: %s\n", ruleName)
 		return false, nil
 	}
-
-	cmd := hostCmd("firewall-cmd", "--remove-rich-rule", richRule)
+	path, err := findExecutable("firewall-cmd")
+	if err != nil {
+		return false, fmt.Errorf("failed to find firewall-cmd: %v", err)
+	}
+	cmd := exec.Command(path, "--remove-rich-rule", richRule)
 	fmt.Printf("[DEBUG] 执行命令: firewall-cmd --remove-rich-rule '%s'\n", richRule)
 	err2, output := fw.executeCommand(cmd)
 	if err2 != nil {
 		fmt.Printf("[ERROR] 删除运行时规则失败: %v, 输出: %s\n", err2, output)
 		return false, fmt.Errorf("failed to remove firewalld runtime rule: %v, output: %s", err2, output)
 	}
-
-	cmd = hostCmd("firewall-cmd", "--permanent", "--remove-rich-rule", richRule)
+	cmd = exec.Command(path, "--permanent", "--remove-rich-rule", richRule)
 	fmt.Printf("[DEBUG] 执行命令: firewall-cmd --permanent --remove-rich-rule '%s'\n", richRule)
 	err2, output = fw.executeCommand(cmd)
 	if err2 != nil {
 		fmt.Printf("[WARN] 删除永久规则失败: %v, 输出: %s\n", err2, output)
 	}
-
 	fmt.Printf("[DEBUG] 删除规则成功\n")
 	return true, nil
 }
 
-// findRichRuleByName 通过规则名查找精确的 rich rule 字符串
 func (fw *FireWallEngine) findRichRuleByName(ruleName string) (string, error) {
-	cmd := hostCmd("firewall-cmd", "--list-rich-rules")
+	path, err := findExecutable("firewall-cmd")
+	if err != nil {
+		return "", fmt.Errorf("failed to find firewall-cmd: %v", err)
+	}
+	cmd := exec.Command(path, "--list-rich-rules")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("failed to list rich rules: %v", err)
 	}
-
 	lines := strings.Split(string(output), "\n")
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
@@ -320,9 +311,12 @@ func (fw *FireWallEngine) findRichRuleByName(ruleName string) (string, error) {
 	return "", nil
 }
 
-// deleteRuleIptables 通过 iptables 删除封禁规则
 func (fw *FireWallEngine) deleteRuleIptables(ruleName string) (bool, error) {
-	cmd := hostCmd("iptables", "-D", "INPUT", "-s", ruleName, "-j", "DROP")
+	path, err := findExecutable("iptables")
+	if err != nil {
+		return false, fmt.Errorf("failed to find iptables: %v", err)
+	}
+	cmd := exec.Command(path, "-D", "INPUT", "-s", ruleName, "-j", "DROP")
 	fmt.Printf("[DEBUG] 执行命令: iptables -D INPUT -s %s -j DROP\n", ruleName)
 	err, output := fw.executeCommand(cmd)
 	if err != nil {
@@ -333,7 +327,6 @@ func (fw *FireWallEngine) deleteRuleIptables(ruleName string) (bool, error) {
 	return true, nil
 }
 
-// extractIPFromRuleName 从规则名中提取IP
 func extractIPFromRuleName(ruleName string) string {
 	if !strings.HasPrefix(ruleName, RULE_PREFIX) {
 		return ""
@@ -342,10 +335,8 @@ func extractIPFromRuleName(ruleName string) string {
 	return strings.ReplaceAll(safeName, "_", ".")
 }
 
-// IsRuleExists 检查规则是否存在（自动选择后端）
 func (fw *FireWallEngine) IsRuleExists(ruleName string) (bool, error) {
-	backend := getFirewallBackend()
-	if backend == "firewalld" {
+	if getFirewallBackend() == "firewalld" {
 		ip := extractIPFromRuleName(ruleName)
 		if ip == "" {
 			ip = ruleName
@@ -358,9 +349,6 @@ func (fw *FireWallEngine) IsRuleExists(ruleName string) (bool, error) {
 // BlockIP 封禁指定IP地址，支持单个IP或CIDR格式
 func (fw *FireWallEngine) BlockIP(ip string, reason string) error {
 	fmt.Printf("[INFO] 开始封禁IP: %s, 原因: %s\n", ip, reason)
-
-	backend := getFirewallBackend()
-
 	exists, err := fw.isIPInRules(ip)
 	if err != nil {
 		return fmt.Errorf("检查IP状态失败: %v", err)
@@ -369,28 +357,23 @@ func (fw *FireWallEngine) BlockIP(ip string, reason string) error {
 		fmt.Printf("[WARN] IP %s 已经被封禁\n", ip)
 		return fmt.Errorf("IP %s already blocked", ip)
 	}
-
 	ruleName := generateRuleName(ip)
-
-	if backend == "firewalld" {
+	if getFirewallBackend() == "firewalld" {
 		err = fw.addRuleFirewalld(ruleName, ip, ACTION_BLOCK, PROTOCOL_ANY, "")
 	} else {
 		err = fw.addRuleIptables(ip)
 	}
-
 	if err != nil {
 		fmt.Printf("[ERROR] 封禁IP失败: %s, error: %v\n", ip, err)
 		return fmt.Errorf("failed to block IP %s: %v", ip, err)
 	}
-
 	fmt.Printf("[INFO] 成功封禁IP: %s\n", ip)
 	return nil
 }
 
-// UnblockIP 解除对指定IP的封禁，支持单个IP或CIDR格式
+// UnblockIP 解除对指定IP的封禁
 func (fw *FireWallEngine) UnblockIP(ip string) error {
 	fmt.Printf("[INFO] 开始解除IP封禁: %s\n", ip)
-
 	exists, err := fw.isIPInRules(ip)
 	if err != nil {
 		return fmt.Errorf("检查IP状态失败: %v", err)
@@ -399,26 +382,20 @@ func (fw *FireWallEngine) UnblockIP(ip string) error {
 		fmt.Printf("[WARN] IP %s 未被封禁\n", ip)
 		return fmt.Errorf("IP %s is not blocked", ip)
 	}
-
 	ruleName := generateRuleName(ip)
-	backend := getFirewallBackend()
-
-	if backend == "firewalld" {
+	if getFirewallBackend() == "firewalld" {
 		_, err = fw.deleteRuleFirewalld(ruleName)
 	} else {
 		_, err = fw.deleteRuleIptables(ip)
 	}
-
 	if err != nil {
 		fmt.Printf("[ERROR] 解除IP封禁失败: %s, error: %v\n", ip, err)
 		return fmt.Errorf("failed to unblock IP %s: %v", ip, err)
 	}
-
 	fmt.Printf("[INFO] 成功解除IP封禁: %s\n", ip)
 	return nil
 }
 
-// IsIPBlocked 检查IP是否已被封禁
 func (fw *FireWallEngine) IsIPBlocked(ip string) (bool, error) {
 	fmt.Printf("[DEBUG] 检查IP是否被封禁: %s\n", ip)
 	blocked, err := fw.isIPInRules(ip)
@@ -430,7 +407,6 @@ func (fw *FireWallEngine) IsIPBlocked(ip string) (bool, error) {
 	return blocked, err
 }
 
-// BlockIPList 批量封禁IP列表
 func (fw *FireWallEngine) BlockIPList(ips []string) (successCount int, failedIPs []string, err error) {
 	failedIPs = []string{}
 	for _, ip := range ips {
@@ -446,7 +422,6 @@ func (fw *FireWallEngine) BlockIPList(ips []string) (successCount int, failedIPs
 	return successCount, failedIPs, nil
 }
 
-// UnblockIPList 批量解除IP封禁
 func (fw *FireWallEngine) UnblockIPList(ips []string) (successCount int, failedIPs []string, err error) {
 	failedIPs = []string{}
 	for _, ip := range ips {
@@ -462,14 +437,16 @@ func (fw *FireWallEngine) UnblockIPList(ips []string) (successCount int, failedI
 	return successCount, failedIPs, nil
 }
 
-// GetBlockedIPListFirewalld 通过 firewalld 获取已封禁IP列表
 func (fw *FireWallEngine) GetBlockedIPListFirewalld() ([]string, error) {
-	cmd := hostCmd("firewall-cmd", "--list-rich-rules")
+	path, err := findExecutable("firewall-cmd")
+	if err != nil {
+		return nil, fmt.Errorf("failed to find firewall-cmd: %v", err)
+	}
+	cmd := exec.Command(path, "--list-rich-rules")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("failed to list firewalld rich rules: %v", err)
 	}
-
 	blockedIPs := []string{}
 	lines := strings.Split(string(output), "\n")
 	for _, line := range lines {
@@ -495,14 +472,16 @@ func (fw *FireWallEngine) GetBlockedIPListFirewalld() ([]string, error) {
 	return blockedIPs, nil
 }
 
-// GetBlockedIPListIptables 通过 iptables-save 获取已封禁IP列表
 func (fw *FireWallEngine) GetBlockedIPListIptables() ([]string, error) {
-	cmd := hostCmd("iptables-save")
+	path, err := findExecutable("iptables-save")
+	if err != nil {
+		return nil, fmt.Errorf("failed to find iptables-save: %v", err)
+	}
+	cmd := exec.Command(path)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get blocked IP list: %v", err)
 	}
-
 	blockedIPs := []string{}
 	lines := strings.Split(string(output), "\n")
 	for _, line := range lines {
@@ -522,16 +501,13 @@ func (fw *FireWallEngine) GetBlockedIPListIptables() ([]string, error) {
 	return blockedIPs, nil
 }
 
-// GetBlockedIPList 获取所有已封禁的IP列表（自动选择后端）
 func (fw *FireWallEngine) GetBlockedIPList() ([]string, error) {
-	backend := getFirewallBackend()
-	if backend == "firewalld" {
+	if getFirewallBackend() == "firewalld" {
 		return fw.GetBlockedIPListFirewalld()
 	}
 	return fw.GetBlockedIPListIptables()
 }
 
-// ClearAllBlockedIPs 清除所有封禁规则
 func (fw *FireWallEngine) ClearAllBlockedIPs() (int, error) {
 	blockedIPs, err := fw.GetBlockedIPList()
 	if err != nil {

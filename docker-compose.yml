@@ -1,10 +1,11 @@
 version: '3.8'
 
 services:
-  samwaf:
+  samwaf-instance:
     image: samwaf:cus-1.4-beta2
     container_name: samwaf
-    privileged: true
+    cap_add:
+      - NET_ADMIN
     ports:
       - "26666:26666"
       - "80:80"
@@ -14,5 +15,4 @@ services:
       - ./data:/app/data
       - ./logs:/app/logs
       - ./ssl:/app/ssl
-
     restart: always
