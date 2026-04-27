@@ -5,6 +5,7 @@ package firewall
 import (
 	"bufio"
 	"fmt"
+	"os"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -51,8 +52,8 @@ type IPBlockInfo struct {
 // 返回 "firewalld" 或 "iptables"
 func detectFirewallBackend() string {
 	// 检查 firewalld 是否运行
-	path, _ := findExecutable("firewall-cmd")
-	if path != "" {
+	path, err := findExecutable("firewall-cmd")
+	if err == nil {
 		cmd := exec.Command(path, "--state")
 		output, err := cmd.CombinedOutput()
 		if err == nil && strings.TrimSpace(string(output)) == "running" {
@@ -87,11 +88,15 @@ func findExecutable(name string) (string, error) {
 		return path, nil
 	}
 
-	// 在常见路径中手动搜索
+	// 在常见 sbin 目录中手动搜索
 	for _, dir := range iptablesSearchPaths {
 		fullPath := dir + "/" + name
-		if _, err := exec.LookPath(fullPath); err == nil {
-			return fullPath, nil
+		info, err := os.Stat(fullPath)
+		if err == nil && !info.IsDir() {
+			// 检查文件是否可执行
+			if info.Mode()&0111 != 0 {
+				return fullPath, nil
+			}
 		}
 	}
 
@@ -164,24 +169,27 @@ func (fw *FireWallEngine) isIPInRulesFirewalld(ip string) (bool, error) {
 		return false, fmt.Errorf("failed to find firewall-cmd: %v", err)
 	}
 
-	// 查询所有 rich rules，检查是否包含该IP的 DROP 规则
-	cmd := exec.Command(path, "--list-all")
+	// 使用 --list-rich-rules 获取所有 rich rules
+	cmd := exec.Command(path, "--list-rich-rules")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return false, fmt.Errorf("failed to list firewalld rules: %v", err)
+		return false, fmt.Errorf("failed to list firewalld rich rules: %v", err)
 	}
 
-	// 检查是否有针对该 IP 的 drop 规则
 	outputStr := string(output)
 	ruleName := generateRuleName(ip)
-	// 检查规则名是否存在于 rich rules 中
-	if strings.Contains(outputStr, "rule name=\""+ruleName+"\"") {
-		return true, nil
-	}
-	// 也检查 IP 地址直接出现在 drop 规则中
-	if strings.Contains(outputStr, "source address=\""+ip+"\" drop") ||
-		strings.Contains(outputStr, "source address=\""+ip+"/32\" drop") {
-		return true, nil
+
+	// 每条 rich rule 是一行，检查是否存在包含该规则名的 rich rule
+	lines := strings.Split(outputStr, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.Contains(line, "source address=\""+ip+"\"") && strings.Contains(line, ruleName) && strings.Contains(line, "drop") {
+			return true, nil
+		}
+		// 也检查带 /32 后缀的情况
+		if strings.Contains(line, "source address=\""+ip+"/32\"") && strings.Contains(line, ruleName) && strings.Contains(line, "drop") {
+			return true, nil
+		}
 	}
 
 	return false, nil
@@ -301,13 +309,15 @@ func (fw *FireWallEngine) deleteRuleFirewalld(ruleName string) (bool, error) {
 		return false, fmt.Errorf("failed to find firewall-cmd: %v", err)
 	}
 
-	// 从规则名提取IP来构建 rich rule
-	ip := extractIPFromRuleName(ruleName)
-	if ip == "" {
-		ip = ruleName // 如果无法提取，直接用 ruleName 作为IP
+	// 先查找包含该规则名的精确 rich rule（避免 CIDR 还原不准的问题）
+	richRule, err := fw.findRichRuleByName(path, ruleName)
+	if err != nil {
+		return false, fmt.Errorf("failed to find rich rule for %s: %v", ruleName, err)
 	}
-	richRule := fmt.Sprintf("rule priority=\"%s\" source address=\"%s\" name=\"%s\" drop",
-		FIREWALLD_RICH_RULE_PRIORITY, ip, ruleName)
+	if richRule == "" {
+		fmt.Printf("[WARN] 规则不存在: %s\n", ruleName)
+		return false, nil
+	}
 
 	// 删除运行时规则
 	cmd := exec.Command(path, "--remove-rich-rule", richRule)
@@ -330,6 +340,24 @@ func (fw *FireWallEngine) deleteRuleFirewalld(ruleName string) (bool, error) {
 	return true, nil
 }
 
+// findRichRuleByName 通过规则名查找精确的 rich rule 字符串
+func (fw *FireWallEngine) findRichRuleByName(firewallCmdPath string, ruleName string) (string, error) {
+	cmd := exec.Command(firewallCmdPath, "--list-rich-rules")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("failed to list rich rules: %v", err)
+	}
+
+	lines := strings.Split(string(output), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.Contains(line, "name=\""+ruleName+"\"") {
+			return line, nil
+		}
+	}
+	return "", nil
+}
+
 // deleteRuleIptables 通过 iptables 删除封禁规则
 func (fw *FireWallEngine) deleteRuleIptables(ruleName string) (bool, error) {
 	path, err := findExecutable("iptables")
@@ -348,13 +376,21 @@ func (fw *FireWallEngine) deleteRuleIptables(ruleName string) (bool, error) {
 }
 
 // extractIPFromRuleName 从规则名中提取IP
+// generateRuleName 将 "." -> "_" 且 "/" -> "_"
+// SamWAF_Block_192_168_1_100   => 192.168.1.100
+// SamWAF_Block_192_168_1_0_24  => 192.168.1.0/24
+// SamWAF_Block_10_0_0_1_32     => 10.0.0.1/32 (CIDR)  vs  10.0.0.132 (IP)
+// 无法仅从规则名区分以上两种情况，因此使用 / 替换 _，然后让 firewall-cmd 来判断
+// 实际上我们在删除/查询时不依赖 extractIPFromRuleName，而是直接用 firewall-cmd --list-rich-rules 查询
 func extractIPFromRuleName(ruleName string) string {
 	if !strings.HasPrefix(ruleName, RULE_PREFIX) {
 		return ""
 	}
 	safeName := strings.TrimPrefix(ruleName, RULE_PREFIX)
-	ip := strings.ReplaceAll(safeName, "_", ".")
-	return ip
+	// 将 _ 还原为 .（IP 的点号）
+	// 注意: / 也被替换为 _，但这里简单还原为 .
+	// 在实际删除规则时，我们通过 --list-rich-rules 获取精确的 source address
+	return strings.ReplaceAll(safeName, "_", ".")
 }
 
 // IsRuleExists 检查规则是否存在（自动选择后端）
@@ -486,28 +522,36 @@ func (fw *FireWallEngine) GetBlockedIPListFirewalld() ([]string, error) {
 		return nil, fmt.Errorf("failed to find firewall-cmd: %v", err)
 	}
 
-	cmd := exec.Command(path, "--list-all")
+	// 使用 --list-rich-rules 获取所有 rich rules（每条一行，格式明确）
+	cmd := exec.Command(path, "--list-rich-rules")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return nil, fmt.Errorf("failed to list firewalld rules: %v", err)
+		return nil, fmt.Errorf("failed to list firewalld rich rules: %v", err)
 	}
 
 	blockedIPs := []string{}
 	lines := strings.Split(string(output), "\n")
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
-		// 查找 rich rules 中包含 SamWAF_Block_ 前缀的规则
-		if strings.Contains(line, "rule") && strings.Contains(line, RULE_PREFIX) {
-			// 提取 source address
-			if idx := strings.Index(line, "source address=\""); idx != -1 {
-				start := idx + len("source address=\"")
-				end := strings.Index(line[start:], "\"")
-				if end != -1 {
-					ip := line[start : start+end]
-					ip = strings.TrimSuffix(ip, "/32")
-					blockedIPs = append(blockedIPs, ip)
-				}
-			}
+		// 只处理包含 SamWAF_Block_ 前缀的 rich rule
+		if !strings.Contains(line, RULE_PREFIX) {
+			continue
+		}
+		// 提取 source address="IP"
+		addrStart := strings.Index(line, "source address=\"")
+		if addrStart == -1 {
+			continue
+		}
+		addrStart += len("source address=\"")
+		addrEnd := strings.Index(line[addrStart:], "\"")
+		if addrEnd == -1 {
+			continue
+		}
+		ip := line[addrStart : addrStart+addrEnd]
+		// 去掉 /32 后缀还原原始IP格式；CIDR 不受影响
+		ip = strings.TrimSuffix(ip, "/32")
+		if ip != "" {
+			blockedIPs = append(blockedIPs, ip)
 		}
 	}
 	return blockedIPs, nil
