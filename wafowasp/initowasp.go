@@ -405,16 +405,18 @@ func (w *WafOWASP) processRequestBody(tx types.Transaction, r *http.Request, web
 //   - 默认仅从 MatchedRules 提取最关键信息，strings.Builder 预分配
 //   - 仅当 global.GWAF_LOG_DEBUG_ENABLE 为 true 时才去遍历 Variables().All() 收集完整上下文
 //     （原实现每次命中都全量扫描所有 collection，成百上千次 map 分配压垮 GC）
-func (w *WafOWASP) handleInterruption(tx types.Transaction, it *types.Interruption, weblog innerbean.WebLog) (bool, *types.Interruption, error) {
+func (w *WafOWASP) handleInterruption(tx types.Transaction, it *types.Interruption, weblog *innerbean.WebLog) (bool, *types.Interruption, error) {
 	matched := tx.MatchedRules()
 
-	// 在日志最前面输出请求域名、URI 和唯一标识符
-	details["domain"] = weblog.HOST
-	details["uri"] = weblog.URL
-	details["req_uuid"] = weblog.REQ_UUID
-
-	// 记录详细的日志信息
-	w.logger.Error("OWASP WAF Interruption", details)
+	// 简要日志：域名、URI、唯一标识符
+	logFields := map[string]interface{}{}
+	if weblog != nil {
+		logFields["domain"] = weblog.HOST
+		logFields["uri"] = weblog.URL
+		logFields["req_uuid"] = weblog.REQ_UUID
+		logFields["src_ip"] = weblog.SRC_IP
+	}
+	w.logger.Error("OWASP WAF Interruption", logFields)
 
 	// 不向上层暴露命中规则详情：it.Data 保持空，完整细节通过 zlog 记录。
 	// 这样 checkowasp.go 拼出的 result.Title 只有 "OWASP:<ruleID>"，不会把规则消息泄漏给访客或塞满通知面板。

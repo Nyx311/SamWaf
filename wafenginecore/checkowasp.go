@@ -56,7 +56,7 @@ func (waf *WafEngine) CheckOwasp(r *http.Request, weblogbean *innerbean.WebLog, 
 		return result
 	}
 
-	// 防御：理论上 Coraza 保证 isInterrupted ↔ interruption!=nil 一致，
+	// 防御：理论上 Coraza 保证 isInterrupted <-> interruption!=nil 一致，
 	// 但出于健壮性考虑，只要任一命中即视为拦截
 	if isInteeruption || interruption != nil {
 		ruleID := 0
@@ -85,20 +85,7 @@ func (waf *WafEngine) CheckOwasp(r *http.Request, weblogbean *innerbean.WebLog, 
 			"uri":    r.URL.RequestURI(),
 			"host":   r.Host,
 		})
-	hostDefense := model.ParseHostsDefense(hostTarget.Host.DEFENSE_JSON)
-	if hostDefense.DEFENSE_OWASP_SET == 1 {
-		isInteeruption, interruption, err := global.GWAF_OWASP.ProcessRequest(r, *weblogbean)
-		if err == nil && isInteeruption {
-			result.IsBlock = true
-			// 使用中断对象中的详细信息，附带请求URL便于排查
-			ruleDetail := "OWASP:" + strconv.Itoa(interruption.RuleID)
-			if interruption.Data != "" {
-				ruleDetail += interruption.Data
-			}
-			result.Title = ruleDetail + " [URL:" + weblogbean.URL + "]"
-			result.Content = "访问不合法"
-			weblogbean.RISK_LEVEL = 2
-		}
 	}
+
 	return result
 }
