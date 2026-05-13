@@ -18,3 +18,4 @@ dist/
 /ssl/
 /codetemplete/output/*
 /conf/config.yml
+.gocache/
