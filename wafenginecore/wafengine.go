@@ -338,7 +338,9 @@ func (waf *WafEngine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					BODY:          "黑名单IP拦截-未解析请求体",
 				}
 				decrementMonitor(hostCode)
-				EchoErrorInfo(w, r, &weblogbean, denyTitle, denyContent, hostTarget, waf.HostTarget[global.GWAF_GLOBAL_HOST_NAME], true, "ip_blocked")
+				// 安全获取全局主机引用，防止空指针
+				globalHost := waf.HostTarget[global.GWAF_GLOBAL_HOST_NAME]
+				EchoErrorInfo(w, r, &weblogbean, denyTitle, denyContent, hostTarget, globalHost, true, "ip_blocked")
 				return
 			}
 		}

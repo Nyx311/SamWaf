@@ -64,6 +64,9 @@ func TaskShareDbInfo() {
 
 	if needSharding {
 		global.GDATA_CURRENT_CHANGE = true
+		defer func() {
+			global.GDATA_CURRENT_CHANGE = false
+		}()
 		zlog.Info(innerLogName, "开始分库，原因:", shardingReason)
 
 		newDBFilename := fmt.Sprintf("local_log_%v.db", time.Now().Format("20060102150405"))
@@ -105,7 +108,16 @@ func TaskShareDbInfo() {
 				}
 			}
 			var testTotal int64
+			// 等待数据库连接完全关闭（最多30秒超时保护）
+			closeTimeout := time.After(30 * time.Second)
+		closeWaitLoop:
 			for {
+				select {
+				case <-closeTimeout:
+					zlog.Warn(innerLogName, "等待数据库关闭超时(30s)，强制继续")
+					break closeWaitLoop
+				default:
+				}
 				testError := global.GWAF_LOCAL_LOG_DB.Model(&innerbean.WebLog{}).Count(&testTotal).Error
 				if testError != nil {
 					zlog.Error(innerLogName, "检测数据", testError)
@@ -130,7 +142,6 @@ func TaskShareDbInfo() {
 			// MySQL / SQL Server：RENAME TABLE + AutoMigrate 重建空表（Milestone 2 实现）
 			zlog.Warn(innerLogName, "当前数据库驱动暂不支持自动分库，跳过:", dialect.Get().Name())
 		}
-		global.GDATA_CURRENT_CHANGE = false
 		zlog.Info(innerLogName, "切库完成...")
 	}
 

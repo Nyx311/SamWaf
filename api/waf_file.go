@@ -1,6 +1,7 @@
 package api
 
 import (
+	"SamWaf/common/zlog"
 	"SamWaf/enums"
 	"SamWaf/global"
 	"SamWaf/innerbean"
@@ -222,16 +223,23 @@ func (w *WafFileApi) deleteLogDatabase(filePath string) error {
 			return fmt.Errorf("关闭数据库连接失败: %v", err)
 		}
 
-		// 等待数据库完全关闭
+		// 等待数据库完全关闭（最多30秒超时保护）
 		var testTotal int64
+		closeTimeout := time.After(30 * time.Second)
+	closeWaitLoop:
 		for {
+			select {
+			case <-closeTimeout:
+				zlog.Warn("等待数据库关闭超时(30s)，强制继续")
+				break closeWaitLoop
+			default:
+			}
 			testError := global.GWAF_LOCAL_LOG_DB.Model(&innerbean.WebLog{}).Count(&testTotal).Error
 			if testError != nil {
 				break
 			}
 			time.Sleep(1 * time.Second)
 		}
-
 		// 将全局变量设置为nil
 		global.GWAF_LOCAL_LOG_DB = nil
 	}
