@@ -40,6 +40,9 @@ func (waf *WafEngine) CheckRule(r *http.Request, weblogbean *innerbean.WebLog, f
 		Title:           "",
 		Content:         "",
 	}
+	if hostTarget == nil || weblogbean == nil {
+		return result
+	}
 	//规则判断 （局部）
 	if hostTarget.Rule != nil {
 		if hostTarget.Rule.KnowledgeBase != nil {
@@ -70,9 +73,12 @@ func (waf *WafEngine) CheckRule(r *http.Request, weblogbean *innerbean.WebLog, f
 		}
 	}
 	//规则判断 （全局网站）
-	if waf.HostTarget[global.GWAF_GLOBAL_HOST_NAME].Host.GUARD_STATUS == 1 && waf.HostTarget[global.GWAF_GLOBAL_HOST_NAME].Rule != nil {
-		if waf.HostTarget[global.GWAF_GLOBAL_HOST_NAME].Rule.KnowledgeBase != nil {
-			ruleMatchs, err := waf.HostTarget[global.GWAF_GLOBAL_HOST_NAME].Rule.Match("MF", weblogbean)
+	if globalHostTarget == nil {
+		globalHostTarget = waf.HostTarget[global.GWAF_GLOBAL_HOST_NAME]
+	}
+	if globalHostTarget != nil && globalHostTarget.Host.GUARD_STATUS == 1 && globalHostTarget.Rule != nil {
+		if globalHostTarget.Rule.KnowledgeBase != nil {
+			ruleMatchs, err := globalHostTarget.Rule.Match("MF", weblogbean)
 			if err == nil {
 				if len(ruleMatchs) > 0 {
 					rulestr := ""
@@ -81,7 +87,7 @@ func (waf *WafEngine) CheckRule(r *http.Request, weblogbean *innerbean.WebLog, f
 					}
 					// 尝试从规则数据中解析阈值信息
 					// 遍历规则数据，查找包含 GetIPFailureCount 的规则
-					for _, ruleData := range waf.HostTarget[global.GWAF_GLOBAL_HOST_NAME].RuleData {
+					for _, ruleData := range globalHostTarget.RuleData {
 						if ruleData.RuleContent != "" {
 							minutes, count, found := parseIPFailureThreshold(ruleData.RuleContent)
 							if found {

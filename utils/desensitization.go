@@ -5,6 +5,9 @@ import (
 )
 
 func DeSenText(inStr string) string {
+	if global.GWAF_DLP == nil {
+		return inStr
+	}
 
 	if outStr, results, err := global.GWAF_DLP.Deidentify(inStr); err == nil {
 		//fmt.Printf("\t1. Deidentify( inStr: %s )\n", inStr)
@@ -16,6 +19,9 @@ func DeSenText(inStr string) string {
 }
 
 func DeSenTextByCustomMark(markName, inStr string) string {
+	if global.GWAF_DLP == nil {
+		return inStr
+	}
 
 	// 使用自定义脱敏规则对数据进行脱敏处理
 	maskedData, err := global.GWAF_DLP.Mask(inStr, markName)

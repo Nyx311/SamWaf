@@ -1167,17 +1167,20 @@ func (waf *WafEngine) modifyResponse() func(*http.Response) error {
 					}
 				}
 				//隐私保护（全局）
-				for i := 0; i < len(waf.HostTarget[global.GWAF_GLOBAL_HOST_NAME].LdpUrlLists); i++ {
-					// 将全局规则URL也转为小写
-					lowerGlobalRuleURL := strings.ToLower(waf.HostTarget[global.GWAF_GLOBAL_HOST_NAME].LdpUrlLists[i].Url)
+				globalLdpHost := waf.HostTarget[global.GWAF_GLOBAL_HOST_NAME]
+				if globalLdpHost != nil {
+					for i := 0; i < len(globalLdpHost.LdpUrlLists); i++ {
+						// 将全局规则URL也转为小写
+						lowerGlobalRuleURL := strings.ToLower(globalLdpHost.LdpUrlLists[i].Url)
 
-					if (waf.HostTarget[global.GWAF_GLOBAL_HOST_NAME].LdpUrlLists[i].CompareType == "等于" && lowerGlobalRuleURL == lowerRequestURI) ||
-						(waf.HostTarget[global.GWAF_GLOBAL_HOST_NAME].LdpUrlLists[i].CompareType == "前缀匹配" && strings.HasPrefix(lowerRequestURI, lowerGlobalRuleURL)) ||
-						(waf.HostTarget[global.GWAF_GLOBAL_HOST_NAME].LdpUrlLists[i].CompareType == "后缀匹配" && strings.HasSuffix(lowerRequestURI, lowerGlobalRuleURL)) ||
-						(waf.HostTarget[global.GWAF_GLOBAL_HOST_NAME].LdpUrlLists[i].CompareType == "包含匹配" && strings.Contains(lowerRequestURI, lowerGlobalRuleURL)) {
+						if (globalLdpHost.LdpUrlLists[i].CompareType == "等于" && lowerGlobalRuleURL == lowerRequestURI) ||
+							(globalLdpHost.LdpUrlLists[i].CompareType == "前缀匹配" && strings.HasPrefix(lowerRequestURI, lowerGlobalRuleURL)) ||
+							(globalLdpHost.LdpUrlLists[i].CompareType == "后缀匹配" && strings.HasSuffix(lowerRequestURI, lowerGlobalRuleURL)) ||
+							(globalLdpHost.LdpUrlLists[i].CompareType == "包含匹配" && strings.Contains(lowerRequestURI, lowerGlobalRuleURL)) {
 
-						ldpFlag = true
-						break
+							ldpFlag = true
+							break
+						}
 					}
 				}
 				if ldpFlag == true {
