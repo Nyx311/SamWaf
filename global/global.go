@@ -76,10 +76,11 @@ var (
 	GWAF_TENANT_ID          string   = "SamWafCom" // 当前租户ID
 
 	//管理端访问控制
-	GWAF_IP_WHITELIST          string = "0.0.0.0/0,::/0" //IP白名单 后台默认放行所有
-	GWAF_SSL_ENABLE            bool   = false            //是否启用SSL证书
-	GWAF_SECURITY_ENTRY_ENABLE bool   = false            //是否启用安全路径入口
-	GWAF_SECURITY_ENTRY_PATH   string = ""               //安全路径（18位随机码）
+	GWAF_IP_WHITELIST            string = "0.0.0.0/0,::/0" //IP白名单 后台默认放行所有
+	GWAF_SSL_ENABLE              bool   = false            //是否启用SSL证书
+	GWAF_SECURITY_ENTRY_ENABLE   bool   = false            //是否启用安全路径入口
+	GWAF_SECURITY_ENTRY_PATH     string = ""               //安全路径（18位随机码）
+	GWAF_SECURITY_EMERGENCY_PATH string = ""               //应急恢复路径（随机生成，首次启动自动写入 conf/config.yml）
 
 	//zlog 日志相关信息
 	GWAF_LOG_OUTPUT_FORMAT       string              = "console"  //zlog输出格式 控制台格式console,json格式
@@ -118,8 +119,15 @@ var (
 
 	GWAF_SHUTDOWN_SIGNAL bool = false // 系统关闭信号
 	/*****CACHE相关*********/
-	GCACHE_WAFCACHE      *cache.WafCache      //cache
-	GCACHE_WECHAT_ACCESS string          = "" //微信访问密钥
+	GCACHE_WAFCACHE      cache.CacheStore      //cache
+	GCACHE_WECHAT_ACCESS string           = "" //微信访问密钥
+
+	// Cache后端配置
+	GCACHE_TYPE           string = "memory" // 缓存类型: memory（默认）| redis
+	GCACHE_REDIS_HOST     string = "127.0.0.1"
+	GCACHE_REDIS_PORT     int    = 6379
+	GCACHE_REDIS_PASSWORD string = ""
+	GCACHE_REDIS_DB       int    = 0
 
 	/*********HTTP相关**************/
 	GWAF_HTTP_SENSITIVE_REPLACE_STRING = "**" //HTTP 敏感内容替换成
@@ -185,6 +193,22 @@ var (
 	GWAF_PWD_COREDB = "3Y)(27EtO^tK8Bj~CORE" //加密
 	GWAF_PWD_STATDB = "3Y)(27EtO^tK8Bj~STAT" //加密
 	GWAF_PWD_LOGDB  = "3Y)(27EtO^tK8Bj~LOG"  //加密
+
+	// Database driver: "sqlite" | "mysql" | "sqlserver" (default: sqlite)
+	GWAF_DB_DRIVER string = "sqlite"
+
+	// MySQL connection config (populated from conf/config.yml database.mysql.*)
+	GWAF_MYSQL_HOST                      string = "127.0.0.1"
+	GWAF_MYSQL_PORT                      int    = 3306
+	GWAF_MYSQL_USER                      string = "samwaf"
+	GWAF_MYSQL_PASSWORD                  string = ""
+	GWAF_MYSQL_CHARSET                   string = "utf8mb4"
+	GWAF_MYSQL_CORE_DB                   string = "samwaf_core"
+	GWAF_MYSQL_LOG_DB                    string = "samwaf_log"
+	GWAF_MYSQL_STATS_DB                  string = "samwaf_stats"
+	GWAF_MYSQL_MAX_OPEN_CONNS            int    = 50
+	GWAF_MYSQL_MAX_IDLE_CONNS            int    = 10
+	GWAF_MYSQL_CONN_MAX_LIFETIME_MINUTES int    = 60
 
 	//默认创建的账户和密码
 	GWAF_DEFAULT_ACCOUNT      string = "admin"         //默认创建的账户

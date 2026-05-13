@@ -187,6 +187,8 @@ func setConfigIntValue(name string, value int64, change int) {
 		if tasklog.GlobalTaskLogManager != nil {
 			tasklog.GlobalTaskLogManager.UpdateRetainDays(int(value))
 		}
+	case "http3_bbr":
+		global.GCONFIG_ENABLE_HTTP3_BBR = value
 	default:
 		zlog.Warn("Unknown config item:", name)
 	}
@@ -209,6 +211,9 @@ func setConfigStringValue(name string, value string, change int) {
 		break
 	case "gwaf_proxy_header":
 		global.GCONFIG_RECORD_PROXY_HEADER = value
+		break
+	case "gwaf_manage_proxy_header":
+		global.GCONFIG_MANAGE_PROXY_HEADER = value
 		break
 	case "owasp_mode":
 		switch value {
@@ -377,6 +382,7 @@ func TaskLoadSetting(initLoad bool) {
 	updateConfigStringItem(initLoad, "system", "gwaf_center_enable", global.GWAF_CENTER_ENABLE, "中心开关", "bool", "false|关闭,true|开启", configMap)
 	updateConfigStringItem(initLoad, "system", "gwaf_center_url", global.GWAF_CENTER_URL, "中心URL", "string", "", configMap)
 	updateConfigStringItem(initLoad, "system", "gwaf_proxy_header", global.GCONFIG_RECORD_PROXY_HEADER, "获取访客IP头信息（按照顺序）比如:X-Forwarded-For,X-Real-IP ,留空则提取的是直接访客IP", "string", "", configMap)
+	updateConfigStringItem(initLoad, "system", "gwaf_manage_proxy_header", global.GCONFIG_MANAGE_PROXY_HEADER, "管理端获取客户端IP头信息（按优先级逗号分隔，如 X-Forwarded-For,X-Real-IP,CF-Connecting-IP），留空则直接取网络IP", "string", "", configMap)
 
 	updateConfigIntItem(initLoad, "kafka", "kafka_enable", global.GCONFIG_RECORD_KAFKA_ENABLE, "kafka 是否激活", "int", "", configMap)
 	updateConfigStringItem(initLoad, "kafka", "kafka_url", global.GCONFIG_RECORD_KAFKA_URL, "kafka url地址", "string", "", configMap)
@@ -400,6 +406,7 @@ func TaskLoadSetting(initLoad bool) {
 	updateConfigIntItem(initLoad, "network", "connect_time_out", global.GCONFIG_RECORD_CONNECT_TIME_OUT, "连接超时（默认30s）", "int", "", configMap)
 	updateConfigIntItem(initLoad, "network", "keepalive_time_out", global.GCONFIG_RECORD_KEEPALIVE_TIME_OUT, "保持活动超时（默认30s）", "int", "", configMap)
 	updateConfigIntItem(initLoad, "network", "http3", global.GCONFIG_ENABLE_HTTP3, "是否启用http3（1启用 0关闭）", "int", "", configMap)
+	updateConfigIntItem(initLoad, "network", "http3_bbr", global.GCONFIG_ENABLE_HTTP3_BBR, "配置http3是否用BBR(默认NewReno)", "int", "", configMap)
 
 	updateConfigIntItem(initLoad, "system", "record_all_src_byte_info", global.GCONFIG_RECORD_ALL_SRC_BYTE_INFO, "启动记录原始请求BODY报文（1启动 0关闭）", "int", "", configMap)
 	updateConfigIntItem(initLoad, "system", "record_log_desensitize", global.GCONFIG_RECORD_LOG_DESENSITIZE, "请求记录是否进行脱敏处理（1开启脱敏 0关闭脱敏）", "options", "0|关闭脱敏,1|开启脱敏", configMap)

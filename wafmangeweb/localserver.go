@@ -11,6 +11,7 @@ import (
 	"SamWaf/wafmangeweb/static"
 	"context"
 	"crypto/tls"
+	_ "embed"
 	"errors"
 	"fmt"
 	"io"
@@ -20,11 +21,15 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-contrib/pprof"
 	"github.com/gin-gonic/gin"
 )
+
+//go:embed emergency_page.html
+var emergencyPageHTML string
 
 type WafWebManager struct {
 	HttpServer            *http.Server
@@ -93,12 +98,12 @@ func (h *securityPathHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 func (web *WafWebManager) initRouter(r *gin.Engine) {
 
 	PublicRouterGroup := r.Group("")
-	PublicRouterGroup.Use(middleware.SecApi(), middleware.IPWhitelist())
+	PublicRouterGroup.Use(middleware.SecApi(), middleware.IPWhitelist(), middleware.ReplayProtect())
 	router.PublicApiGroupApp.InitLoginRouter(PublicRouterGroup)
 	router.PublicApiGroupApp.InitCenterRouter(PublicRouterGroup) //注册中心接收接口
 
 	RouterGroup := r.Group("")
-	RouterGroup.Use(middleware.Auth(), middleware.OpenApiLogMiddleware(), middleware.CenterApi(), middleware.SecApi(), middleware.GinGlobalExceptionMiddleWare(), middleware.IPWhitelist()) //TODO 中心管控 特定
+	RouterGroup.Use(middleware.Auth(), middleware.ReplayProtect(), middleware.OpenApiLogMiddleware(), middleware.CenterApi(), middleware.SecApi(), middleware.GinGlobalExceptionMiddleWare(), middleware.IPWhitelist()) //TODO 中心管控 特定
 	{
 		router.ApiGroupApp.InitHostRouter(RouterGroup)
 		router.ApiGroupApp.InitLogRouter(RouterGroup)
@@ -153,7 +158,7 @@ func (web *WafWebManager) initRouter(r *gin.Engine) {
 
 	// 仅允许后台 Token 登录访问，拒绝 API Key 访问（安全敏感接口）
 	TokenOnlyRouterGroup := r.Group("")
-	TokenOnlyRouterGroup.Use(middleware.TokenOnlyAuth(), middleware.CenterApi(), middleware.SecApi(), middleware.GinGlobalExceptionMiddleWare(), middleware.IPWhitelist())
+	TokenOnlyRouterGroup.Use(middleware.TokenOnlyAuth(), middleware.ReplayProtect(), middleware.CenterApi(), middleware.SecApi(), middleware.GinGlobalExceptionMiddleWare(), middleware.IPWhitelist())
 	{
 		// 开放平台管理接口
 		router.ApiGroupApp.InitOPlatformKeyRouter(TokenOnlyRouterGroup)
@@ -169,6 +174,19 @@ func (web *WafWebManager) initRouter(r *gin.Engine) {
 
 	// 保存 gin.Engine 引用供 API 文档生成使用
 	api.GinEngineRef = r
+
+	// 应急恢复页面（随机路径，无需认证，先于 NoRoute/静态文件注册）
+	if global.GWAF_SECURITY_EMERGENCY_PATH != "" {
+		emergencyPath := "/" + global.GWAF_SECURITY_EMERGENCY_PATH
+		// 注入应急路径占位符，供页面 JS 推导 API 基础路径
+		renderedPage := strings.ReplaceAll(emergencyPageHTML, "{{EMERGENCY_PATH}}", global.GWAF_SECURITY_EMERGENCY_PATH)
+		r.GET(emergencyPath, func(c *gin.Context) {
+			c.Header("Content-Type", "text/html; charset=utf-8")
+			c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+			c.String(200, renderedPage)
+		})
+		zlog.Info(web.LogName, "emergency page registered at: "+emergencyPath)
+	}
 
 	if global.GWAF_RELEASE == "true" {
 		static.Static(r, func(handlers ...gin.HandlerFunc) {
@@ -208,7 +226,7 @@ func (web *WafWebManager) cors() gin.HandlerFunc {
 			// 将该域添加到allow-origin中
 			c.Header("Access-Control-Allow-Origin", origin) //
 			c.Header("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE, UPDATE")
-			c.Header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept, Authorization,X-Token,Remote-Waf-User-Id,OPEN-X-Token,X-Login-Type,X-Mobile-Token,X-API-Key")
+			c.Header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept, Authorization,X-Token,Remote-Waf-User-Id,OPEN-X-Token,X-Login-Type,X-Mobile-Token,X-API-Key,X-Request-Time,X-Request-Id")
 			c.Header("Access-Control-Expose-Headers", "Content-Length, Access-Control-Allow-Origin, Access-Control-Allow-Headers, Cache-Control, Content-Language, Content-Type")
 			//允许客户端传递校验信息比如 cookie
 			c.Header("Access-Control-Allow-Credentials", "true")

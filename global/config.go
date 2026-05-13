@@ -2,19 +2,20 @@ package global
 
 var (
 	/******记录参数配置****************/
-	GCONFIG_LOG_PERSIST_ENABLED         int64  = 1                   //是否将web日志持久化到日志库（默认1 ） 1 持久化入库 0 不入库
-	GCONFIG_RECORD_MAX_BODY_LENGTH      int64  = 1024 * 2            //限制记录最大请求的body长度 record_max_req_body_length
-	GCONFIG_RECORD_MAX_RES_BODY_LENGTH  int64  = 1024 * 4            //限制记录最大响应的body长度 record_max_rep_body_length
-	GCONFIG_RECORD_RESP                 int64  = 0                   // 是否记录响应记录 record_resp
-	GCONFIG_RECORD_PROXY_HEADER         string = ""                  //配置获取IP头信息
-	GCONFIG_RECORD_AUTO_LOAD_SSL        int64  = 1                   //是否每天凌晨3点自动加载ssl证书
-	GCONFIG_RECORD_KAFKA_ENABLE         int64  = 0                   //kafka 是否激活
-	GCONFIG_RECORD_KAFKA_URL            string = "127.0.0.1:9092"    //kafka url地址
-	GCONFIG_RECORD_KAFKA_TOPIC          string = "samwaf_logs_topic" //kafka topic
-	GCONFIG_RECORD_REDIRECT_HTTPS_CODE  int64  = 301                 //80跳转https的方式
-	GCONFIG_ENABLE_HTTPS_REDIRECT       int64  = 0                   //是否启用HTTPS重定向服务器 0关闭 1开启
-	GCONFIG_RECORD_LOGIN_MAX_ERROR_TIME int64  = 3                   //登录周期里错误最大次数
-	GCONFIG_RECORD_LOGIN_LIMIT_MINTUTES int64  = 1                   //登录错误记录周期 单位分钟最小1
+	GCONFIG_LOG_PERSIST_ENABLED         int64  = 1                           //是否将web日志持久化到日志库（默认1 ） 1 持久化入库 0 不入库
+	GCONFIG_RECORD_MAX_BODY_LENGTH      int64  = 1024 * 2                    //限制记录最大请求的body长度 record_max_req_body_length
+	GCONFIG_RECORD_MAX_RES_BODY_LENGTH  int64  = 1024 * 4                    //限制记录最大响应的body长度 record_max_rep_body_length
+	GCONFIG_RECORD_RESP                 int64  = 0                           // 是否记录响应记录 record_resp
+	GCONFIG_RECORD_PROXY_HEADER         string = ""                          //配置获取IP头信息
+	GCONFIG_MANAGE_PROXY_HEADER         string = "X-Forwarded-For,X-Real-IP" //管理端获取客户端IP头信息，留空则直接取网络IP
+	GCONFIG_RECORD_AUTO_LOAD_SSL        int64  = 1                           //是否每天凌晨3点自动加载ssl证书
+	GCONFIG_RECORD_KAFKA_ENABLE         int64  = 0                           //kafka 是否激活
+	GCONFIG_RECORD_KAFKA_URL            string = "127.0.0.1:9092"            //kafka url地址
+	GCONFIG_RECORD_KAFKA_TOPIC          string = "samwaf_logs_topic"         //kafka topic
+	GCONFIG_RECORD_REDIRECT_HTTPS_CODE  int64  = 301                         //80跳转https的方式
+	GCONFIG_ENABLE_HTTPS_REDIRECT       int64  = 0                           //是否启用HTTPS重定向服务器 0关闭 1开启
+	GCONFIG_RECORD_LOGIN_MAX_ERROR_TIME int64  = 3                           //登录周期里错误最大次数
+	GCONFIG_RECORD_LOGIN_LIMIT_MINTUTES int64  = 1                           //登录错误记录周期 单位分钟最小1
 
 	//是否进行系统统计数据推送
 	GCONFIG_ENABLE_SYSTEM_STATS_PUSH int64 = 1 // 是否启用系统统计数据推送 1启用 0禁用
@@ -25,6 +26,7 @@ var (
 	// 指纹认证相关配置
 	GCONFIG_ENABLE_DEVICE_FINGERPRINT int64 = 1 // 是否启用设备指纹认证 1启用 0禁用
 	GCONFIG_ENABLE_STRICT_IP_BINDING  int64 = 1 // 是否启用严格IP绑定 1启用 0禁用
+	GCONFIG_ENABLE_REPLAY_PROTECT     int64 = 1 // 防重放攻击开关 1启用 0禁用
 
 	GCONFIG_RECORD_ENABLE_OWASP        int64  = 0               //启动OWASP数据检测
 	GCONFIG_OWASP_MODE                 string = "DetectionOnly" //OWASP 检测引擎工作模式: On(拦截) / DetectionOnly(观察/仅记录) / Off(关闭)
@@ -42,6 +44,7 @@ var (
 	//GCONFIG_RECORD_PATCH_VERSION_LOG   int64 = 20250106 // 日志数据库补丁日期
 	GCONFIG_RECORD_ALL_SRC_BYTE_INFO int64 = 0 //记录原始信息(默认不开启)
 	GCONFIG_ENABLE_HTTP3             int64 = 0 //配置是否启用http3(默认关闭)
+	GCONFIG_ENABLE_HTTP3_BBR         int64 = 0 //配置http3是否用BBR(默认NewReno)
 	GCONFIG_RECORD_LOG_DESENSITIZE   int64 = 1 //请求记录是否进行脱敏处理 1开启脱敏 0关闭脱敏
 
 	GCONFIG_RECORD_TOKEN_EXPIRE_MINTUTES     int64 = 5  //令牌有效期 单位分钟

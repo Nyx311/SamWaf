@@ -4,6 +4,7 @@ import (
 	"SamWaf/common/uuid"
 	"SamWaf/global"
 	"SamWaf/utils"
+	"SamWaf/wafdb/dialect"
 	"SamWaf/wafowasp"
 	"crypto/rand"
 	"fmt"
@@ -193,6 +194,41 @@ func LoadAndInitConfig() {
 		config.Set("security.fingerprint_debug_log", global.GWAF_FINGERPRINT_DEBUG_LOG)
 		configChanged = true
 	}
+	//配置和提取应急路径
+	if config.IsSet("security.emergency_path") {
+		global.GWAF_SECURITY_EMERGENCY_PATH = config.GetString("security.emergency_path")
+	} else {
+		config.Set("security.emergency_path", "")
+		configChanged = true
+	}
+	//应急路径为空时自动生成（首次启动或手动清空后重启均会重新生成）
+	if global.GWAF_SECURITY_EMERGENCY_PATH == "" {
+		global.GWAF_SECURITY_EMERGENCY_PATH = generateSecurityEntryPath()
+		config.Set("security.emergency_path", global.GWAF_SECURITY_EMERGENCY_PATH)
+		configChanged = true
+		fmt.Printf("%s\tINFO\t应急恢复路径已生成: %s\n", currentTime, global.GWAF_SECURITY_EMERGENCY_PATH)
+	}
+
+	// Cache后端配置
+	if config.IsSet("cache.type") {
+		global.GCACHE_TYPE = config.GetString("cache.type")
+	} else {
+		config.Set("cache.type", global.GCACHE_TYPE)
+		configChanged = true
+	}
+	if config.IsSet("cache.redis.host") {
+		global.GCACHE_REDIS_HOST = config.GetString("cache.redis.host")
+	}
+	if config.IsSet("cache.redis.port") {
+		global.GCACHE_REDIS_PORT = config.GetInt("cache.redis.port")
+	}
+	if config.IsSet("cache.redis.password") {
+		global.GCACHE_REDIS_PASSWORD = config.GetString("cache.redis.password")
+	}
+	if config.IsSet("cache.redis.db") {
+		global.GCACHE_REDIS_DB = config.GetInt("cache.redis.db")
+	}
+
 	// 只有在配置发生变化时才写入文件
 	if configChanged {
 		err := config.WriteConfig()
@@ -201,10 +237,77 @@ func LoadAndInitConfig() {
 			return
 		}
 		fmt.Printf("%s\tINFO\t config updated\n", currentTime)
+		configChanged = false
 	}
 
 	fmt.Printf("%s\tINFO\tuser_code:%s ,soft_id:%s\n",
 		currentTime, global.GWAF_USER_CODE, global.GWAF_TENANT_ID)
+
+	// ── 数据库 driver 配置 ──────────────────────────────────────────────
+	if config.IsSet("database.driver") {
+		global.GWAF_DB_DRIVER = config.GetString("database.driver")
+	} else {
+		config.Set("database.driver", global.GWAF_DB_DRIVER) // 写入默认值 sqlite
+		configChanged = true
+	}
+
+	if global.GWAF_DB_DRIVER == "mysql" {
+		// MySQL 连接参数（有默认值，仅在 config.yml 有对应键时才覆盖）
+		if config.IsSet("database.mysql.host") {
+			global.GWAF_MYSQL_HOST = config.GetString("database.mysql.host")
+		}
+		if config.IsSet("database.mysql.port") {
+			global.GWAF_MYSQL_PORT = config.GetInt("database.mysql.port")
+		}
+		if config.IsSet("database.mysql.user") {
+			global.GWAF_MYSQL_USER = config.GetString("database.mysql.user")
+		}
+		if config.IsSet("database.mysql.password") {
+			global.GWAF_MYSQL_PASSWORD = config.GetString("database.mysql.password")
+		}
+		if config.IsSet("database.mysql.charset") {
+			global.GWAF_MYSQL_CHARSET = config.GetString("database.mysql.charset")
+		}
+		if config.IsSet("database.mysql.core_db") {
+			global.GWAF_MYSQL_CORE_DB = config.GetString("database.mysql.core_db")
+		}
+		if config.IsSet("database.mysql.log_db") {
+			global.GWAF_MYSQL_LOG_DB = config.GetString("database.mysql.log_db")
+		}
+		if config.IsSet("database.mysql.stats_db") {
+			global.GWAF_MYSQL_STATS_DB = config.GetString("database.mysql.stats_db")
+		}
+		if config.IsSet("database.mysql.max_open_conns") {
+			global.GWAF_MYSQL_MAX_OPEN_CONNS = config.GetInt("database.mysql.max_open_conns")
+		}
+		if config.IsSet("database.mysql.max_idle_conns") {
+			global.GWAF_MYSQL_MAX_IDLE_CONNS = config.GetInt("database.mysql.max_idle_conns")
+		}
+		if config.IsSet("database.mysql.conn_max_lifetime_minutes") {
+			global.GWAF_MYSQL_CONN_MAX_LIFETIME_MINUTES = config.GetInt("database.mysql.conn_max_lifetime_minutes")
+		}
+	}
+
+	// 只有在配置发生变化时才写入文件（提前写，dialect 注册在下方）
+	if configChanged {
+		err := config.WriteConfig()
+		if err != nil {
+			fmt.Printf("%s\tERROR\twrite config failed:%v\n", currentTime, err)
+			return
+		}
+		fmt.Printf("%s\tINFO\t config updated\n", currentTime)
+		configChanged = false // 已写，重置标志
+	}
+
+	// 注册数据库方言
+	switch global.GWAF_DB_DRIVER {
+	case "mysql":
+		dialect.Register(&dialect.MySQLDialect{})
+		fmt.Printf("%s\tINFO\t数据库驱动: MySQL (%s:%d)\n",
+			currentTime, global.GWAF_MYSQL_HOST, global.GWAF_MYSQL_PORT)
+	default:
+		dialect.Register(&dialect.SQLiteDialect{})
+	}
 }
 
 // UpdateIpWhitelist 更新IP白名单配置
