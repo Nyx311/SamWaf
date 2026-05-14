@@ -709,7 +709,8 @@ func (p *ReverseProxy) handleUpgradeResponse(rw http.ResponseWriter, req *http.R
 		p.getErrorHandler()(rw, req, fmt.Errorf("response flush: %v", err))
 		return
 	}
-	errc := make(chan error, 1)
+	// Use a buffered channel to prevent goroutine leaks when both copy goroutines finish.
+	errc := make(chan error, 2)
 	spc := switchProtocolCopier{user: conn, backend: backConn}
 	go spc.copyToBackend(errc)
 	go spc.copyFromBackend(errc)
