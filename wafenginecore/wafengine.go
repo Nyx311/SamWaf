@@ -292,56 +292,73 @@ func (waf *WafEngine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if hostTarget.Host.GUARD_STATUS == 1 && hostTarget.Host.LogOnlyMode != 1 {
 			earlyNetSrcIp := utils.GetSourceClientIP(r.RemoteAddr)
 			checkIp := model.GetClientIPByMode(hostTarget.Host.IPMode, earlyNetSrcIp, clientIP)
+			globalHostSafe := waf.HostTarget[global.GWAF_GLOBAL_HOST_NAME]
 
-			var denyTitle, denyContent string
-			for i := 0; i < len(hostTarget.IPBlockLists); i++ {
-				if utils.CheckIPInCIDR(checkIp, hostTarget.IPBlockLists[i].Ip) {
-					denyTitle, denyContent = "IP黑名单", "您的访问被阻止了IP限制"
+			isIPAllowed := false
+			for i := 0; i < len(hostTarget.IPWhiteLists); i++ {
+				if utils.CheckIPInCIDR(checkIp, hostTarget.IPWhiteLists[i].Ip) {
+					isIPAllowed = true
 					break
 				}
 			}
-			if denyTitle == "" {
-				globalHostSafe := waf.HostTarget[global.GWAF_GLOBAL_HOST_NAME]
-				if globalHostSafe != nil && globalHostSafe.Host.GUARD_STATUS == 1 {
-					for i := 0; i < len(globalHostSafe.IPBlockLists); i++ {
-						if utils.CheckIPInCIDR(checkIp, globalHostSafe.IPBlockLists[i].Ip) {
-							denyTitle, denyContent = "【全局】IP黑名单", "您的访问被阻止了IP限制"
-							break
-						}
+			if !isIPAllowed && globalHostSafe != nil && globalHostSafe.Host.GUARD_STATUS == 1 {
+				for i := 0; i < len(globalHostSafe.IPWhiteLists); i++ {
+					if utils.CheckIPInCIDR(checkIp, globalHostSafe.IPWhiteLists[i].Ip) {
+						isIPAllowed = true
+						break
 					}
 				}
 			}
+			if !isIPAllowed {
+				var denyTitle, denyContent string
+				for i := 0; i < len(hostTarget.IPBlockLists); i++ {
+					if utils.CheckIPInCIDR(checkIp, hostTarget.IPBlockLists[i].Ip) {
+						denyTitle, denyContent = "IP黑名单", "您的访问被阻止了IP限制"
+						break
+					}
+				}
+				if denyTitle == "" {
+					if globalHostSafe != nil && globalHostSafe.Host.GUARD_STATUS == 1 {
+						for i := 0; i < len(globalHostSafe.IPBlockLists); i++ {
+							if utils.CheckIPInCIDR(checkIp, globalHostSafe.IPBlockLists[i].Ip) {
+								denyTitle, denyContent = "【全局】IP黑名单", "您的访问被阻止了IP限制"
+								break
+							}
+						}
+					}
+				}
 
-			if denyTitle != "" {
-				datetimeNow := time.Now()
-				hostStr := r.Host
-				if r.TLS != nil {
-					hostStr = "https://" + hostStr
-				} else {
-					hostStr = "http://" + hostStr
+				if denyTitle != "" {
+					datetimeNow := time.Now()
+					hostStr := r.Host
+					if r.TLS != nil {
+						hostStr = "https://" + hostStr
+					} else {
+						hostStr = "http://" + hostStr
+					}
+					currentDay, _ := strconv.Atoi(datetimeNow.Format("20060102"))
+					weblogbean := innerbean.WebLog{
+						HOST:          hostStr,
+						URL:           r.RequestURI,
+						SRC_IP:        clientIP,
+						SRC_PORT:      clientPort,
+						CREATE_TIME:   datetimeNow.Format("2006-01-02 15:04:05"),
+						UNIX_ADD_TIME: datetimeNow.UnixNano() / 1e6,
+						REQ_UUID:      uuid.GenUUID(),
+						USER_CODE:     global.GWAF_USER_CODE,
+						HOST_CODE:     hostCode,
+						TenantId:      global.GWAF_TENANT_ID,
+						Day:           currentDay,
+						NetSrcIp:      earlyNetSrcIp,
+						WebLogVersion: global.GWEBLOG_VERSION,
+						BODY:          "黑名单IP拦截-未解析请求体",
+					}
+					decrementMonitor(hostCode)
+					// 安全获取全局主机引用，防止空指针
+					globalHost := waf.HostTarget[global.GWAF_GLOBAL_HOST_NAME]
+					EchoErrorInfo(w, r, &weblogbean, denyTitle, denyContent, hostTarget, globalHost, true, "ip_blocked")
+					return
 				}
-				currentDay, _ := strconv.Atoi(datetimeNow.Format("20060102"))
-				weblogbean := innerbean.WebLog{
-					HOST:          hostStr,
-					URL:           r.RequestURI,
-					SRC_IP:        clientIP,
-					SRC_PORT:      clientPort,
-					CREATE_TIME:   datetimeNow.Format("2006-01-02 15:04:05"),
-					UNIX_ADD_TIME: datetimeNow.UnixNano() / 1e6,
-					REQ_UUID:      uuid.GenUUID(),
-					USER_CODE:     global.GWAF_USER_CODE,
-					HOST_CODE:     hostCode,
-					TenantId:      global.GWAF_TENANT_ID,
-					Day:           currentDay,
-					NetSrcIp:      earlyNetSrcIp,
-					WebLogVersion: global.GWEBLOG_VERSION,
-					BODY:          "黑名单IP拦截-未解析请求体",
-				}
-				decrementMonitor(hostCode)
-				// 安全获取全局主机引用，防止空指针
-				globalHost := waf.HostTarget[global.GWAF_GLOBAL_HOST_NAME]
-				EchoErrorInfo(w, r, &weblogbean, denyTitle, denyContent, hostTarget, globalHost, true, "ip_blocked")
-				return
 			}
 		}
 
