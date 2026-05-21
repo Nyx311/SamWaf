@@ -562,6 +562,11 @@ func (waf *WafEngine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 
+			// URL block list must override whitelist bypass rules.
+			if handleBlock(waf.CheckDenyURL) {
+				return
+			}
+
 			// 检测白名单开始
 			detectionWhiteResult := detection.Result{JumpGuardResult: false}
 			checkFunctions := []func(*http.Request, *innerbean.WebLog, url.Values, *wafenginmodel.HostSafe, *wafenginmodel.HostSafe) detection.Result{
@@ -579,9 +584,6 @@ func (waf *WafEngine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if detectionWhiteResult.JumpGuardResult == false {
 
 				if handleBlock(waf.CheckDenyIP) {
-					return
-				}
-				if handleBlock(waf.CheckDenyURL) {
 					return
 				}
 
