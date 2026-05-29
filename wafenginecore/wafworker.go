@@ -143,7 +143,7 @@ func (waf *WafEngine) LoadHost(inHost model.Hosts) []innerbean.ServerRunTime {
 	zlog.Debug("主机host" + inHost.Code + " 版本" + strconv.Itoa(vcnt))
 	var ruleconfigs []model.Rules
 	if vcnt > 0 {
-		global.GWAF_LOCAL_DB.Where("host_code = ?and rule_status<>999", inHost.Code).Find(&ruleconfigs)
+		global.GWAF_LOCAL_DB.Where("host_code = ? and rule_status<>999", inHost.Code).Find(&ruleconfigs)
 		ruleHelper.LoadRules(ruleconfigs)
 	}
 	//查询ip限流(应该针对一个网址只有一个)
@@ -225,6 +225,16 @@ func (waf *WafEngine) LoadHost(inHost model.Hosts) []innerbean.ServerRunTime {
 	var cacheRuleList []model.CacheRule
 	global.GWAF_LOCAL_DB.Where("host_code=? ", inHost.Code).Find(&cacheRuleList)
 
+	//查询路径路由规则
+	var pathRuleList []model.HostPathRule
+	global.GWAF_LOCAL_DB.Where("host_code=? ", inHost.Code).Order("priority asc, create_time asc").Find(&pathRuleList)
+
+	//解析静态站点安全配置（供路径规则静态文件服务共享使用）
+	var staticCfg model.StaticSiteConfig
+	if inHost.StaticSiteJSON != "" {
+		_ = json.Unmarshal([]byte(inHost.StaticSiteJSON), &staticCfg)
+	}
+
 	//初始化主机host
 	hostsafe := &wafenginmodel.HostSafe{
 		LoadBalanceRuntime: &wafenginmodel.LoadBalanceRuntime{
@@ -249,6 +259,8 @@ func (waf *WafEngine) LoadHost(inHost model.Hosts) []innerbean.ServerRunTime {
 		HttpAuthBases:       httpAuthList,
 		BlockingPage:        blockingPageMap,
 		CacheRule:           cacheRuleList,
+		PathRules:           pathRuleList,
+		StaticConfig:        staticCfg,
 	}
 	hostsafe.Mux.Lock()
 	defer hostsafe.Mux.Unlock()
