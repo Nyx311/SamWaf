@@ -22,11 +22,11 @@ jobs:
 
       - name: Download SamWafWeb
         run: |
-          curl -L https://github.com/Nyx311/SamWafWeb/releases/latest/download/dist.zip -o dist.tar.gz
-          tar -zxvf dist.tar.gz
+          curl -L https://github.com/Nyx311/SamWafWeb/releases/latest/download/dist.zip -o dist.zip
+          unzip -q dist.zip
           rm -rf public/dist
           mv -f dist public
-          rm -rf dist.tar.gz
+          rm -rf dist.zip
 
       - name: Set up QEMU
         if: matrix.arch == 'arm64'
