@@ -41,12 +41,9 @@ func (waf *WafEngine) CheckDenyIP(r *http.Request, weblogbean *innerbean.WebLog,
 		}
 	}
 	//ip黑名单策略（全局）
-	if globalHostTarget == nil {
-		globalHostTarget = waf.HostTarget[global.GWAF_GLOBAL_HOST_NAME]
-	}
-	if globalHostTarget != nil && globalHostTarget.Host.GUARD_STATUS == 1 && globalHostTarget.IPBlockLists != nil {
-		for i := 0; i < len(globalHostTarget.IPBlockLists); i++ {
-			if utils.CheckIPInCIDR(clientIp, globalHostTarget.IPBlockLists[i].Ip) {
+	if waf.rt().HostTarget[global.GWAF_GLOBAL_HOST_NAME] != nil && waf.rt().HostTarget[global.GWAF_GLOBAL_HOST_NAME].Host.GUARD_STATUS == 1 && waf.rt().HostTarget[global.GWAF_GLOBAL_HOST_NAME].IPBlockLists != nil {
+		for i := 0; i < len(waf.rt().HostTarget[global.GWAF_GLOBAL_HOST_NAME].IPBlockLists); i++ {
+			if utils.CheckIPInCIDR(clientIp, waf.rt().HostTarget[global.GWAF_GLOBAL_HOST_NAME].IPBlockLists[i].Ip) {
 				weblogbean.RISK_LEVEL = 1
 				result.IsBlock = true
 				result.Title = "【全局】IP黑名单"

@@ -13,13 +13,17 @@ import (
 	"SamWaf/model"
 	"SamWaf/model/wafenginmodel"
 	"SamWaf/plugin"
+	"SamWaf/supervisor"
 	"SamWaf/utils"
+	"SamWaf/wafai"
+	"SamWaf/wafappengine"
 	"SamWaf/wafconfig"
 	"SamWaf/wafdb"
 	"SamWaf/wafenginecore"
 	"SamWaf/wafenginecore/wafcaptcha"
 	"SamWaf/wafinit"
 	"SamWaf/wafipban"
+	"SamWaf/wafipc"
 	"SamWaf/wafmangeweb"
 	"SamWaf/wafnotify"
 	"SamWaf/wafowasp"
@@ -100,8 +104,7 @@ func (m *wafSystenService) Start(s service.Service) error {
 // Stop 是服务停止时调用的方法
 func (m *wafSystenService) Stop(s service.Service) error {
 	zlog.Info("服务形式的 -----stop")
-	wafsafeclear.SafeClear()
-	m.stopSamWaf()
+	m.Graceful()
 	return nil
 }
 
@@ -124,25 +127,19 @@ func NeverExit(name string, f func()) {
 // run 是服务的主要逻辑
 func (m *wafSystenService) run() {
 
-	// 先尝试监听端口，检查是否被占用
-	listener, err := net.Listen("tcp", ":"+strconv.Itoa(global.GWAF_LOCAL_SERVER_PORT))
-	defer func() {
-		if listener != nil {
-			err := listener.Close()
-			if err != nil {
-				return
-			}
+	// 先尝试监听端口，检查是否被占用。
+	// 升级接管(takeover)模式下旧 Worker 仍持有管理端口 :26666，新 Worker 预期与其并存，故跳过该探测。
+	if !global.GWAF_RUNTIME_IS_TAKEOVER {
+		listener, err := net.Listen("tcp", ":"+strconv.Itoa(global.GWAF_LOCAL_SERVER_PORT))
+		if err != nil {
+			errMsg := fmt.Sprintf("管理界面端口 %d 已被占用，请检查并修改配置(conf/config.yml local_port字段)或关闭占用该端口的程序: %s",
+				global.GWAF_LOCAL_SERVER_PORT, err.Error())
+			zlog.Error(errMsg)
+			panic(errMsg)
 		}
-	}()
-	if err != nil {
-		errMsg := fmt.Sprintf("管理界面端口 %d 已被占用，请检查并修改配置(conf/config.yml local_port字段)或关闭占用该端口的程序: %s",
-			global.GWAF_LOCAL_SERVER_PORT, err.Error())
-		zlog.Error(errMsg)
-		panic(errMsg)
-		return
-	}
-	if listener != nil {
-		listener.Close()
+		if listener != nil {
+			listener.Close()
+		}
 	}
 	// 获取当前执行文件的路径
 	executablePath, err := os.Executable()
@@ -187,6 +184,17 @@ func (m *wafSystenService) run() {
 			log.Fatalf("Failed to load IPv4 GeoLite2 database: %v", err)
 		}
 		zlog.Info("IPv4 GeoLite2 database loaded successfully")
+	} else if global.GCONFIG_IP_V4_SOURCE == "ipdb" {
+		ipdbPath := filepath.Join(utils.GetCurrentDir(), "data", "iplocation.ipdb")
+		if _, err := os.Stat(ipdbPath); err == nil {
+			if err2 := global.GIPLOCATION_MANAGER.LoadIpdb(ipdbPath); err2 != nil {
+				zlog.Warn("Failed to load ipdb database (v4): ", err2)
+			} else {
+				zlog.Info("ipdb database loaded successfully (v4 source)")
+			}
+		} else {
+			zlog.Warn("ipdb database file not found, please upload iplocation.ipdb")
+		}
 	}
 
 	// 加载 IPv6 数据库
@@ -231,9 +239,37 @@ func (m *wafSystenService) run() {
 			log.Fatalf("Failed to load IPv6 GeoLite2 database: %v", err)
 		}
 		zlog.Info("IPv6 GeoLite2 database loaded successfully")
+	} else if global.GCONFIG_IP_V6_SOURCE == "ipdb" {
+		// 如果 v4 已经加载了 ipdb，跳过重复加载
+		if !global.GIPLOCATION_MANAGER.IsIpdbLoaded() {
+			ipdbPath := filepath.Join(utils.GetCurrentDir(), "data", "iplocation.ipdb")
+			if _, err := os.Stat(ipdbPath); err == nil {
+				if err2 := global.GIPLOCATION_MANAGER.LoadIpdb(ipdbPath); err2 != nil {
+					zlog.Warn("Failed to load ipdb database (v6): ", err2)
+				} else {
+					zlog.Info("ipdb database loaded successfully (v6 source)")
+				}
+			} else {
+				zlog.Warn("ipdb database file not found, please upload iplocation.ipdb")
+			}
+		} else {
+			zlog.Info("ipdb database already loaded (shared with v4)")
+		}
 	}
 	global.GWAF_DLP_CONFIG = ldpConfig
 	global.GWAF_REG_PUBLIC_KEY = publicKey
+
+	//初始化AI智能检测器，若存在已上传的模型包则加载（失败安全，不影响启动）
+	global.GWAF_AI_DETECTOR = wafai.NewDetector()
+	aiModelPath := filepath.Join(utils.GetCurrentDir(), "data", "ai_model", "current.swai")
+	if _, err := os.Stat(aiModelPath); err == nil {
+		if manifest, err := global.GWAF_AI_DETECTOR.LoadFromFile(aiModelPath); err != nil {
+			zlog.Warn("AI模型加载失败，AI检测将不可用: ", err.Error())
+		} else {
+			zlog.Info(fmt.Sprintf("AI模型加载成功: version=%s feature=%s type=%s",
+				manifest.ModelVersion, manifest.FeatureVersion, manifest.ModelType))
+		}
+	}
 
 	//owasp资源 释放
 	err = wafinit.CheckAndReleaseDataset(owaspAssets, utils.GetCurrentDir()+"/data/owasp", "owasp")
@@ -370,6 +406,20 @@ func (m *wafSystenService) run() {
 
 	//初始化一次系统参数信息
 	waftask.TaskLoadSetting(true)
+
+	// IP 数据库：配置已从 DB 读出，按持久化的数据源权威重载一次
+	// （启动早期 manager 用的是默认源，此处才是真正生效的加载点，解决重启后 ipdb 回退到 ip2region 的问题）
+	if global.GIPLOCATION_MANAGER != nil {
+		ipDataDir := filepath.Join(utils.GetCurrentDir(), "data")
+		if err := global.GIPLOCATION_MANAGER.ReloadFromConfig(
+			ipDataDir,
+			global.GCONFIG_IP_V4_SOURCE, global.GCONFIG_IP_V6_SOURCE,
+			global.GCONFIG_IP_V4_FORMAT, global.GCONFIG_IP_V6_FORMAT,
+		); err != nil {
+			zlog.Warn("IP 数据库按配置重载失败: ", err)
+		}
+	}
+
 	// 初始化任务日志管理器（需在 TaskLoadSetting 后执行，以获取正确的 retainDays 配置）
 	taskLogDir := filepath.Join(utils.GetCurrentDir(), "logs", "task")
 	tasklog.InitGlobalTaskLogManager(taskLogDir, int(global.GCONFIG_TASK_LOG_RETAIN_DAYS))
@@ -391,12 +441,9 @@ func (m *wafSystenService) run() {
 	)
 	//启动waf
 	globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE = &wafenginecore.WafEngine{
-		HostTarget: map[string]*wafenginmodel.HostSafe{},
-		//主机和code的关系
-		HostCode:             map[string]string{},
-		HostTargetNoPort:     map[string]string{},
-		HostTargetMoreDomain: map[string]string{},
-		ServerOnline:         wafenginmodel.NewSafeServerMap(),
+		//路由表(HostTarget/HostCode/HostTargetNoPort/HostTargetMoreDomain)改为 RCU 快照，
+		//下方 InitRouting() 初始化为空表；读走 rt()，写走 copy-on-write 助手。
+		ServerOnline: wafenginmodel.NewSafeServerMap(),
 		//所有证书情况 对应端口 可能多个端口都是https 443，或者其他非标准端口也要实现https证书
 		AllCertificate: wafenginecore.AllCertificate{
 			Mux: sync.Mutex{},
@@ -406,14 +453,25 @@ func (m *wafSystenService) run() {
 		Sensitive:           make([]model.Sensitive, 0),
 		PluginManager:       globalobj.GWAF_RUNTIME_OBJ_PLUGIN_MANAGER, // 设置插件管理器
 	}
+	//初始化路由快照(RCU 空表)，之后 StartWaf→LoadAllHost 通过 copy-on-write 填充
+	globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.InitRouting()
 	http.Handle("/", globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE)
 	globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.StartWaf()
 
 	//启动隧道
 	globalobj.GWAF_RUNTIME_OBJ_TUNNEL_ENGINE = waftunnelengine.NewWafTunnelEngine()
-	globalobj.GWAF_RUNTIME_OBJ_TUNNEL_ENGINE.StartTunnel()
-	//加载网站IP黑名单数据到隧道引擎
-	globalobj.GWAF_RUNTIME_OBJ_TUNNEL_ENGINE.LoadAllIPBlockLists()
+	//启动应用管理引擎
+	globalobj.GWAF_RUNTIME_OBJ_APP_ENGINE = wafappengine.NewWafAppEngine()
+	// 隧道/应用是独占型单例(独占端口/外部进程)，不能与旧 Worker 并存。
+	// takeover 升级模式下延迟到旧 Worker 退出后由 Supervisor 的 ACTIVATE 触发接管（见 activateSingletons）。
+	if !global.GWAF_RUNTIME_IS_TAKEOVER {
+		globalobj.GWAF_RUNTIME_OBJ_TUNNEL_ENGINE.StartTunnel()
+		globalobj.GWAF_RUNTIME_OBJ_APP_ENGINE.StartApps()
+		//加载网站IP黑名单数据到隧道引擎
+		globalobj.GWAF_RUNTIME_OBJ_TUNNEL_ENGINE.LoadAllIPBlockLists()
+	} else {
+		zlog.Info("[Worker] takeover 模式：暂不启动隧道/应用，等待旧 Worker 退出后由 Supervisor 的 ACTIVATE 接管")
+	}
 	//启动管理界面
 	webmanager = &wafmangeweb.WafWebManager{LogName: "WebManager"}
 	go func() {
@@ -433,6 +491,7 @@ func (m *wafSystenService) run() {
 	globalobj.GWAF_RUNTIME_OBJ_WAF_TaskRegistry.RegisterTask(enums.TASK_RUNTIME_QPS_CLEAN, waftask.TaskLogQpsClean)
 	globalobj.GWAF_RUNTIME_OBJ_WAF_TaskRegistry.RegisterTask(enums.TASK_HOST_QPS_CLEAN, waftask.TaskHostQpsClean)
 	globalobj.GWAF_RUNTIME_OBJ_WAF_TaskRegistry.RegisterTask(enums.TASK_SHARE_DB, waftask.TaskShareDbInfo)
+	globalobj.GWAF_RUNTIME_OBJ_WAF_TaskRegistry.RegisterTask(enums.TASK_SHARE_DB_CHECK, waftask.TaskShareDbInfo)
 	globalobj.GWAF_RUNTIME_OBJ_WAF_TaskRegistry.RegisterTask(enums.TASK_COUNTER, waftask.TaskCounter)
 	globalobj.GWAF_RUNTIME_OBJ_WAF_TaskRegistry.RegisterTask(enums.TASK_DELAY_INFO, waftask.TaskDelayInfo)
 	globalobj.GWAF_RUNTIME_OBJ_WAF_TaskRegistry.RegisterTask(enums.TASK_LOAD_CONFIG, waftask.TaskLoadSettingCron)
@@ -461,7 +520,10 @@ func (m *wafSystenService) run() {
 		globalobj.GWAF_RUNTIME_OBJ_WAF_TaskScheduler.ScheduleTask(task.TaskUnit, task.TaskValue, task.TaskAt, task.TaskMethod, task.TaskDaysOfTheWeek)
 	}
 	//结束 需要添加到任务注册器里面的
-	globalobj.GWAF_RUNTIME_OBJ_WAF_TaskScheduler.Start()
+	// cron 任务调度同样是单例（避免新旧 Worker 重复执行定时任务）；takeover 模式延迟到 ACTIVATE 再启动。
+	if !global.GWAF_RUNTIME_IS_TAKEOVER {
+		globalobj.GWAF_RUNTIME_OBJ_WAF_TaskScheduler.Start()
+	}
 
 	//脱敏处理初始化
 	global.GWAF_DLP, _ = dlp.NewEngine("wafDlp")
@@ -518,57 +580,49 @@ func (m *wafSystenService) run() {
 	for {
 		select {
 		case msg := <-global.GWAF_CHAN_MSG:
-			if globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostTarget[globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostCode[msg.HostCode]] != nil && globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostCode[msg.HostCode] != "" {
+			if _, _hostExists := globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.GetHostByCode(msg.HostCode); _hostExists {
 				switch msg.Type {
 				case enums.ChanTypeAllowIP:
-					globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostTarget[globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostCode[msg.HostCode]].Mux.Lock()
-					globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostTarget[globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostCode[msg.HostCode]].IPWhiteLists = msg.Content.([]model.IPAllowList)
-					zlog.Debug("远程配置", zap.Any("IPWhiteLists", msg.Content.([]model.IPAllowList)))
-					globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostTarget[globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostCode[msg.HostCode]].Mux.Unlock()
+					ipWhiteLists := msg.Content.([]model.IPAllowList)
+					globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.UpdateHost(msg.HostCode, func(h *wafenginmodel.HostSafe) { h.IPWhiteLists = ipWhiteLists })
+					zlog.Debug("远程配置", zap.Any("IPWhiteLists", ipWhiteLists))
 					break
 				case enums.ChanTypeAllowURL:
-					globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostTarget[globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostCode[msg.HostCode]].Mux.Lock()
-					globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostTarget[globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostCode[msg.HostCode]].UrlWhiteLists = msg.Content.([]model.URLAllowList)
-					zlog.Debug("远程配置", zap.Any("UrlWhiteLists", msg.Content.([]model.URLAllowList)))
-					globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostTarget[globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostCode[msg.HostCode]].Mux.Unlock()
+					urlWhiteLists := msg.Content.([]model.URLAllowList)
+					globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.UpdateHost(msg.HostCode, func(h *wafenginmodel.HostSafe) { h.UrlWhiteLists = urlWhiteLists })
+					zlog.Debug("远程配置", zap.Any("UrlWhiteLists", urlWhiteLists))
 					break
 				case enums.ChanTypeBlockIP:
-					globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostTarget[globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostCode[msg.HostCode]].Mux.Lock()
-					globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostTarget[globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostCode[msg.HostCode]].IPBlockLists = msg.Content.([]model.IPBlockList)
+					ipBlockLists := msg.Content.([]model.IPBlockList)
+					globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.UpdateHost(msg.HostCode, func(h *wafenginmodel.HostSafe) { h.IPBlockLists = ipBlockLists })
 					zlog.Debug("远程配置", zap.Any("IPBlockLists", msg))
-					globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostTarget[globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostCode[msg.HostCode]].Mux.Unlock()
 					//通知隧道引擎同步更新IP黑名单数据
 					if globalobj.GWAF_RUNTIME_OBJ_TUNNEL_ENGINE != nil {
 						globalobj.GWAF_RUNTIME_OBJ_TUNNEL_ENGINE.UpdateIPBlockLists(msg.HostCode, msg.Content.([]model.IPBlockList))
 					}
 					break
 				case enums.ChanTypeBlockURL:
-					globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostTarget[globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostCode[msg.HostCode]].Mux.Lock()
-					globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostTarget[globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostCode[msg.HostCode]].UrlBlockLists = msg.Content.([]model.URLBlockList)
-					zlog.Debug("远程配置", zap.Any("UrlBlockLists", msg.Content.([]model.URLBlockList)))
-					globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostTarget[globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostCode[msg.HostCode]].Mux.Unlock()
+					urlBlockLists := msg.Content.([]model.URLBlockList)
+					globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.UpdateHost(msg.HostCode, func(h *wafenginmodel.HostSafe) { h.UrlBlockLists = urlBlockLists })
+					zlog.Debug("远程配置", zap.Any("UrlBlockLists", urlBlockLists))
 					break
 				case enums.ChanTypeLdp:
-					globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostTarget[globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostCode[msg.HostCode]].Mux.Lock()
-					globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostTarget[globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostCode[msg.HostCode]].LdpUrlLists = msg.Content.([]model.LDPUrl)
-					zlog.Debug("远程配置", zap.Any("LdpUrlLists", msg.Content.([]model.LDPUrl)))
-					globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostTarget[globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostCode[msg.HostCode]].Mux.Unlock()
+					ldpUrlLists := msg.Content.([]model.LDPUrl)
+					globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.UpdateHost(msg.HostCode, func(h *wafenginmodel.HostSafe) { h.LdpUrlLists = ldpUrlLists })
+					zlog.Debug("远程配置", zap.Any("LdpUrlLists", ldpUrlLists))
 					break
 				case enums.ChanTypeRule:
-					globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostTarget[globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostCode[msg.HostCode]].Mux.Lock()
-					globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostTarget[globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostCode[msg.HostCode]].RuleData = msg.Content.([]model.Rules)
-					globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostTarget[globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostCode[msg.HostCode]].Rule.LoadRules(msg.Content.([]model.Rules))
-					zlog.Debug("远程配置", zap.Any("Rule", msg.Content.([]model.Rules)))
-					globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostTarget[globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostCode[msg.HostCode]].Mux.Unlock()
+					rules := msg.Content.([]model.Rules)
+					globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.UpdateHostRules(msg.HostCode, rules)
+					zlog.Debug("远程配置", zap.Any("Rule", rules))
 					break
 				case enums.ChanTypeAnticc:
 					globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.ApplyAntiCCConfig(msg.HostCode, msg.Content.(model.AntiCC))
 					break
 				case enums.ChanTypeHttpauth:
-					globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostTarget[globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostCode[msg.HostCode]].Mux.Lock()
-					globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostTarget[globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostCode[msg.HostCode]].HttpAuthBases = msg.Content.([]model.HttpAuthBase)
-					zlog.Debug("远程配置", zap.Any("Http Auth", msg.Content.([]model.HttpAuthBase)))
-					globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostTarget[globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostCode[msg.HostCode]].Mux.Unlock()
+					httpAuthBases := msg.Content.([]model.HttpAuthBase)
+					globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.UpdateHost(msg.HostCode, func(h *wafenginmodel.HostSafe) { h.HttpAuthBases = httpAuthBases })
+					zlog.Debug("远程配置", zap.Any("Http Auth", httpAuthBases))
 					break
 				case enums.ChanTypeHost:
 					hosts := msg.Content.([]model.Hosts)
@@ -585,50 +639,24 @@ func (m *wafSystenService) run() {
 						} else {
 							hostsOld := msg.OldContent.(model.Hosts)
 							if hosts[0].Host == hostsOld.Host && hosts[0].Port == hostsOld.Port {
-								//情况2
+								//情况2：同域名同主端口，重新加载数据
+								// LoadHost 已做"原子替换"(单次发布，先清旧 key 再装新 key)，主端口 key 不会短暂缺失，
+								// 故不再先 RemoveHost(会发布一张缺该 host 的快照→重载期间 403)。
 								zlog.Debug("主机处理情况2 端口不变,域名也不变，就是重新加载数据")
-								if globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostTarget[hosts[0].Host+":"+strconv.Itoa(hosts[0].Port)] != nil &&
-									len(globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostTarget[hosts[0].Host+":"+strconv.Itoa(hosts[0].Port)].LoadBalanceRuntime.RevProxies) > 0 {
-									//设置空代理
-									globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostTarget[hosts[0].Host+":"+strconv.Itoa(hosts[0].Port)].LoadBalanceRuntime.RevProxies = nil
-									zlog.Debug("主机重新代理", hosts[0].Host+":"+strconv.Itoa(hosts[0].Port))
-								}
-								//如果本次是关闭，那么应该关闭主机
-								if hosts[0].START_STATUS == 1 {
-									globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.RemoveHost(hostsOld)
-								}
-								//如果本次ssl和上次ssl不同
-								if hosts[0].Ssl != hostsOld.Ssl || hosts[0].Keyfile != hostsOld.Keyfile || hosts[0].Certfile != hostsOld.Certfile {
-									globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.RemoveHost(hostsOld)
-								}
-								//绑定更多域名变更了
-								if hosts[0].BindMoreHost != hostsOld.BindMoreHost {
-									globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.RemoveHost(hostsOld)
-								}
-								//绑定更多端口变更了（副端口增删），需先移除旧配置再重载
-								if hosts[0].BindMorePort != hostsOld.BindMorePort {
-									globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.RemoveHost(hostsOld)
-								}
-								// 远程 IP 或端口变化，需重载
-								if hosts[0].Remote_ip != hostsOld.Remote_ip || hosts[0].Remote_port != hostsOld.Remote_port {
-									globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.RemoveHost(hostsOld)
-								}
-								// 负载状态或策略变化，需重载
-								if hosts[0].IsEnableLoadBalance != hostsOld.IsEnableLoadBalance || hosts[0].LoadBalanceStage != hostsOld.LoadBalanceStage {
-									globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.RemoveHost(hostsOld)
-								}
+								//清空已建代理，下次请求按新后端懒重建(LoadBalanceRuntime 自身 Mux 保护)
+								globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.ResetHostProxiesByKey(hosts[0].Host + ":" + strconv.Itoa(hosts[0].Port))
 								globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.LoadHost(hosts[0])
 								globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.StartAllProxyServer()
+								//副端口可能被删除：关闭已无主机占用的端口(在新路由发布后做，不影响主端口)
+								globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.RemovePortServer()
 							} else if hosts[0].Host == hostsOld.Host && hosts[0].Port != hostsOld.Port {
-								//情况3
+								//情况3：主端口从 A 切到 B。LoadHost 原子替换会清掉旧端口 key 并装上新端口 key。
 								zlog.Debug("主机处理情况3 端口从A切换到B了，域名是旧的 ；端口更改后当前这个端口下没有域名了，应该是关闭了，并移除数据")
-								if globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostTarget[hostsOld.Host+":"+strconv.Itoa(hostsOld.Port)] != nil &&
-									len(globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostTarget[hostsOld.Host+":"+strconv.Itoa(hostsOld.Port)].LoadBalanceRuntime.RevProxies) > 0 {
-									globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostTarget[hostsOld.Host+":"+strconv.Itoa(hostsOld.Port)].LoadBalanceRuntime.RevProxies = nil
-								}
-								globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.RemoveHost(hostsOld)
+								globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.ResetHostProxiesByKey(hostsOld.Host + ":" + strconv.Itoa(hostsOld.Port))
 								globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.LoadHost(hosts[0])
 								globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.StartAllProxyServer()
+								//旧端口 A 现已无主机占用：关闭其监听
+								globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.RemovePortServer()
 							}
 						}
 
@@ -647,27 +675,29 @@ func (m *wafSystenService) run() {
 				case enums.ChanTypeSSL:
 					host := msg.Content.(model.Hosts)
 					zlog.Info(fmt.Sprintf("服务端准备为 %s 主机刷新 SSL证书 ，证书信息：%v", host.Host, utils.PrintSSLCert(host.Certfile)))
-					globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.RemoveHost(host)
+					// LoadHost 原子替换(单次发布)：刷新证书重载期间主端口 key 不缺失，不再先 RemoveHost(避免 403 空档)
 					globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.LoadHost(host)
 					globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.StartAllProxyServer()
 					break
 				case enums.ChanTypeBlockingPage:
-					globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostTarget[globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostCode[msg.HostCode]].Mux.Lock()
-					globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostTarget[globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostCode[msg.HostCode]].BlockingPage = msg.Content.(map[string]model.BlockingPage)
-					zlog.Debug("远程配置", zap.Any("配置自定义拦截界面信息", msg.Content.(map[string]model.BlockingPage)))
-					globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostTarget[globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostCode[msg.HostCode]].Mux.Unlock()
+					blockingPage := msg.Content.(map[string]model.BlockingPage)
+					globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.UpdateHost(msg.HostCode, func(h *wafenginmodel.HostSafe) { h.BlockingPage = blockingPage })
+					zlog.Debug("远程配置", zap.Any("配置自定义拦截界面信息", blockingPage))
 					break
 				case enums.ChanTypeCacheRule:
-					globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostTarget[globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostCode[msg.HostCode]].Mux.Lock()
-					globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostTarget[globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostCode[msg.HostCode]].CacheRule = msg.Content.([]model.CacheRule)
-					zlog.Debug("远程配置", zap.Any("配置缓存规则", msg.Content.([]model.CacheRule)))
-					globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostTarget[globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostCode[msg.HostCode]].Mux.Unlock()
+					cacheRule := msg.Content.([]model.CacheRule)
+					globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.UpdateHost(msg.HostCode, func(h *wafenginmodel.HostSafe) { h.CacheRule = cacheRule })
+					zlog.Debug("远程配置", zap.Any("配置缓存规则", cacheRule))
+					break
+				case enums.ChanTypeTamperRule:
+					tamperRules := msg.Content.([]model.TamperRule)
+					globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.UpdateHost(msg.HostCode, func(h *wafenginmodel.HostSafe) { h.TamperRules = tamperRules })
+					zlog.Debug("远程配置", zap.Any("配置网页防篡改规则", tamperRules))
 					break
 				case enums.ChanTypeHostPathRule:
-					globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostTarget[globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostCode[msg.HostCode]].Mux.Lock()
-					globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostTarget[globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostCode[msg.HostCode]].PathRules = msg.Content.([]model.HostPathRule)
-					zlog.Debug("远程配置", zap.Any("配置路径路由规则", msg.Content.([]model.HostPathRule)))
-					globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostTarget[globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostCode[msg.HostCode]].Mux.Unlock()
+					pathRules := msg.Content.([]model.HostPathRule)
+					globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.UpdateHost(msg.HostCode, func(h *wafenginmodel.HostSafe) { h.PathRules = pathRules })
+					zlog.Debug("远程配置", zap.Any("配置路径路由规则", pathRules))
 					break
 				}
 
@@ -713,14 +743,52 @@ func (m *wafSystenService) run() {
 					globalobj.GWAF_RUNTIME_OBJ_TUNNEL_ENGINE.RemoveTunnel(tunnelDelete)
 					break
 				}
+			} else if common.Type == enums.ChanComTypeApp {
+				// 应用管理类型
+				if globalobj.GWAF_RUNTIME_OBJ_APP_ENGINE != nil {
+					switch common.OpType {
+					case enums.OP_TYPE_NEW:
+						// 新增：如果 AutoStart=1，则启动
+						appNew := common.Content.(model.WafApp)
+						if appNew.AutoStart == 1 && appNew.StartStatus == 1 {
+							if err := globalobj.GWAF_RUNTIME_OBJ_APP_ENGINE.StartApp(appNew.Code); err != nil {
+								zlog.Error("自动启动应用失败", "code", appNew.Code, "error", err.Error())
+							}
+						}
+					case enums.OP_TYPE_UPDATE:
+						appNew := common.Content.(model.WafApp)
+						globalobj.GWAF_RUNTIME_OBJ_APP_ENGINE.LoadApp(appNew)
+					case enums.OP_TYPE_DELETE:
+						appDel := common.OldContent.(model.WafApp)
+						// 先停止进程（能读到 DB 中的 StopMode/StopCmd/StopTimeout 配置），再删 DB 记录
+						globalobj.GWAF_RUNTIME_OBJ_APP_ENGINE.RemoveApp(appDel.Code)
+						global.GWAF_LOCAL_DB.Where("id = ?", appDel.Id).Delete(&model.WafApp{})
+					case enums.OP_TYPE_APP_START:
+						code := common.Content.(string)
+						if err := globalobj.GWAF_RUNTIME_OBJ_APP_ENGINE.StartApp(code); err != nil {
+							zlog.Error("启动应用失败", "code", code, "error", err.Error())
+						}
+					case enums.OP_TYPE_APP_STOP:
+						code := common.Content.(string)
+						if err := globalobj.GWAF_RUNTIME_OBJ_APP_ENGINE.StopApp(code); err != nil {
+							zlog.Error("停止应用失败", "code", code, "error", err.Error())
+						}
+					case enums.OP_TYPE_APP_RESTART:
+						code := common.Content.(string)
+						if err := globalobj.GWAF_RUNTIME_OBJ_APP_ENGINE.RestartApp(code); err != nil {
+							zlog.Error("重启应用失败", "code", code, "error", err.Error())
+						}
+					}
+				}
 			}
 		case engineStatus := <-global.GWAF_CHAN_ENGINE:
 			if engineStatus == 1 {
-				zlog.Info("准备关闭WAF引擎")
-				globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.CloseWaf()
-				zlog.Info("准备启动WAF引擎")
-				globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.StartWaf()
+				// 零空档重载：不再 CloseWaf(关监听器→connection refused 空档)+StartWaf，
+				// 改为逐 host 原子替换 + 端口差分，业务监听 socket 全程不下线。
+				zlog.Info("准备零空档重载WAF引擎")
+				globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.ReloadAllHostZeroGap()
 
+				// 隧道引擎为独立特性，仍按原逻辑重启（与 HTTP 业务端口无关）
 				zlog.Info("准备关闭隧道引擎")
 				globalobj.GWAF_RUNTIME_OBJ_TUNNEL_ENGINE.CloseTunnel()
 				zlog.Info("准备启动隧道引擎")
@@ -729,14 +797,23 @@ func (m *wafSystenService) run() {
 			}
 			break
 		case host := <-global.GWAF_CHAN_HOST:
-			if globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostTarget[host.Host+":"+strconv.Itoa(host.Port)] != nil {
-				globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.HostTarget[host.Host+":"+strconv.Itoa(host.Port)].Host.GUARD_STATUS = host.GUARD_STATUS
-
-			}
+			// 防护开关热更新(copy-on-write，按 host:port key 定位)
+			globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.UpdateHostByKey(host.Host+":"+strconv.Itoa(host.Port), func(h *wafenginmodel.HostSafe) {
+				h.Host.GUARD_STATUS = host.GUARD_STATUS
+			})
 			zlog.Debug("规则", zap.Any("主机", host))
 			break
 		case update := <-global.GWAF_CHAN_UPDATE:
 			if update == 1 {
+				// 优雅升级：二进制已被 selfupdate 替换到磁盘。
+				// 在 Supervisor 模式下，请求 Supervisor 编排滚动升级（起新 Worker→就绪→本 Worker 排空退出），
+				// 本进程不自行退出，等待 Supervisor 下发 DRAIN，从而实现业务零中断。
+				if gWorkerCtrl != nil {
+					zlog.Info("[Worker] 二进制已就绪，请求 Supervisor 发起滚动升级（业务不中断）")
+					gWorkerCtrl.RequestUpgrade()
+					break
+				}
+				// 兜底：非 Supervisor 托管的独立运行模式，沿用原“停止→拉起新进程→退出”的硬重启。
 				global.GWAF_RUNTIME_SERVER_TYPE = !service.Interactive()
 				//需要重新启动
 				if global.GWAF_RUNTIME_SERVER_TYPE == true {
@@ -835,6 +912,14 @@ func (m *wafSystenService) stopSamWaf() {
 		zlog.Warn("Tunnel Engine is nil, skipping shutdown")
 	}
 
+	zlog.Info("Shutdown SamWaf App Engine...")
+	if globalobj.GWAF_RUNTIME_OBJ_APP_ENGINE != nil {
+		globalobj.GWAF_RUNTIME_OBJ_APP_ENGINE.StopApps()
+		zlog.Info("Shutdown SamWaf App Engine finished")
+	} else {
+		zlog.Warn("App Engine is nil, skipping shutdown")
+	}
+
 	zlog.Info("Shutdown SamWaf Queue Processors...")
 	// 关闭信号通道，通知所有队列处理协程退出
 	close(global.GWAF_QUEUE_SHUTDOWN_SIGNAL)
@@ -875,9 +960,41 @@ func (m *wafSystenService) stopSamWaf() {
 
 }
 
-// 优雅升级
+// supervisorService 是被服务管理器(kardianos)托管的“监护进程”程序。
+// 它常驻、永不为升级而退出，负责拉起/监护/滚动升级 Worker 子进程。
+type supervisorService struct {
+	sup *supervisor.Supervisor
+}
+
+func (s *supervisorService) Start(svc service.Service) error {
+	zlog.Info("[Supervisor] 服务启动")
+	go func() {
+		if err := s.sup.Run(); err != nil {
+			zlog.Error("[Supervisor] 运行失败: " + err.Error())
+		}
+	}()
+	return nil
+}
+
+func (s *supervisorService) Stop(svc service.Service) error {
+	zlog.Info("[Supervisor] 服务停止")
+	s.sup.Shutdown()
+	return nil
+}
+
+// gracefulOnce 保证优雅停止只执行一次，无论由服务 Stop()、系统信号，
+// 还是后续 Supervisor 的 DRAIN 指令触发。
+var gracefulOnce sync.Once
+
+// Graceful 优雅停止的统一入口：先排空业务连接(StopAllProxyServer 已支持 Shutdown 排空)，
+// 回收各引擎/队列/任务资源，最后关闭数据库连接。供信号、服务 Stop 和升级 DRAIN 复用。
 func (m *wafSystenService) Graceful() {
-	//https://github.com/pengge/uranus/blob/main/main.go 预备参考
+	gracefulOnce.Do(func() {
+		zlog.Info("[Graceful] 开始优雅停止：排空业务连接并回收资源 ...")
+		m.stopSamWaf()           // 内部 CloseWaf→StopAllProxyServer 已优雅排空在途连接
+		wafsafeclear.SafeClear() // 最后关闭数据库连接
+		zlog.Info("[Graceful] 优雅停止完成")
+	})
 }
 
 // @title           SamWaf Open API
@@ -896,6 +1013,13 @@ func main() {
 `)
 	//加载配置
 	wafconfig.LoadAndInitConfig()
+	// 多进程日志隔离：Supervisor 与 Worker 是同一二进制的两个进程，若都写同一个 logs/log.log，
+	// lumberjack 滚动时 rename 会因文件被另一进程占用而失败(Windows)，导致日志再也滚不动。
+	// 故 Supervisor 角色单独写 supervisor.log；Worker 仍写 log.log（主业务日志名不变）。
+	// parseWorkerRole 仅扫描 os.Args，不依赖日志/配置，可安全前置调用。
+	if isWorker, _, _, _ := parseWorkerRole(); !isWorker {
+		zlog.FileName = "supervisor.log"
+	}
 	//初始化日志
 	zlog.InitZLog(global.GWAF_LOG_DEBUG_ENABLE, global.GWAF_LOG_OUTPUT_FORMAT)
 	if v := recover(); v != nil {
@@ -903,8 +1027,40 @@ func main() {
 	}
 	pid := os.Getpid()
 	zlog.Debug("SamWaf Current PID:" + strconv.Itoa(pid))
-	//获取外网IP
-	global.GWAF_RUNTIME_IP = utils.GetExternalIp()
+
+	// 调试标识：响应头标记处理进程，便于验证升级时新旧 Worker 交替。
+	// 主开关在 config.yml 的 debug_worker_header（已由上方 LoadAndInitConfig 读入，Supervisor/Worker 均生效，
+	// 服务模式下务必用配置项——SCM/systemd 不会传入交互式 shell 的环境变量）。
+	// 环境变量 SAMWAF_WORKER_HEADER=1 仅作前台调试的临时叠加开关（只会打开、不会关闭配置已开的开关）。
+	global.GWAF_WORKER_TAG = "pid=" + strconv.Itoa(pid) + " born=" + time.Now().Format("15:04:05")
+	if os.Getenv("SAMWAF_WORKER_HEADER") == "1" {
+		global.GWAF_DEBUG_WORKER_HEADER = true
+	}
+
+	// 角色分流：带 --worker 的进程由 Supervisor 拉起，直接运行业务引擎 + 控制通道客户端。
+	if workerRole, ctrlAddr, ctrlToken, takeover := parseWorkerRole(); workerRole {
+		global.GWAF_RUNTIME_IS_TAKEOVER = takeover
+		//获取外网IP
+		global.GWAF_RUNTIME_IP = utils.GetExternalIp()
+		wp := &wafSystenService{}
+		if ctrlAddr != "" {
+			startWorkerControl(ctrlAddr, ctrlToken, wp)
+		}
+		// Worker 自身的信号处理：收到中断/终止(如前台 Ctrl+C、systemd SIGTERM)时优雅排空再退出。
+		// 与 Supervisor 下发的 DRAIN/SHUTDOWN 经 gracefulOnce 去重，只执行一次。
+		go func() {
+			sc := make(chan os.Signal, 1)
+			signal.Notify(sc, os.Interrupt, syscall.SIGTERM)
+			s := <-sc
+			zlog.Info("[Worker] 收到系统信号优雅停止: " + s.String())
+			wp.Graceful()
+			os.Exit(0)
+		}()
+		zlog.Info("以 Worker 角色启动 (takeover=" + strconv.FormatBool(takeover) + ")")
+		wp.run() // 阻塞运行引擎事件循环
+		return
+	}
+	// ===== 以下为 Supervisor 角色（默认，被服务管理器托管，常驻不为升级退出）=====
 
 	option := service.KeyValue{}
 	//windows
@@ -924,15 +1080,28 @@ func main() {
 		Description: "SamWaf is a Web Application Firewall (WAF) By SamWaf.com",
 		Option:      option,
 	}
-	prg := &wafSystenService{}
+	exePath, _ := os.Executable()
+	dataDir := filepath.Join(utils.GetCurrentDir(), "data")
+	sup := supervisor.New(supervisor.Options{
+		ExePath:      exePath,
+		DataDir:      dataDir,
+		DrainTimeout: int(global.GCONFIG_RECORD_DRAIN_TIMEOUT),
+	})
+	prg := &supervisorService{sup: sup}
 	s, err := service.New(prg, svcConfig)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	// 设置服务控制信号处理程序
+	// 设置服务控制信号处理程序：收到中断/终止信号时，令 Supervisor 通知各 Worker 优雅退出再停止。
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, os.Kill, syscall.SIGTERM)
+	go func() {
+		sig := <-sigChan
+		zlog.Info("收到系统信号，Supervisor 开始优雅停止: " + sig.String())
+		sup.Shutdown()
+		os.Exit(0)
+	}()
 
 	if len(os.Args) > 1 {
 		command := os.Args[1]
@@ -945,6 +1114,12 @@ func main() {
 			}
 			fmt.Printf("Samwaf has successfully executed the '%s' command.\n", command)
 			break
+		case "rolling-restart": // 零停机滚动重启：通知运行中的 Supervisor 换 Worker（业务不中断），亦用于测试升级编排
+			if err := supervisor.TriggerUpgrade(dataDir); err != nil {
+				fmt.Println("滚动重启触发失败:", err)
+				os.Exit(1)
+			}
+			fmt.Println("已触发零停机滚动重启，请观察日志：新 Worker 就绪后旧 Worker 将优雅排空退出。")
 		case "resetpwd": //重制密码
 			wafdb.InitCoreDb("")
 			wafdb.ResetAdminPwd()
@@ -1049,6 +1224,7 @@ func main() {
 			fmt.Println("  start     - 启动服务")
 			fmt.Println("  stop      - 停止服务")
 			fmt.Println("  restart   - 重启服务")
+			fmt.Println("  rolling-restart - 零停机滚动重启(换 Worker，业务不中断)")
 			fmt.Println("  uninstall - 卸载服务")
 			fmt.Println("  resetpwd  - 重置管理员密码")
 			fmt.Println("  resetotp  - 重置安全码")
@@ -1076,4 +1252,193 @@ func main() {
 		log.Fatal(err)
 	}
 
+}
+
+// ===== 优雅升级 Worker 侧控制通道客户端（与 Supervisor 通信） =====
+
+// parseWorkerRole 解析进程角色与控制参数。
+// 由 Supervisor 拉起的 Worker 会带 --worker --ctrl-addr=127.0.0.1:port --token=xxx [--takeover]。
+func parseWorkerRole() (worker bool, ctrlAddr, token string, takeover bool) {
+	for _, a := range os.Args[1:] {
+		switch {
+		case a == "--worker":
+			worker = true
+		case a == "--takeover":
+			takeover = true
+		case strings.HasPrefix(a, "--ctrl-addr="):
+			ctrlAddr = strings.TrimPrefix(a, "--ctrl-addr=")
+		case strings.HasPrefix(a, "--token="):
+			token = strings.TrimPrefix(a, "--token=")
+		}
+	}
+	return
+}
+
+// workerCtrl 是 Worker 侧的控制通道客户端：连接 Supervisor、上报 HELLO/READY/HEARTBEAT、
+// 响应 DRAIN/SHUTDOWN/PING；断线自动重连（支撑 Supervisor 自升级后的“再认领”）。
+type workerCtrl struct {
+	addr  string
+	token string
+	prg   *wafSystenService
+
+	mu   sync.Mutex
+	conn *wafipc.Conn
+	down bool
+}
+
+// gWorkerCtrl 当前进程的 Worker 控制客户端（仅 worker 角色下非 nil）。
+var gWorkerCtrl *workerCtrl
+
+// activateOnce 保证独占单例(应用/隧道/cron)只被接管启动一次。
+var activateOnce sync.Once
+
+// activateSingletons 启动独占型单例：隧道、应用、cron 任务调度。
+// takeover 升级模式下由 Supervisor 在旧 Worker 退出后经 ACTIVATE 触发（此时旧 Worker 已释放这些资源，避免端口/进程冲突）；
+// 非 takeover（首次启动/自愈重拉）则在 run() 内联启动，不经过这里。
+func activateSingletons() {
+	activateOnce.Do(func() {
+		zlog.Info("[Worker] 接管独占单例：启动隧道 / 应用 / 任务调度")
+		if globalobj.GWAF_RUNTIME_OBJ_TUNNEL_ENGINE != nil {
+			globalobj.GWAF_RUNTIME_OBJ_TUNNEL_ENGINE.StartTunnel()
+		}
+		if globalobj.GWAF_RUNTIME_OBJ_APP_ENGINE != nil {
+			globalobj.GWAF_RUNTIME_OBJ_APP_ENGINE.StartApps()
+		}
+		if globalobj.GWAF_RUNTIME_OBJ_WAF_TaskScheduler != nil {
+			globalobj.GWAF_RUNTIME_OBJ_WAF_TaskScheduler.Start()
+		}
+	})
+}
+
+// startWorkerControl 启动 Worker 控制通道客户端（后台重连循环）。
+func startWorkerControl(addr, token string, prg *wafSystenService) {
+	gWorkerCtrl = &workerCtrl{addr: addr, token: token, prg: prg}
+	go gWorkerCtrl.loop()
+}
+
+func (wc *workerCtrl) loop() {
+	for {
+		if wc.isDown() {
+			return
+		}
+		conn, err := wafipc.Dial(wc.addr)
+		if err != nil {
+			time.Sleep(2 * time.Second)
+			continue
+		}
+		wc.setConn(conn)
+		wc.send(wafipc.Message{
+			Type:     wafipc.MsgHello,
+			PID:      os.Getpid(),
+			Version:  global.GWAF_RELEASE_VERSION,
+			ProtoVer: wafipc.ProtoVersion,
+			Token:    wc.token,
+		})
+		wc.serve(conn) // 阻塞直到连接出错
+		conn.Close()
+		wc.setConn(nil)
+		if wc.isDown() {
+			return
+		}
+		time.Sleep(2 * time.Second) // 重连
+	}
+}
+
+func (wc *workerCtrl) serve(conn *wafipc.Conn) {
+	stop := make(chan struct{})
+	defer close(stop)
+
+	// 就绪上报：等引擎端口起来后发 READY
+	go func() {
+		for i := 0; i < 600; i++ { // 最多约 60s 等引擎对象建立
+			if globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE != nil {
+				break
+			}
+			select {
+			case <-stop:
+				return
+			case <-time.After(100 * time.Millisecond):
+			}
+		}
+		if globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE != nil {
+			_ = globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.WaitProxyReady(60 * time.Second)
+		}
+		wc.send(wafipc.Message{Type: wafipc.MsgReady, PID: os.Getpid()})
+	}()
+
+	// 心跳：上报当前连接数
+	go func() {
+		t := time.NewTicker(3 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-t.C:
+				var conns int64
+				if globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE != nil {
+					conns = globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.TotalConns()
+				}
+				wc.send(wafipc.Message{Type: wafipc.MsgHeartbeat, PID: os.Getpid(), Active: conns})
+			}
+		}
+	}()
+
+	// 命令读取
+	for {
+		m, err := conn.Recv()
+		if err != nil {
+			return
+		}
+		switch m.Type {
+		case wafipc.MsgDrain, wafipc.MsgShutdown:
+			zlog.Info("[Worker] 收到 " + m.Type + " 指令，开始优雅排空退出")
+			go wc.gracefulExit()
+			return
+		case wafipc.MsgActivate:
+			zlog.Info("[Worker] 收到 ACTIVATE 指令，接管独占单例(应用/隧道/任务调度)")
+			go activateSingletons()
+		case wafipc.MsgPing:
+			wc.send(wafipc.Message{Type: wafipc.MsgPong, PID: os.Getpid()})
+		}
+	}
+}
+
+func (wc *workerCtrl) gracefulExit() {
+	wc.markDown()
+	wc.prg.Graceful()
+	wc.send(wafipc.Message{Type: wafipc.MsgGone, PID: os.Getpid()})
+	time.Sleep(200 * time.Millisecond)
+	os.Exit(0)
+}
+
+// RequestUpgrade 通知 Supervisor 发起滚动升级（二进制已被 selfupdate 替换到磁盘）。
+func (wc *workerCtrl) RequestUpgrade() {
+	wc.send(wafipc.Message{Type: wafipc.MsgRequestUpgrade, PID: os.Getpid()})
+}
+
+func (wc *workerCtrl) send(m wafipc.Message) {
+	wc.mu.Lock()
+	defer wc.mu.Unlock()
+	if wc.conn != nil {
+		_ = wc.conn.Send(m)
+	}
+}
+
+func (wc *workerCtrl) setConn(c *wafipc.Conn) {
+	wc.mu.Lock()
+	wc.conn = c
+	wc.mu.Unlock()
+}
+
+func (wc *workerCtrl) isDown() bool {
+	wc.mu.Lock()
+	defer wc.mu.Unlock()
+	return wc.down
+}
+
+func (wc *workerCtrl) markDown() {
+	wc.mu.Lock()
+	wc.down = true
+	wc.mu.Unlock()
 }

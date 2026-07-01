@@ -80,13 +80,9 @@ func (receiver *WafLogService) ModifyApi(log innerbean.WebLog) error {
 }
 func (receiver *WafLogService) GetDetailApi(req request.WafAttackLogDetailReq) (innerbean.WebLog, error) {
 	var weblog innerbean.WebLog
-	if len(req.CurrrentDbName) == 0 || req.CurrrentDbName == "local_log.db" {
-		global.GWAF_LOCAL_LOG_DB.Select(getWebLogDetailSelect()).Where("REQ_UUID=?", req.REQ_UUID).Find(&weblog)
-	} else {
-		wafdb.InitManaulLogDb("", req.CurrrentDbName)
-		global.GDATA_CURRENT_LOG_DB_MAP[req.CurrrentDbName].Select(getWebLogDetailSelect()).Where("REQ_UUID=?", req.REQ_UUID).Find(&weblog)
-	}
-
+	// 解析当前应查询的日志连接与表（live 或历史分片：SQLite 历史文件 / MySQL 历史表）
+	logDB, logTable := wafdb.ResolveLogDB(req.CurrrentDbName)
+	logDB.Table(logTable).Select(getWebLogDetailSelect()).Where("REQ_UUID=?", req.REQ_UUID).Find(&weblog)
 	return weblog, nil
 }
 func (receiver *WafLogService) GetListApi(req request.WafAttackLogSearch) ([]innerbean.WebLog, int64, error) {
@@ -96,8 +92,10 @@ func (receiver *WafLogService) GetListApi(req request.WafAttackLogSearch) ([]inn
 
 	splitFilterBys := strings.Split(req.FilterBy, "|")
 	splitFilterValues := strings.Split(req.FilterValue, "|")
+	// 解析当前应查询的日志连接与表（live 或历史分片：SQLite 历史文件 / MySQL 历史表）
+	logDB, logTable := wafdb.ResolveLogDB(req.CurrrentDbName)
 	/*强制索引*/
-	var forceIndex = "web_logs"
+	var forceIndex = logTable
 	/*where条件*/
 	var whereField = ""
 	var whereValues []interface{}
@@ -172,9 +170,9 @@ func (receiver *WafLogService) GetListApi(req request.WafAttackLogSearch) ([]inn
 	//强制索引
 	{
 		if strings.Contains(whereField, "unix_add_time") && !strings.Contains(whereField, "src_ip") {
-			forceIndex = dialect.Get().ForceIndexClause("web_logs", "idx_web_time_desc_tenant_user_code")
+			forceIndex = dialect.Get().ForceIndexClause(logTable, "idx_web_time_desc_tenant_user_code")
 		} else if strings.Contains(whereField, "src_ip") {
-			forceIndex = dialect.Get().ForceIndexClause("web_logs", "idx_web_time_desc_tenant_user_code_ip")
+			forceIndex = dialect.Get().ForceIndexClause(logTable, "idx_web_time_desc_tenant_user_code_ip")
 		}
 	}
 
@@ -240,25 +238,17 @@ func (receiver *WafLogService) GetListApi(req request.WafAttackLogSearch) ([]inn
 	} else {
 		return nil, 0, errors.New("输入排序字段不合法")
 	}
-	zlog.Debug("WafLogService query info", "db", req.CurrrentDbName, "force_index", forceIndex, "where", whereField, "where_value_count", len(whereValues), "unix_begin", unixBegin, "unix_end", unixEnd, "page_index", req.PageIndex, "page_size", req.PageSize, "order", orderInfo)
-	if len(req.CurrrentDbName) == 0 || req.CurrrentDbName == "local_log.db" {
-		global.GWAF_LOCAL_LOG_DB.Select(getWebLogListSelect()).Table(forceIndex).Limit(req.PageSize).Where(whereField, whereValues...).Offset(req.PageSize * (req.PageIndex - 1)).Order(orderInfo).Find(&weblogs)
-		global.GWAF_LOCAL_LOG_DB.Table(forceIndex).Where(whereField, whereValues...).Count(&total)
-	} else {
-		wafdb.InitManaulLogDb("", req.CurrrentDbName)
-		global.GDATA_CURRENT_LOG_DB_MAP[req.CurrrentDbName].Select(getWebLogListSelect()).Table(forceIndex).Limit(req.PageSize).Where(whereField, whereValues...).Offset(req.PageSize * (req.PageIndex - 1)).Order(orderInfo).Find(&weblogs)
-		global.GDATA_CURRENT_LOG_DB_MAP[req.CurrrentDbName].Table(forceIndex).Where(whereField, whereValues...).Count(&total)
-
-	}
-	zlog.Debug("WafLogService query result", "rows", len(weblogs), "total", total)
+	logDB.Select(getWebLogListSelect()).Table(forceIndex).Limit(req.PageSize).Where(whereField, whereValues...).Offset(req.PageSize * (req.PageIndex - 1)).Order(orderInfo).Find(&weblogs)
+	logDB.Table(forceIndex).Where(whereField, whereValues...).Count(&total)
 	return weblogs, total, nil
 }
 func (receiver *WafLogService) GetListByHostCodeApi(log request.WafAttackLogSearch) ([]innerbean.WebLog, int64, error) {
 	log.ClampPageSize()
 	var total int64 = 0
 	var weblogs []innerbean.WebLog
-	global.GWAF_LOCAL_LOG_DB.Where("host_code = ? ", global.GWAF_TENANT_ID, global.GWAF_USER_CODE, log.HostCode).Limit(log.PageSize).Offset(log.PageSize * (log.PageIndex - 1)).Order("create_time desc").Find(&weblogs)
-	global.GWAF_LOCAL_LOG_DB.Where("host_code = ? ", global.GWAF_TENANT_ID, global.GWAF_USER_CODE, log.HostCode).Model(&innerbean.WebLog{}).Count(&total)
+	// tenant/user 由 before_query 自动追加，这里只传 host_code（占位符与参数数须一致，避免参数顺移）
+	global.GWAF_LOCAL_LOG_DB.Where("host_code = ?", log.HostCode).Limit(log.PageSize).Offset(log.PageSize * (log.PageIndex - 1)).Order("create_time desc").Find(&weblogs)
+	global.GWAF_LOCAL_LOG_DB.Where("host_code = ?", log.HostCode).Model(&innerbean.WebLog{}).Count(&total)
 	return weblogs, total, nil
 }
 func (receiver *WafLogService) DeleteHistory(day string) {

@@ -32,7 +32,7 @@ require (
 	github.com/quic-go/quic-go v0.57.0
 	github.com/samwafgo/ahocorasick v1.0.0
 	github.com/samwafgo/cap_go_server v1.0.0
-	github.com/samwafgo/go-wxsqlite3 v1.0.1
+	github.com/samwafgo/go-wxsqlite3 v1.0.2
 	github.com/samwafgo/sqlitedriver v1.0.2
 	github.com/shirou/gopsutil v3.21.11+incompatible
 	github.com/shirou/gopsutil/v3 v3.24.5
@@ -80,6 +80,7 @@ require (
 	github.com/cloudwego/base64x v0.1.6 // indirect
 	github.com/cyphar/filepath-securejoin v0.2.4 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
+	github.com/dmitryikh/leaves v0.0.0-20230708180554-25d19a787328 // indirect
 	github.com/emirpasic/gods v1.18.1 // indirect
 	github.com/fatih/color v1.16.0 // indirect
 	github.com/fsnotify/fsnotify v1.9.0 // indirect
@@ -103,6 +104,7 @@ require (
 	github.com/golang/protobuf v1.5.4 // indirect
 	github.com/hashicorp/yamux v0.1.2 // indirect
 	github.com/huaweicloud/huaweicloud-sdk-go-v3 v0.1.180 // indirect
+	github.com/ipipdotnet/ipdb-go v1.3.3 // indirect
 	github.com/jbenet/go-context v0.0.0-20150711004518-d14ea06fba99 // indirect
 	github.com/jinzhu/inflection v1.0.0 // indirect
 	github.com/jinzhu/now v1.1.5 // indirect

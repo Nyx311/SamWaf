@@ -38,12 +38,9 @@ func (waf *WafEngine) CheckAllowIP(r *http.Request, weblogbean *innerbean.WebLog
 		}
 	}
 	//ip白名单策略（全局）
-	if globalHostTarget == nil {
-		globalHostTarget = waf.HostTarget[global.GWAF_GLOBAL_HOST_NAME]
-	}
-	if globalHostTarget != nil && globalHostTarget.Host.GUARD_STATUS == 1 && globalHostTarget.IPWhiteLists != nil {
-		for i := 0; i < len(globalHostTarget.IPWhiteLists); i++ {
-			if utils.CheckIPInCIDR(clientIp, globalHostTarget.IPWhiteLists[i].Ip) {
+	if waf.rt().HostTarget[global.GWAF_GLOBAL_HOST_NAME] != nil && waf.rt().HostTarget[global.GWAF_GLOBAL_HOST_NAME].Host.GUARD_STATUS == 1 && waf.rt().HostTarget[global.GWAF_GLOBAL_HOST_NAME].IPWhiteLists != nil {
+		for i := 0; i < len(waf.rt().HostTarget[global.GWAF_GLOBAL_HOST_NAME].IPWhiteLists); i++ {
+			if utils.CheckIPInCIDR(clientIp, waf.rt().HostTarget[global.GWAF_GLOBAL_HOST_NAME].IPWhiteLists[i].Ip) {
 				result.JumpGuardResult = true
 				break
 			}

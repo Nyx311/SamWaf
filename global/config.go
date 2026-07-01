@@ -28,18 +28,23 @@ var (
 	GCONFIG_ENABLE_STRICT_IP_BINDING  int64 = 1 // 是否启用严格IP绑定 1启用 0禁用
 	GCONFIG_ENABLE_REPLAY_PROTECT     int64 = 1 // 防重放攻击开关 1启用 0禁用
 
-	GCONFIG_RECORD_ENABLE_OWASP        int64  = 0               //启动OWASP数据检测
-	GCONFIG_OWASP_MODE                 string = "DetectionOnly" //OWASP 检测引擎工作模式: On(拦截) / DetectionOnly(观察/仅记录) / Off(关闭)
-	GCONFIG_OWASP_BLOCK_THRESHOLD      int64  = 7               //OWASP 入站 anomaly score 阈值(官方默认 5,我们宽松到 7)
-	GCONFIG_RECORD_ENABLE_HTTP_80      int64  = 0               //启动80端口服务（为自动申请证书使用 HTTP文件验证类型，DNS验证不需要）
-	GCONFIG_RECORD_SSLOrder_EXPIRE_DAY int64  = 30              // 提前多少天进行自动申请
-	GCONFIG_RECORD_SSL_IP_CERT_IP      string = ""              // 获取IP证书时的IP地址
-	GCONFIG_RECORD_SSL_IP_EXPIRE_DAY   int64  = 3               // IP证书提前多少天进行自动申请
-	GCONFIG_RECORD_SSLHTTP_CHECK       int64  = 0               // ssl申请文件验证类型 是否校验原始路径HTTP响应代码 1 校验 0 不校验
-	GCONFIG_RECORD_SSLMinVerson        string = "TLS 1.2"       // ssl最低版本
-	GCONFIG_RECORD_SSLMaxVerson        string = "TLS 1.3"       // ssl最大版本
-	GCONFIG_RECORD_CONNECT_TIME_OUT    int64  = 30              // 连接超时 默认30s
-	GCONFIG_RECORD_KEEPALIVE_TIME_OUT  int64  = 30              // 保持活动超时 默认30s
+	GCONFIG_RECORD_ENABLE_OWASP int64  = 0               //启动OWASP数据检测
+	GCONFIG_OWASP_MODE          string = "DetectionOnly" //OWASP 检测引擎工作模式: On(拦截) / DetectionOnly(观察/仅记录) / Off(关闭)
+
+	GCONFIG_AI_ENABLE int64  = 0         //AI智能检测总开关 1启用 0关闭（需先在AI模型管理上传模型包）
+	GCONFIG_AI_MODE   string = "observe" //AI检测工作模式: observe(仅记录/观察) / block(达到拦截阈值则拦截)
+
+	GCONFIG_OWASP_BLOCK_THRESHOLD      int64  = 7         //OWASP 入站 anomaly score 阈值(官方默认 5,我们宽松到 7)
+	GCONFIG_RECORD_ENABLE_HTTP_80      int64  = 0         //启动80端口服务（为自动申请证书使用 HTTP文件验证类型，DNS验证不需要）
+	GCONFIG_RECORD_SSLOrder_EXPIRE_DAY int64  = 30        // 提前多少天进行自动申请
+	GCONFIG_RECORD_SSL_IP_CERT_IP      string = ""        // 获取IP证书时的IP地址
+	GCONFIG_RECORD_SSL_IP_EXPIRE_DAY   int64  = 3         // IP证书提前多少天进行自动申请
+	GCONFIG_RECORD_SSLHTTP_CHECK       int64  = 0         // ssl申请文件验证类型 是否校验原始路径HTTP响应代码 1 校验 0 不校验
+	GCONFIG_RECORD_SSLMinVerson        string = "TLS 1.2" // ssl最低版本
+	GCONFIG_RECORD_SSLMaxVerson        string = "TLS 1.3" // ssl最大版本
+	GCONFIG_RECORD_CONNECT_TIME_OUT    int64  = 30        // 连接超时 默认30s
+	GCONFIG_RECORD_KEEPALIVE_TIME_OUT  int64  = 30        // 保持活动超时 默认30s
+	GCONFIG_RECORD_DRAIN_TIMEOUT       int64  = 30        // 升级/停止时连接优雅排空超时(秒) 默认30s，超时仍未排空的连接将被强制关闭
 	//GCONFIG_RECORD_PATCH_VERSION_CORE  int64 = 20250106 // 核心数据库补丁日期
 	//GCONFIG_RECORD_PATCH_VERSION_LOG   int64 = 20250106 // 日志数据库补丁日期
 	GCONFIG_RECORD_ALL_SRC_BYTE_INFO int64 = 0 //记录原始信息(默认不开启)
@@ -49,6 +54,16 @@ var (
 
 	GCONFIG_RECORD_TOKEN_EXPIRE_MINTUTES     int64 = 5  //令牌有效期 单位分钟
 	GCONFIG_RECORD_ANNOUNCEMENT_EXPIRE_HOURS int64 = 24 //公告有效期 单位小时
+
+	// 口令复杂度策略（国标 GB/T 32917 §7 自身安全：身份鉴别/口令复杂度）
+	GCONFIG_PWD_MIN_LENGTH           int64 = 8 //密码最小长度
+	GCONFIG_PWD_REQUIRE_UPPER        int64 = 0 //是否要求大写字母 1要求 0不要求
+	GCONFIG_PWD_REQUIRE_LOWER        int64 = 0 //是否要求小写字母 1要求 0不要求
+	GCONFIG_PWD_REQUIRE_DIGIT        int64 = 1 //是否要求数字 1要求 0不要求
+	GCONFIG_PWD_REQUIRE_SPECIAL      int64 = 0 //是否要求特殊字符 1要求 0不要求
+	GCONFIG_PWD_EXPIRE_DAYS          int64 = 0 //密码有效期天数（0=不限，到期登录时提示强制更换）
+	GCONFIG_PWD_HISTORY_COUNT        int64 = 0 //历史密码防重用个数（0=不启用）
+	GCONFIG_PWD_FORCE_CHANGE_DEFAULT int64 = 1 //默认密码/被重置后是否强制改密 1强制 0否
 
 	GCONFIG_RECORD_DNS_BOT_EXPIRE_HOURS    int64  = 24     //DNS bot有效期 单位小时 默认1天
 	GCONFIG_RECORD_DNS_NORMAL_EXPIRE_HOURS int64  = 7 * 24 //DNS 正常有效期 单位小时 默认7天

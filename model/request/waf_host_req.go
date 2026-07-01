@@ -12,6 +12,7 @@ type WafHostAddReq struct {
 	Remote_host               string `json:"remote_host"`                  //远端域名
 	Remote_ip                 string `json:"remote_ip"`                    //远端指定IP
 	Remote_port               int    `json:"remote_port"`                  //远端端口
+	Nickname                  string `json:"nickname"`                     //网站昵称
 	REMARKS                   string `json:"remarks"`                      //备注
 	Certfile                  string `json:"certfile"`                     // 证书文件
 	Keyfile                   string `json:"keyfile"`                      // 密钥文件
@@ -42,6 +43,9 @@ type WafHostAddReq struct {
 	CustomHeadersJSON         string `json:"custom_headers_json"`          //自定义头信息配置 json
 	CustomResponseHeadersJSON string `json:"custom_response_headers_json"` //自定义响应头信息配置 json
 	ResponseCompressJSON      string `json:"response_compress_json"`       //响应压缩配置 json
+	CookieSecurityJSON        string `json:"cookie_security_json"`         //Cookie安全保护配置 json
+	CsrfJSON                  string `json:"csrf_json"`                    //CSRF防护配置 json
+	TamperJSON                string `json:"tamper_json"`                  //网页防篡改配置 json
 	IPMode                    string `json:"ip_mode"`                      //IP提取模式: "nic" 网卡模式 或 "proxy" 代理模式
 }
 
@@ -55,6 +59,7 @@ type WafHostDetailReq struct {
 
 type WafHostEditReq struct {
 	CODE                      string `json:"code"`
+	Nickname                  string `json:"nickname"`                     //网站昵称
 	Host                      string `json:"host"`                         //域名
 	Port                      int    `json:"port"`                         //端口
 	Ssl                       int    `json:"ssl"`                          //是否是ssl
@@ -93,6 +98,9 @@ type WafHostEditReq struct {
 	CustomHeadersJSON         string `json:"custom_headers_json"`          //自定义头信息配置 json
 	CustomResponseHeadersJSON string `json:"custom_response_headers_json"` //自定义响应头信息配置 json
 	ResponseCompressJSON      string `json:"response_compress_json"`       //响应压缩配置 json
+	CookieSecurityJSON        string `json:"cookie_security_json"`         //Cookie安全保护配置 json
+	CsrfJSON                  string `json:"csrf_json"`                    //CSRF防护配置 json
+	TamperJSON                string `json:"tamper_json"`                  //网页防篡改配置 json
 	IPMode                    string `json:"ip_mode"`                      //IP提取模式: "nic" 网卡模式 或 "proxy" 代理模式
 }
 type WafHostGuardStatusReq struct {

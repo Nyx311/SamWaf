@@ -71,6 +71,7 @@ func (receiver *WafHostService) AddApi(wafHostAddReq request.WafHostAddReq) (str
 		Remote_ip:                 wafHostAddReq.Remote_ip,
 		Certfile:                  wafHostAddReq.Certfile,
 		Keyfile:                   wafHostAddReq.Keyfile,
+		Nickname:                  wafHostAddReq.Nickname,
 		REMARKS:                   wafHostAddReq.REMARKS,
 		GLOBAL_HOST:               0,
 		DEFENSE_JSON:              wafHostAddReq.DEFENSE_JSON,
@@ -100,6 +101,9 @@ func (receiver *WafHostService) AddApi(wafHostAddReq request.WafHostAddReq) (str
 		CustomHeadersJSON:         wafHostAddReq.CustomHeadersJSON,
 		CustomResponseHeadersJSON: wafHostAddReq.CustomResponseHeadersJSON,
 		ResponseCompressJSON:      wafHostAddReq.ResponseCompressJSON,
+		CookieSecurityJSON:        wafHostAddReq.CookieSecurityJSON,
+		CsrfJSON:                  wafHostAddReq.CsrfJSON,
+		TamperJSON:                wafHostAddReq.TamperJSON,
 		IPMode:                    wafHostAddReq.IPMode,
 	}
 	global.GWAF_LOCAL_DB.Create(wafHost)
@@ -132,6 +136,7 @@ func (receiver *WafHostService) ModifyApi(wafHostEditReq request.WafHostEditReq)
 		"Remote_host":               wafHostEditReq.Remote_host,
 		"Remote_ip":                 wafHostEditReq.Remote_ip,
 		"Remote_port":               wafHostEditReq.Remote_port,
+		"Nickname":                  wafHostEditReq.Nickname,
 		"REMARKS":                   wafHostEditReq.REMARKS,
 		"GLOBAL_HOST":               0,
 		"Certfile":                  wafHostEditReq.Certfile,
@@ -164,6 +169,9 @@ func (receiver *WafHostService) ModifyApi(wafHostEditReq request.WafHostEditReq)
 		"CustomHeadersJSON":         wafHostEditReq.CustomHeadersJSON,
 		"CustomResponseHeadersJSON": wafHostEditReq.CustomResponseHeadersJSON,
 		"ResponseCompressJSON":      wafHostEditReq.ResponseCompressJSON,
+		"CookieSecurityJSON":        wafHostEditReq.CookieSecurityJSON,
+		"CsrfJSON":                  wafHostEditReq.CsrfJSON,
+		"TamperJSON":                wafHostEditReq.TamperJSON,
 		"IPMode":                    wafHostEditReq.IPMode,
 	}
 	err := global.GWAF_LOCAL_DB.Debug().Model(model.Hosts{}).Where("CODE=?", wafHostEditReq.CODE).Updates(hostMap).Error
@@ -197,24 +205,32 @@ func (receiver *WafHostService) GetListApi(req request.WafHostSearchReq) ([]mode
 		}
 		whereField = whereField + " code=? "
 	}
-	for _, by := range splitFilterBys {
-
-		if len(by) > 0 {
-			if !validfield.IsValidHostFilterField(by) {
-				return nil, 0, errors.New("输入过滤字段不合法")
-			}
-			if len(whereField) > 0 {
-				whereField = whereField + " and "
-			}
-			whereField = whereField + " " + by + " like ? "
-		}
-	}
 	//where字段赋值
 	if len(req.Code) > 0 {
 		whereValues = append(whereValues, req.Code)
 	}
-	for _, val := range splitFilterValues {
-		if len(val) > 0 {
+	for i, by := range splitFilterBys {
+		if len(by) == 0 {
+			continue
+		}
+		if !validfield.IsValidHostFilterField(by) {
+			return nil, 0, errors.New("输入过滤字段不合法")
+		}
+		val := ""
+		if i < len(splitFilterValues) {
+			val = splitFilterValues[i]
+		}
+		if len(val) == 0 {
+			continue
+		}
+		if len(whereField) > 0 {
+			whereField += " and "
+		}
+		if by == "host" {
+			whereField += " (host like ? OR nickname like ?) "
+			whereValues = append(whereValues, "%"+val+"%", "%"+val+"%")
+		} else {
+			whereField += " " + by + " like ? "
 			whereValues = append(whereValues, "%"+val+"%")
 		}
 	}

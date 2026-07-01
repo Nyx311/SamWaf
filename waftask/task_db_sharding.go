@@ -50,16 +50,33 @@ func TaskShareDbInfo() {
 		shardingReason = fmt.Sprintf("记录数量(%d)超过限制(%d)", total, global.GDATA_SHARE_DB_SIZE)
 	}
 
-	// 检查文件大小是否超过限制
-	fileInfo, err := os.Stat(dbFilePath)
-	if err == nil {
-		fileSizeMB := fileInfo.Size() / (1024 * 1024) // 转换为MB
-		if fileSizeMB > global.GDATA_SHARE_DB_FILE_SIZE {
-			needSharding = true
-			shardingReason = fmt.Sprintf("文件大小(%dMB)超过限制(%dMB)", fileSizeMB, global.GDATA_SHARE_DB_FILE_SIZE)
+	// 检查大小是否超过限制：SQLite 用 .db 文件大小，MySQL 用 web_logs 表(数据+索引)大小
+	if dialect.Get().IsFileBased() {
+		fileInfo, err := os.Stat(dbFilePath)
+		if err == nil {
+			totalBytes := fileInfo.Size()
+			// 把 -wal 大小一并计入：WAL 模式下数据可能暂存在 wal 文件，主库文件显小会导致漏判
+			if walInfo, werr := os.Stat(dbFilePath + "-wal"); werr == nil {
+				totalBytes += walInfo.Size()
+			}
+			fileSizeMB := totalBytes / (1024 * 1024) // 转换为MB
+			if fileSizeMB > global.GDATA_SHARE_DB_FILE_SIZE {
+				needSharding = true
+				shardingReason = fmt.Sprintf("文件大小(%dMB,含WAL)超过限制(%dMB)", fileSizeMB, global.GDATA_SHARE_DB_FILE_SIZE)
+			}
+		} else {
+			zlog.Error(innerLogName, "获取数据库文件大小失败:", err)
 		}
 	} else {
-		zlog.Error(innerLogName, "获取数据库文件大小失败:", err)
+		tableSizeMB, err := dialect.Get().TableSizeMB(global.GWAF_LOCAL_LOG_DB, "web_logs")
+		if err == nil {
+			if tableSizeMB > global.GDATA_SHARE_DB_FILE_SIZE {
+				needSharding = true
+				shardingReason = fmt.Sprintf("表大小(%dMB)超过限制(%dMB)", tableSizeMB, global.GDATA_SHARE_DB_FILE_SIZE)
+			}
+		} else {
+			zlog.Error(innerLogName, "获取web_logs表大小失败:", err)
+		}
 	}
 
 	if needSharding {
@@ -69,7 +86,13 @@ func TaskShareDbInfo() {
 		}()
 		zlog.Info(innerLogName, "开始分库，原因:", shardingReason)
 
-		newDBFilename := fmt.Sprintf("local_log_%v.db", time.Now().Format("20060102150405"))
+		ts := time.Now().Format("20060102150405")
+		newDBFilename := fmt.Sprintf("local_log_%v.db", ts)
+		// 归档标识：SQLite 为新文件名(.db)，MySQL 为归档表名(web_logs_<ts>)
+		archiveName := newDBFilename
+		if !dialect.Get().IsFileBased() {
+			archiveName = fmt.Sprintf("web_logs_%v", ts)
+		}
 
 		var lastedDb model.ShareDb
 		err := global.GWAF_LOCAL_DB.Limit(1).Order("create_time desc").Find(&lastedDb).Error
@@ -88,7 +111,7 @@ func TaskShareDbInfo() {
 			DbLogicType: "log",
 			StartTime:   startTime,
 			EndTime:     customtype.JsonTime(time.Now()),
-			FileName:    newDBFilename,
+			FileName:    archiveName,
 			Cnt:         total,
 		}
 
@@ -107,20 +130,25 @@ func TaskShareDbInfo() {
 					zlog.Error(innerLogName, "切换关闭时候错误", err)
 				}
 			}
+			// 等待连接彻底关闭（Count 报错即连接已关闭，可安全重命名文件）。
+			// 加最大重试上限，避免连接异常未报错时无限循环卡住切库（高频切库后该段执行更频繁）。
 			var testTotal int64
-			// 等待数据库连接完全关闭（最多30秒超时保护）
+			// 等待数据库连接完全关闭（最多30秒超时保护，最多10次重试）
 			closeTimeout := time.After(30 * time.Second)
-		closeWaitLoop:
-			for {
+			for attempt := 0; attempt < 10; attempt++ {
 				select {
 				case <-closeTimeout:
 					zlog.Warn(innerLogName, "等待数据库关闭超时(30s)，强制继续")
-					break closeWaitLoop
+					break
 				default:
 				}
 				testError := global.GWAF_LOCAL_LOG_DB.Model(&innerbean.WebLog{}).Count(&testTotal).Error
 				if testError != nil {
-					zlog.Error(innerLogName, "检测数据", testError)
+					zlog.Debug(innerLogName, "连接已关闭，可切库", testError)
+					break
+				}
+				if attempt == 9 {
+					zlog.Warn(innerLogName, "等待日志库连接关闭超时，强制继续切库")
 					break
 				}
 				time.Sleep(1 * time.Second)
@@ -139,8 +167,17 @@ func TaskShareDbInfo() {
 			global.GWAF_LOCAL_LOG_DB = nil
 			wafdb.InitLogDb("")
 		} else {
-			// MySQL / SQL Server：RENAME TABLE + AutoMigrate 重建空表（Milestone 2 实现）
-			zlog.Warn(innerLogName, "当前数据库驱动暂不支持自动分库，跳过:", dialect.Get().Name())
+			// MySQL：CREATE TABLE LIKE + 单语句原子 RENAME 换表。
+			// 把 web_logs 归档为 archiveName 并重建同结构空表，换表期间无写入空窗，
+			// 同一连接、表已重建为空，无需像 SQLite 那样置 nil 重连。
+			// 注意：归档表(web_logs_<ts>)不再被 gormigrate 跟踪，今后给 web_logs 加列时
+			// 需同步 ALTER 历史分表，否则读旧分片可能缺列（见 ResolveLogDB 注释）。
+			if err := dialect.Get().ShardSwapTable(global.GWAF_LOCAL_LOG_DB, "web_logs", archiveName); err != nil {
+				zlog.Error(innerLogName, "分表失败:", err)
+			} else {
+				global.GWAF_LOCAL_DB.Create(sharDbBean)
+				zlog.Info(innerLogName, "分表完成，归档表:", archiveName)
+			}
 		}
 		zlog.Info(innerLogName, "切库完成...")
 	}

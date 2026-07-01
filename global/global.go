@@ -7,6 +7,7 @@ import (
 	"SamWaf/iplocation"
 	"SamWaf/model"
 	"SamWaf/model/spec"
+	"SamWaf/wafai"
 	"SamWaf/wafnotify"
 	"SamWaf/wafowasp"
 	"SamWaf/wafsnowflake"
@@ -31,6 +32,12 @@ var (
 	GWAF_RUNTIME_IP          string = "127.0.0.1" //本机当前外网IP
 	GWAF_RUNTIME_AREA        string = ""          //本机当前所在区域
 	GWAF_RUNTIME_SERVER_TYPE bool   = false       //当前是是否以服务形式启动
+	GWAF_RUNTIME_IS_TAKEOVER bool   = false       //当前 Worker 是否以升级接管(takeover)方式启动：与旧 Worker 并存，需跳过整库备份等仅首启动作
+
+	// 调试：在响应头 X-SamWaf-Worker 标记处理请求的 Worker 进程，用于验证升级时新旧 Worker 交替。
+	// 仅当环境变量 SAMWAF_WORKER_HEADER=1 时开启（默认关闭，避免对外暴露 PID）。
+	GWAF_DEBUG_WORKER_HEADER bool   = false
+	GWAF_WORKER_TAG          string = "" //当前进程标识(pid+启动时间)
 
 	GWAF_RUNTIME_NEW_VERSION      string = ""      //最新版本号
 	GWAF_RUNTIME_NEW_VERSION_DESC string = ""      //最新版本描述
@@ -79,6 +86,8 @@ var (
 	GWAF_IP_WHITELIST            string = "0.0.0.0/0,::/0" //IP白名单 后台默认放行所有
 	GWAF_DOMAIN_WHITELIST        string = ""               //域名白名单，为空时不限制，多个用逗号分隔
 	GWAF_SSL_ENABLE              bool   = false            //是否启用SSL证书
+	GWAF_SSL_FORCE_HTTPS         bool   = false            //管理端是否仅允许HTTPS访问（开启后纯HTTP请求301跳转到HTTPS），默认HTTP/HTTPS都允许
+	GWAF_SSL_BIND_CERT_ID        string = ""               //管理端证书绑定的证书夹(SslConfig)ID，为空表示未绑定（使用手动上传的证书）
 	GWAF_SECURITY_ENTRY_ENABLE   bool   = false            //是否启用安全路径入口
 	GWAF_SECURITY_ENTRY_PATH     string = ""               //安全路径（18位随机码）
 	GWAF_SECURITY_EMERGENCY_PATH string = ""               //应急恢复路径（随机生成，首次启动自动写入 conf/config.yml）
@@ -95,8 +104,12 @@ var (
 	GWAF_NOTICE_ENABLE           bool                = false      // 是否开启通知
 	GWAF_NOTICE_TITLE            string                           // 通知消息标题前缀（用于区分多实例，默认使用 custom_server_name）
 	GWAF_CAN_EXPORT_DOWNLOAD_LOG bool                = false      //是否可以导出下载日志
-	GWAF_DLP                     dlpheader.EngineAPI              // 脱敏引擎
-	GWAF_DLP_CONFIG              string                           // 脱敏引擎配置数据
+	GWAF_CAN_APP_MANAGE          bool                = false               //是否启用应用管理功能（默认关闭，需服务端配置才能开启）
+	GWAF_APP_ALLOW_DIRS          string              = "data/applications" //应用允许的工作目录（逗号分隔多路径）
+	GWAF_APP_OP_PASSWORD         string                                    //应用操作密码（高危操作二次确认，自动生成存 config.yml）
+	GWAF_DLP                     dlpheader.EngineAPI                       // 脱敏引擎
+	GWAF_DLP_CONFIG              string                                    // 脱敏引擎配置数据
+	GWAF_AI_DETECTOR             *wafai.Detector                           // AI智能检测器（持有当前模型，失败安全）
 
 	GWAF_OWASP         *wafowasp.WafOWASP     //owasp引擎（兼容保留：由 GWAF_OWASP_MANAGER.Current() 更新；请勿直接赋值新实例，否则热重载会失效）
 	GWAF_OWASP_MANAGER *wafowasp.OwaspManager //owasp 管理器（支持热重载）

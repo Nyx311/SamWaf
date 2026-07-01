@@ -10,8 +10,11 @@ import (
 )
 
 // 主机安全配置
+//
+// 并发模型(RCU)：HostSafe 一经发布到路由快照即视为不可变，请求热路径无锁读其字段；
+// 运行期热更新一律 copy-on-write(见 wafenginecore/routing_table.go 的 updateHost)，绝不就地改已发布的 HostSafe。
+// 例外：LoadBalanceRuntime 是共享可变子对象(每请求轮询状态)，由其自身的 Mux 保护。
 type HostSafe struct {
-	Mux                 sync.Mutex //互斥锁
 	Rule                *utils.RuleHelper
 	TargetHost          string
 	RuleData            []model.Rules
@@ -30,6 +33,7 @@ type HostSafe struct {
 	HttpAuthBases      []model.HttpAuthBase          //HTTP AUTH校验
 	BlockingPage       map[string]model.BlockingPage //自定义拦截界面
 	CacheRule          []model.CacheRule             //CacheRule
+	TamperRules        []model.TamperRule            //网页防篡改规则（含基线正文，供响应比对/回吐）
 	PathRules          []model.HostPathRule          //路径路由规则
 	StaticConfig       model.StaticSiteConfig        //解析后的静态站点安全配置，供路径规则静态服务共享
 }

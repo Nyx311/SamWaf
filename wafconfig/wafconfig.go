@@ -122,6 +122,58 @@ func LoadAndInitConfig() {
 		global.GWAF_CAN_EXPORT_DOWNLOAD_LOG = config.GetBool("export_download")
 	}
 
+	// 优雅升级/停止时连接排空超时（秒）。Supervisor 与 Worker 均在启动时从 config.yml 读取，
+	// 超时仍未排空的连接将被强制关闭。<=0 时回退到默认 30s。
+	if config.IsSet("drain_time_out") {
+		if v := config.GetInt64("drain_time_out"); v > 0 {
+			global.GCONFIG_RECORD_DRAIN_TIMEOUT = v
+		}
+	} else {
+		config.Set("drain_time_out", global.GCONFIG_RECORD_DRAIN_TIMEOUT)
+		configChanged = true
+	}
+
+	// 调试响应头开关：开启后在响应头加 X-SamWaf-Worker 标记处理进程，便于验证升级时新旧 Worker 交替。
+	// Supervisor 与 Worker 均在启动时从 config.yml 读取（服务模式下环境变量不会从交互式 shell 传入，故改用配置项）。
+	if config.IsSet("debug_worker_header") {
+		global.GWAF_DEBUG_WORKER_HEADER = config.GetBool("debug_worker_header")
+	} else {
+		config.Set("debug_worker_header", global.GWAF_DEBUG_WORKER_HEADER)
+		configChanged = true
+	}
+
+	// 应用管理功能开关（默认关闭）
+	if config.IsSet("application_manage") == false {
+		config.Set("application_manage", global.GWAF_CAN_APP_MANAGE)
+		configChanged = true
+	} else {
+		global.GWAF_CAN_APP_MANAGE = config.GetBool("application_manage")
+	}
+
+	// 应用允许工作目录（逗号分隔，默认 data/applications）
+	if config.IsSet("application_allow_dirs") == false {
+		config.Set("application_allow_dirs", global.GWAF_APP_ALLOW_DIRS)
+		configChanged = true
+	} else {
+		global.GWAF_APP_ALLOW_DIRS = config.GetString("application_allow_dirs")
+	}
+
+	// 应用操作密码（高危操作二次确认）：启用时若为空则自动生成并落盘
+	if config.IsSet("application_op_password") == false || config.GetString("application_op_password") == "" {
+		if global.GWAF_CAN_APP_MANAGE {
+			newOpPwd := generateSecurityEntryPath()
+			config.Set("application_op_password", newOpPwd)
+			global.GWAF_APP_OP_PASSWORD = newOpPwd
+			configChanged = true
+			fmt.Printf("%s\tINFO\t==========================================\n", currentTime)
+			fmt.Printf("%s\tINFO\t应用管理操作密码（首次自动生成）: %s\n", currentTime, newOpPwd)
+			fmt.Printf("%s\tINFO\t请妥善保管；忘记可清空 conf/config.yml 中 application_op_password 字段后重启重新生成\n", currentTime)
+			fmt.Printf("%s\tINFO\t==========================================\n", currentTime)
+		}
+	} else {
+		global.GWAF_APP_OP_PASSWORD = config.GetString("application_op_password")
+	}
+
 	if config.IsSet("zlog.outputformat") {
 		global.GWAF_LOG_OUTPUT_FORMAT = config.GetString("zlog.outputformat")
 	} else {
@@ -168,6 +220,22 @@ func LoadAndInitConfig() {
 		global.GWAF_SSL_ENABLE = config.GetBool("security.ssl_enable")
 	} else {
 		config.Set("security.ssl_enable", global.GWAF_SSL_ENABLE)
+		configChanged = true
+	}
+
+	//配置和提取管理端仅允许HTTPS开关
+	if config.IsSet("security.ssl_force_https") {
+		global.GWAF_SSL_FORCE_HTTPS = config.GetBool("security.ssl_force_https")
+	} else {
+		config.Set("security.ssl_force_https", global.GWAF_SSL_FORCE_HTTPS)
+		configChanged = true
+	}
+
+	//配置和提取管理端证书绑定的证书夹ID
+	if config.IsSet("security.ssl_bind_cert_id") {
+		global.GWAF_SSL_BIND_CERT_ID = config.GetString("security.ssl_bind_cert_id")
+	} else {
+		config.Set("security.ssl_bind_cert_id", global.GWAF_SSL_BIND_CERT_ID)
 		configChanged = true
 	}
 
@@ -461,6 +529,94 @@ func UpdateSslEnable(sslEnable bool) error {
 
 	fmt.Printf("%s\tINFO\tSSL enable config updated\n", currentTime)
 
+	return nil
+}
+
+// UpdateSslForceHttps 更新管理端仅允许HTTPS开关（需重启管理端生效）
+func UpdateSslForceHttps(forceHttps bool) error {
+	currentTime := time.Now().Format("2006-01-02 15:04:05.000")
+
+	configDir := utils.GetCurrentDir() + "/conf/"
+	if _, err := os.Stat(configDir); os.IsNotExist(err) {
+		if err := os.MkdirAll(configDir, os.ModePerm); err != nil {
+			fmt.Printf("%s\tERROR\t创建config目录失败:%v\n", currentTime, err)
+			return err
+		}
+	}
+
+	config := viper.New()
+	config.AddConfigPath(configDir)
+	config.SetConfigName("config")
+	config.SetConfigType("yml")
+
+	if err := config.ReadInConfig(); err != nil {
+		if _, ok := err.(viper.ConfigFileNotFoundError); ok {
+			fmt.Printf("%s\tWARN\t找不到配置文件..\n", currentTime)
+			config.Set("local_port", global.GWAF_LOCAL_SERVER_PORT)
+			err = config.SafeWriteConfig()
+			if err != nil {
+				return err
+			}
+		} else {
+			fmt.Printf("%s\tERROR\t配置文件出错..\n", currentTime)
+			return err
+		}
+	}
+
+	config.Set("security.ssl_force_https", forceHttps)
+	global.GWAF_SSL_FORCE_HTTPS = forceHttps
+
+	err := config.WriteConfig()
+	if err != nil {
+		fmt.Printf("%s\tERROR\twrite config failed:%v\n", currentTime, err)
+		return err
+	}
+
+	fmt.Printf("%s\tINFO\tSSL force https config updated\n", currentTime)
+	return nil
+}
+
+// UpdateSslBindCertId 更新管理端证书绑定的证书夹ID（空字符串表示解绑）
+func UpdateSslBindCertId(bindCertId string) error {
+	currentTime := time.Now().Format("2006-01-02 15:04:05.000")
+
+	configDir := utils.GetCurrentDir() + "/conf/"
+	if _, err := os.Stat(configDir); os.IsNotExist(err) {
+		if err := os.MkdirAll(configDir, os.ModePerm); err != nil {
+			fmt.Printf("%s\tERROR\t创建config目录失败:%v\n", currentTime, err)
+			return err
+		}
+	}
+
+	config := viper.New()
+	config.AddConfigPath(configDir)
+	config.SetConfigName("config")
+	config.SetConfigType("yml")
+
+	if err := config.ReadInConfig(); err != nil {
+		if _, ok := err.(viper.ConfigFileNotFoundError); ok {
+			fmt.Printf("%s\tWARN\t找不到配置文件..\n", currentTime)
+			config.Set("local_port", global.GWAF_LOCAL_SERVER_PORT)
+			err = config.SafeWriteConfig()
+			if err != nil {
+				return err
+			}
+		} else {
+			fmt.Printf("%s\tERROR\t配置文件出错..\n", currentTime)
+			return err
+		}
+	}
+
+	config.Set("security.ssl_bind_cert_id", bindCertId)
+	global.GWAF_SSL_BIND_CERT_ID = bindCertId
+
+	err := config.WriteConfig()
+	if err != nil {
+		fmt.Printf("%s\tERROR\twrite config failed:%v\n", currentTime, err)
+		return err
+	}
+
+	fmt.Printf("%s\tINFO\tSSL bind cert id config updated\n", currentTime)
 	return nil
 }
 

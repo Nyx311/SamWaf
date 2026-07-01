@@ -19,6 +19,7 @@ type Hosts struct {
 	Remote_ip                 string `gorm:"size:64" json:"remote_ip"`                      //远端指定IP
 	Certfile                  string `gorm:"type:text" json:"certfile"`                     //证书文件
 	Keyfile                   string `gorm:"type:text" json:"keyfile"`                      //密钥文件
+	Nickname                  string `gorm:"size:200" json:"nickname"`                      //网站昵称
 	REMARKS                   string `gorm:"size:500" json:"remarks"`                       //备注
 	GLOBAL_HOST               int    `json:"global_host"`                                   //默认全局 1 全局 0非全局
 	DEFENSE_JSON              string `gorm:"type:text" json:"defense_json"`                 //自身防御 json
@@ -48,6 +49,9 @@ type Hosts struct {
 	CustomHeadersJSON         string `gorm:"type:text" json:"custom_headers_json"`          //自定义头信息配置 json
 	CustomResponseHeadersJSON string `gorm:"type:text" json:"custom_response_headers_json"` //自定义响应头信息配置 json
 	ResponseCompressJSON      string `gorm:"type:text" json:"response_compress_json"`       //响应压缩配置 json（Gzip/Brotli/Zstd）
+	CookieSecurityJSON        string `gorm:"type:text" json:"cookie_security_json"`         //Cookie安全保护配置 json（HttpOnly/Secure/SameSite）
+	CsrfJSON                  string `gorm:"type:text" json:"csrf_json"`                    //CSRF防护配置 json（Origin/Referer 强校验）
+	TamperJSON                string `gorm:"type:text" json:"tamper_json"`                  //网页防篡改配置 json（响应基线比对）
 	IPMode                    string `gorm:"size:20" json:"ip_mode"`                        //IP提取模式: "nic" 网卡模式 或 "proxy" 代理模式
 }
 
@@ -60,6 +64,7 @@ type HostsDefense struct {
 	DEFENSE_SENSITIVE     int `json:"sensitive"` //敏感词检测
 	DEFENSE_DIR_TRAVERSAL int `json:"traversal"` //目录穿越检测
 	DEFENSE_OWASP_SET     int `json:"owaspset"`  //OWASP集检测
+	DEFENSE_AI            int `json:"ai"`        //AI智能检测（默认关闭，需先上传模型包并开启全局AI开关）
 }
 
 // HealthyConfig 健康度检测
@@ -185,6 +190,90 @@ type ResponseCompressConfig struct {
 	CompressWhenStaticAssist int    `json:"compress_when_static_assist"` // 1 时对静态协助响应也读体压缩
 }
 
+// CookieSecurityConfig Cookie 安全保护（应答方向给后端下发的 Set-Cookie 补齐安全属性）
+// 设计原则：缺失才补——仅在对应属性缺失时追加，绝不覆盖应用已设的值，保留原 cookie 全部内容。
+type CookieSecurityConfig struct {
+	IsEnable       int    `json:"is_enable"`       // 1 开启 0 关闭（默认0，老站点不受影响）
+	HttpOnly       int    `json:"http_only"`       // 1 缺失时补 HttpOnly / 0 不动（默认1）
+	Secure         int    `json:"secure"`          // 0 不动 / 1 强制补 / 2 仅 HTTPS 自动补（默认2）
+	SameSite       string `json:"same_site"`       // "" 不动 / Lax / Strict / None（默认Lax）
+	ExcludeCookies string `json:"exclude_cookies"` // 排除的 cookie 名，逗号分隔（如三方/SSO cookie 原样放过）
+}
+
+// ParseCookieSecurityConfig 解析 Cookie 安全保护配置；空 JSON 给安全默认值（但默认关闭）
+func ParseCookieSecurityConfig(jsonStr string) CookieSecurityConfig {
+	c := CookieSecurityConfig{
+		IsEnable: 0,
+		HttpOnly: 1,
+		Secure:   2,
+		SameSite: "Lax",
+	}
+	if jsonStr == "" {
+		return c
+	}
+	if err := json.Unmarshal([]byte(jsonStr), &c); err != nil {
+		return CookieSecurityConfig{IsEnable: 0, HttpOnly: 1, Secure: 2, SameSite: "Lax"}
+	}
+	return c
+}
+
+// CsrfConfig CSRF 跨站请求伪造防护配置（Origin/Referer 强校验）
+type CsrfConfig struct {
+	IsEnable       int    `json:"is_enable"`       // 1 开启 0 关闭（默认0，老站点不受影响）
+	ProtectMethods string `json:"protect_methods"` // 需保护的方法，逗号分隔（默认 "POST,PUT,DELETE,PATCH"；GET/HEAD/OPTIONS 等安全方法不校验）
+	AllowedOrigins string `json:"allowed_origins"` // 额外允许的来源(host 或 scheme://host)，换行分隔；本站域名 + BindMoreHost 自动允许
+	AllowEmptyRef  int    `json:"allow_empty_ref"` // 无 Origin 且无 Referer 时：1 放行(默认) / 0 拦截
+	ExcludePaths   string `json:"exclude_paths"`   // 排除的路径前缀，换行分隔（webhook/回调/Token鉴权API）
+}
+
+// ParseCsrfConfig 解析 CSRF 防护配置；空 JSON 给安全默认值（但默认关闭）
+func ParseCsrfConfig(jsonStr string) CsrfConfig {
+	c := CsrfConfig{
+		IsEnable:       0,
+		ProtectMethods: "POST,PUT,DELETE,PATCH",
+		AllowEmptyRef:  1,
+	}
+	if jsonStr == "" {
+		return c
+	}
+	if err := json.Unmarshal([]byte(jsonStr), &c); err != nil {
+		return CsrfConfig{IsEnable: 0, ProtectMethods: "POST,PUT,DELETE,PATCH", AllowEmptyRef: 1}
+	}
+	if c.ProtectMethods == "" {
+		c.ProtectMethods = "POST,PUT,DELETE,PATCH"
+	}
+	return c
+}
+
+// TamperConfig 网页防篡改配置（反代响应基线比对）
+type TamperConfig struct {
+	IsEnable  int    `json:"is_enable"`   // 1 开启 0 关闭（默认0，老站点不受影响）
+	Action    string `json:"action"`      // "replace"(比对+命中回吐正确副本+告警,默认) / "alert"(仅告警,仍放行后端页,监控档)
+	MaxSizeKB int    `json:"max_size_kb"` // 基线最大字节(KB)，默认1024(1MB)，超限不学习/不保护
+}
+
+// ParseTamperConfig 解析网页防篡改配置；空 JSON 给安全默认值（但默认关闭）
+func ParseTamperConfig(jsonStr string) TamperConfig {
+	c := TamperConfig{
+		IsEnable:  0,
+		Action:    "replace",
+		MaxSizeKB: 1024,
+	}
+	if jsonStr == "" {
+		return c
+	}
+	if err := json.Unmarshal([]byte(jsonStr), &c); err != nil {
+		return TamperConfig{IsEnable: 0, Action: "replace", MaxSizeKB: 1024}
+	}
+	if c.Action == "" {
+		c.Action = "replace"
+	}
+	if c.MaxSizeKB <= 0 {
+		c.MaxSizeKB = 1024
+	}
+	return c
+}
+
 // TransportConfig 传输配置
 type TransportConfig struct {
 	MaxIdleConns          int `json:"max_idle_conns"`          // 最大空闲连接数
@@ -306,6 +395,7 @@ func ParseHostsDefense(defenseJSON string) HostsDefense {
 	defense.DEFENSE_SENSITIVE = 1
 	defense.DEFENSE_DIR_TRAVERSAL = 1
 	defense.DEFENSE_OWASP_SET = 0
+	defense.DEFENSE_AI = 0
 
 	// 如果JSON不为空，则解析覆盖默认值
 	if defenseJSON != "" {

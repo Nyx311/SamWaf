@@ -68,18 +68,15 @@ func (waf *WafEngine) CheckCC(r *http.Request, weblogbean *innerbean.WebLog, for
 	}
 
 	// cc 防护 （全局检测）
-	if globalHostTarget == nil {
-		globalHostTarget = waf.HostTarget[global.GWAF_GLOBAL_HOST_NAME]
-	}
-	if globalHostTarget != nil && globalHostTarget.Host.GUARD_STATUS == 1 && globalHostTarget.PluginIpRateLimiter != nil {
-		if !globalHostTarget.PluginIpRateLimiter.Allow(clientIP) {
+	if waf.rt().HostTarget[global.GWAF_GLOBAL_HOST_NAME] != nil && waf.rt().HostTarget[global.GWAF_GLOBAL_HOST_NAME].Host.GUARD_STATUS == 1 && waf.rt().HostTarget[global.GWAF_GLOBAL_HOST_NAME].PluginIpRateLimiter != nil {
+		if !waf.rt().HostTarget[global.GWAF_GLOBAL_HOST_NAME].PluginIpRateLimiter.Allow(clientIP) {
 			weblogbean.RISK_LEVEL = 1
 			result.IsBlock = true
 			result.Title = "【全局】触发IP频次访问限制"
 			result.Content = "您的访问被阻止超量了"
 			cacheKey := enums.CACHE_CCVISITBAN_PRE + clientIP
 			//将该IP添加到封禁里
-			global.GCACHE_WAFCACHE.SetWithTTl(cacheKey, globalHostTarget.AntiCCBean.LockIPMinutes, time.Duration(globalHostTarget.AntiCCBean.LockIPMinutes)*time.Minute)
+			global.GCACHE_WAFCACHE.SetWithTTl(cacheKey, waf.rt().HostTarget[global.GWAF_GLOBAL_HOST_NAME].AntiCCBean.LockIPMinutes, time.Duration(waf.rt().HostTarget[global.GWAF_GLOBAL_HOST_NAME].AntiCCBean.LockIPMinutes)*time.Minute)
 			return result
 		}
 	}

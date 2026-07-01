@@ -934,6 +934,251 @@ func RunCoreDBMigrations(db *gorm.DB) error {
 				return nil
 			},
 		},
+		// 迁移23: 为 hosts 表添加 nickname 字段（网站昵称）
+		{
+			ID: "202606080001_add_hosts_nickname",
+			Migrate: func(tx *gorm.DB) error {
+				zlog.Info("迁移 202606080001: 为 hosts 表添加 nickname 字段")
+				if tx.Migrator().HasColumn(&model.Hosts{}, "nickname") {
+					zlog.Info("nickname 字段已存在，跳过添加")
+					return nil
+				}
+				if err := tx.Migrator().AddColumn(&model.Hosts{}, "nickname"); err != nil {
+					return fmt.Errorf("添加 nickname 字段失败: %w", err)
+				}
+				zlog.Info("nickname 字段添加成功")
+				return nil
+			},
+			Rollback: func(tx *gorm.DB) error {
+				zlog.Info("回滚 202606080001: 删除 hosts 表的 nickname 字段")
+				if tx.Migrator().HasColumn(&model.Hosts{}, "nickname") {
+					return tx.Migrator().DropColumn(&model.Hosts{}, "nickname")
+				}
+				return nil
+			},
+		},
+		// 迁移24: 创建应用管理表
+		{
+			ID: "202606080002_add_waf_apps_table",
+			Migrate: func(tx *gorm.DB) error {
+				zlog.Info("迁移 202606080002: 创建 waf_apps 表")
+				if err := tx.AutoMigrate(&model.WafApp{}); err != nil {
+					return fmt.Errorf("创建 waf_apps 表失败: %w", err)
+				}
+				zlog.Info("waf_apps 表创建成功")
+				return nil
+			},
+			Rollback: func(tx *gorm.DB) error {
+				zlog.Info("回滚 202606080002: 删除 waf_apps 表")
+				return tx.Migrator().DropTable(&model.WafApp{})
+			},
+		},
+		// 迁移25: 创建应用变更记录表
+		{
+			ID: "202606090001_add_waf_app_change_logs_table",
+			Migrate: func(tx *gorm.DB) error {
+				zlog.Info("迁移 202606090001: 创建 waf_app_change_logs 表")
+				if err := tx.AutoMigrate(&model.WafAppChangeLog{}); err != nil {
+					return fmt.Errorf("创建 waf_app_change_logs 表失败: %w", err)
+				}
+				zlog.Info("waf_app_change_logs 表创建成功")
+				return nil
+			},
+			Rollback: func(tx *gorm.DB) error {
+				zlog.Info("回滚 202606090001: 删除 waf_app_change_logs 表")
+				return tx.Migrator().DropTable(&model.WafAppChangeLog{})
+			},
+		},
+		{
+			ID: "202606120003_add_waf_log_label_marks_table",
+			Migrate: func(tx *gorm.DB) error {
+				zlog.Info("迁移 202606120003: 创建 waf_log_label_marks 表（AI训练标签人工修正）")
+				if err := tx.AutoMigrate(&model.WafLogLabelMark{}); err != nil {
+					return fmt.Errorf("创建 waf_log_label_marks 表失败: %w", err)
+				}
+				zlog.Info("waf_log_label_marks 表创建成功")
+				return nil
+			},
+			Rollback: func(tx *gorm.DB) error {
+				zlog.Info("回滚 202606120003: 删除 waf_log_label_marks 表")
+				return tx.Migrator().DropTable(&model.WafLogLabelMark{})
+			},
+		},
+		{
+			ID: "202606120004_add_label_mark_attack_type",
+			Migrate: func(tx *gorm.DB) error {
+				zlog.Info("迁移 202606120004: 为 waf_log_label_marks 添加 attack_type 字段")
+				if tx.Migrator().HasColumn(&model.WafLogLabelMark{}, "attack_type") {
+					return nil
+				}
+				if err := tx.Migrator().AddColumn(&model.WafLogLabelMark{}, "AttackType"); err != nil {
+					return fmt.Errorf("添加 attack_type 字段失败: %w", err)
+				}
+				return nil
+			},
+			Rollback: func(tx *gorm.DB) error {
+				if tx.Migrator().HasColumn(&model.WafLogLabelMark{}, "attack_type") {
+					return tx.Migrator().DropColumn(&model.WafLogLabelMark{}, "AttackType")
+				}
+				return nil
+			},
+		},
+		{
+			ID: "202606120005_add_label_mark_snapshot_fields",
+			Migrate: func(tx *gorm.DB) error {
+				zlog.Info("迁移 202606120005: 为 waf_log_label_marks 添加请求快照字段")
+				// AutoMigrate 仅新增缺失列，幂等安全
+				if err := tx.AutoMigrate(&model.WafLogLabelMark{}); err != nil {
+					return fmt.Errorf("同步 waf_log_label_marks 快照字段失败: %w", err)
+				}
+				return nil
+			},
+			Rollback: func(tx *gorm.DB) error {
+				return nil
+			},
+		},
+		{
+			ID: "202606300001_add_hosts_cookie_security_json",
+			Migrate: func(tx *gorm.DB) error {
+				zlog.Info("迁移 202606300001: 为 hosts 表添加 cookie_security_json 字段")
+				if tx.Migrator().HasColumn(&model.Hosts{}, "cookie_security_json") {
+					zlog.Info("cookie_security_json 字段已存在，跳过添加")
+					return nil
+				}
+				if err := tx.Migrator().AddColumn(&model.Hosts{}, "cookie_security_json"); err != nil {
+					return fmt.Errorf("添加 cookie_security_json 字段失败: %w", err)
+				}
+				defaultJSON := `{"is_enable":0,"http_only":1,"secure":2,"same_site":"Lax","exclude_cookies":""}`
+				if err := tx.Exec("UPDATE hosts SET cookie_security_json = ? WHERE cookie_security_json IS NULL OR cookie_security_json = ''", defaultJSON).Error; err != nil {
+					zlog.Warn("设置 cookie_security_json 默认值失败", "error", err.Error())
+				}
+				zlog.Info("cookie_security_json 字段添加成功")
+				return nil
+			},
+			Rollback: func(tx *gorm.DB) error {
+				zlog.Info("回滚 202606300001: 删除 hosts 表的 cookie_security_json 字段")
+				if tx.Migrator().HasColumn(&model.Hosts{}, "cookie_security_json") {
+					return tx.Migrator().DropColumn(&model.Hosts{}, "cookie_security_json")
+				}
+				return nil
+			},
+		},
+		{
+			ID: "202606300002_add_hosts_csrf_json",
+			Migrate: func(tx *gorm.DB) error {
+				zlog.Info("迁移 202606300002: 为 hosts 表添加 csrf_json 字段")
+				if tx.Migrator().HasColumn(&model.Hosts{}, "csrf_json") {
+					zlog.Info("csrf_json 字段已存在，跳过添加")
+					return nil
+				}
+				if err := tx.Migrator().AddColumn(&model.Hosts{}, "csrf_json"); err != nil {
+					return fmt.Errorf("添加 csrf_json 字段失败: %w", err)
+				}
+				defaultJSON := `{"is_enable":0,"protect_methods":"POST,PUT,DELETE,PATCH","allowed_origins":"","allow_empty_ref":1,"exclude_paths":""}`
+				if err := tx.Exec("UPDATE hosts SET csrf_json = ? WHERE csrf_json IS NULL OR csrf_json = ''", defaultJSON).Error; err != nil {
+					zlog.Warn("设置 csrf_json 默认值失败", "error", err.Error())
+				}
+				zlog.Info("csrf_json 字段添加成功")
+				return nil
+			},
+			Rollback: func(tx *gorm.DB) error {
+				zlog.Info("回滚 202606300002: 删除 hosts 表的 csrf_json 字段")
+				if tx.Migrator().HasColumn(&model.Hosts{}, "csrf_json") {
+					return tx.Migrator().DropColumn(&model.Hosts{}, "csrf_json")
+				}
+				return nil
+			},
+		},
+		{
+			ID: "202607010001_add_tamper_protection",
+			Migrate: func(tx *gorm.DB) error {
+				zlog.Info("迁移 202607010001: 为 hosts 表添加 tamper_json 字段并新建 tamper_rule 表")
+				if !tx.Migrator().HasColumn(&model.Hosts{}, "tamper_json") {
+					if err := tx.Migrator().AddColumn(&model.Hosts{}, "tamper_json"); err != nil {
+						return fmt.Errorf("添加 tamper_json 字段失败: %w", err)
+					}
+					defaultJSON := `{"is_enable":0,"action":"replace","max_size_kb":1024}`
+					if err := tx.Exec("UPDATE hosts SET tamper_json = ? WHERE tamper_json IS NULL OR tamper_json = ''", defaultJSON).Error; err != nil {
+						zlog.Warn("设置 tamper_json 默认值失败", "error", err.Error())
+					}
+				} else {
+					zlog.Info("tamper_json 字段已存在，跳过添加")
+				}
+				// 创建/同步网页防篡改规则表（幂等）
+				if err := tx.AutoMigrate(&model.TamperRule{}); err != nil {
+					return fmt.Errorf("同步 tamper_rule 表失败: %w", err)
+				}
+				zlog.Info("网页防篡改结构迁移成功")
+				return nil
+			},
+			Rollback: func(tx *gorm.DB) error {
+				zlog.Info("回滚 202607010001: 删除 tamper_json 字段与 tamper_rule 表")
+				if tx.Migrator().HasColumn(&model.Hosts{}, "tamper_json") {
+					_ = tx.Migrator().DropColumn(&model.Hosts{}, "tamper_json")
+				}
+				if tx.Migrator().HasTable(&model.TamperRule{}) {
+					return tx.Migrator().DropTable(&model.TamperRule{})
+				}
+				return nil
+			},
+		},
+		{
+			ID: "202606290001_add_rbac_and_password_policy",
+			Migrate: func(tx *gorm.DB) error {
+				zlog.Info("迁移 202606290001: RBAC 角色 + 口令策略字段，新增密码历史表")
+				// AutoMigrate 仅新增缺失列/表，幂等安全
+				if err := tx.AutoMigrate(&model.Account{}); err != nil {
+					return fmt.Errorf("同步 account 字段失败: %w", err)
+				}
+				if err := tx.AutoMigrate(&model.TokenInfo{}); err != nil {
+					return fmt.Errorf("同步 token_info 字段失败: %w", err)
+				}
+				if err := tx.AutoMigrate(&model.AccountPwdHistory{}); err != nil {
+					return fmt.Errorf("创建 account_pwd_histories 表失败: %w", err)
+				}
+				return nil
+			},
+			Rollback: func(tx *gorm.DB) error {
+				zlog.Info("回滚 202606290001: 删除 account_pwd_histories 表")
+				return tx.Migrator().DropTable(&model.AccountPwdHistory{})
+			},
+		},
+		// 迁移: 为 ssl_configs 表添加 auto_load_path 字段（证书夹路径自动加载开关，默认开启）
+		{
+			ID: "202606290002_add_ssl_config_auto_load_path",
+			Migrate: func(tx *gorm.DB) error {
+				zlog.Info("迁移 202606290002: 为 ssl_configs 表添加 auto_load_path 字段")
+
+				// 检查字段是否已存在
+				if tx.Migrator().HasColumn(&model.SslConfig{}, "auto_load_path") {
+					zlog.Info("auto_load_path 字段已存在，执行默认值回填")
+					if err := tx.Model(&model.SslConfig{}).Where("auto_load_path IS NULL").Update("auto_load_path", 1).Error; err != nil {
+						zlog.Warn("回填 auto_load_path 默认值失败", "error", err.Error())
+					}
+					return nil
+				}
+
+				// 添加字段（gorm default:1，存量数据列默认值为1）
+				if err := tx.Migrator().AddColumn(&model.SslConfig{}, "auto_load_path"); err != nil {
+					return fmt.Errorf("添加 auto_load_path 字段失败: %w", err)
+				}
+
+				// 历史数据回填默认值 1（保持原有路径自动加载行为不变）
+				if err := tx.Model(&model.SslConfig{}).Where("auto_load_path IS NULL").Update("auto_load_path", 1).Error; err != nil {
+					zlog.Warn("设置 auto_load_path 默认值失败", "error", err.Error())
+				}
+
+				zlog.Info("auto_load_path 字段添加成功（默认开启，行为兼容）")
+				return nil
+			},
+			Rollback: func(tx *gorm.DB) error {
+				zlog.Info("回滚 202606290002: 删除 ssl_configs 表的 auto_load_path 字段")
+				if tx.Migrator().HasColumn(&model.SslConfig{}, "auto_load_path") {
+					return tx.Migrator().DropColumn(&model.SslConfig{}, "auto_load_path")
+				}
+				return nil
+			},
+		},
 	})
 
 	// 执行迁移
