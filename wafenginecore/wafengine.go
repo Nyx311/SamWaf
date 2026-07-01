@@ -307,7 +307,7 @@ func (waf *WafEngine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if hostTarget.Host.GUARD_STATUS == 1 && hostTarget.Host.LogOnlyMode != 1 {
 			earlyNetSrcIp := utils.GetSourceClientIP(r.RemoteAddr)
 			checkIp := model.GetClientIPByMode(hostTarget.Host.IPMode, earlyNetSrcIp, clientIP)
-			globalHostSafe := waf.HostTarget[global.GWAF_GLOBAL_HOST_NAME]
+			globalHostSafe := waf.rt().HostTarget[global.GWAF_GLOBAL_HOST_NAME]
 
 			isIPAllowed := false
 			for i := 0; i < len(hostTarget.IPWhiteLists); i++ {
@@ -370,7 +370,7 @@ func (waf *WafEngine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					}
 					decrementMonitor(hostCode)
 					// 安全获取全局主机引用，防止空指针
-					globalHost := waf.HostTarget[global.GWAF_GLOBAL_HOST_NAME]
+					globalHost := waf.rt().HostTarget[global.GWAF_GLOBAL_HOST_NAME]
 					EchoErrorInfo(w, r, &weblogbean, denyTitle, denyContent, hostTarget, globalHost, true, "ip_blocked")
 					return
 				}
@@ -1218,7 +1218,7 @@ func (waf *WafEngine) modifyResponse() func(*http.Response) error {
 				// 如果是流式内容，使用流式处理器
 				if isStreamContent {
 					// 防护关闭时不创建StreamProcessor，SSE流直接透传
-					if waf.HostTarget[host].Host.GUARD_STATUS != 1 {
+					if waf.rt().HostTarget[host].Host.GUARD_STATUS != 1 {
 						weblogfrist.ACTION = "放行"
 						weblogfrist.STATUS = resp.Status
 						weblogfrist.STATUS_CODE = resp.StatusCode
@@ -1237,10 +1237,10 @@ func (waf *WafEngine) modifyResponse() func(*http.Response) error {
 						weblogfrist.BackendCheckCost = time.Now().UnixNano()/1e6 - backendCheckStart
 
 						if global.GWAF_RUNTIME_RECORD_LOG_TYPE == "all" {
-							if waf.HostTarget[host].Host.EXCLUDE_URL_LOG == "" {
+							if waf.rt().HostTarget[host].Host.EXCLUDE_URL_LOG == "" {
 								global.GQEQUE_LOG_DB.Enqueue(weblogfrist)
 							} else {
-								lines := strings.Split(waf.HostTarget[host].Host.EXCLUDE_URL_LOG, "\n")
+								lines := strings.Split(waf.rt().HostTarget[host].Host.EXCLUDE_URL_LOG, "\n")
 								isRecordLog := true
 								for _, line := range lines {
 									if strings.HasPrefix(weblogfrist.URL, line) {
