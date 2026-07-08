@@ -7,6 +7,7 @@ import (
 	"SamWaf/model/common/response"
 	"SamWaf/model/request"
 	"errors"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -30,9 +31,9 @@ func (w *WafAccountApi) AddApi(c *gin.Context) {
 	var req request.WafAccountAddReq
 	err := c.ShouldBindJSON(&req)
 	if err == nil {
-		// 防提权：仅超级管理员可创建超级管理员
-		if req.Role == enums.ROLE_SUPER_ADMIN && currentRole(c) != enums.ROLE_SUPER_ADMIN {
-			response.ForbiddenWithMessage("仅超级管理员可创建超级管理员账号", c)
+		// N7 防提权：账号创建集中到超级管理员，杜绝 systemAdmin 横向新建 security/audit/其它 system 管理员自我提权。
+		if currentRole(c) != enums.ROLE_SUPER_ADMIN {
+			response.ForbiddenWithMessage("仅超级管理员可创建管理账号", c)
 			return
 		}
 		err = wafAccountService.CheckIsExistApi(req)
@@ -88,6 +89,11 @@ func (w *WafAccountApi) DelAccountApi(c *gin.Context) {
 	var req request.WafAccountDelReq
 	err := c.ShouldBind(&req)
 	if err == nil {
+		// N7 防提权：账号删除集中到超级管理员，防止 systemAdmin 删除超管/他域账号（原先无任何角色/目标校验）。
+		if currentRole(c) != enums.ROLE_SUPER_ADMIN {
+			response.ForbiddenWithMessage("仅超级管理员可删除管理账号", c)
+			return
+		}
 		err = wafAccountService.DelApi(req)
 		if err != nil && errors.Is(err, gorm.ErrRecordNotFound) {
 			response.FailWithMessage("请检测参数", c)
@@ -107,12 +113,9 @@ func (w *WafAccountApi) ModifyAccountApi(c *gin.Context) {
 	var req request.WafAccountEditReq
 	err := c.ShouldBindJSON(&req)
 	if err == nil {
-		// 防提权：仅超级管理员可将账号提升为超级管理员
-		if req.Role == enums.ROLE_SUPER_ADMIN && currentRole(c) != enums.ROLE_SUPER_ADMIN {
-			response.ForbiddenWithMessage("仅超级管理员可指派超级管理员角色", c)
-			return
-		}
-		err = wafAccountService.ModifyApi(req)
+		// N7 防提权：角色变更仅超级管理员可为（在 service 内按目标账号"当前角色"精确判定，
+		// 只拦真正的角色变化，不影响非角色字段的正常编辑）。
+		err = wafAccountService.ModifyApi(req, currentRole(c))
 		if err != nil {
 			response.FailWithMessage(err.Error(), c)
 		} else {
@@ -148,7 +151,33 @@ func (w *WafAccountApi) ChangeMyPasswordApi(c *gin.Context) {
 		response.FailWithMessage(err.Error(), c)
 		return
 	}
+	// 改密成功后清除当前令牌缓存里的强制改密标记，使其可正常访问其他接口（无需重新登录）
+	clearTokenNeedChangePassword(c)
 	response.OkWithMessage("修改密码成功", c)
+}
+
+// clearTokenNeedChangePassword 改密成功后，把当前令牌缓存里的强制改密标记清零。
+func clearTokenNeedChangePassword(c *gin.Context) {
+	tokenStr := c.GetHeader("X-Token")
+	if tokenStr == "" && c.GetHeader("X-Login-Type") == "mobile" {
+		tokenStr = c.GetHeader("X-Mobile-Token")
+	}
+	if tokenStr == "" {
+		return
+	}
+	key := enums.CACHE_TOKEN + tokenStr
+	var tokenInfo model.TokenInfo
+	if err := global.GCACHE_WAFCACHE.GetAs(key, &tokenInfo); err != nil {
+		return
+	}
+	tokenInfo.NeedChangePassword = 0
+	if expireTime, err := global.GCACHE_WAFCACHE.GetExpireTime(key); err == nil {
+		if remain := time.Until(expireTime); remain > 0 {
+			global.GCACHE_WAFCACHE.SetWithTTl(key, tokenInfo, remain)
+			return
+		}
+	}
+	global.GCACHE_WAFCACHE.SetWithTTl(key, tokenInfo, time.Duration(global.GCONFIG_RECORD_TOKEN_EXPIRE_MINTUTES)*time.Minute)
 }
 
 func (w *WafAccountApi) ResetAccountPwdApi(c *gin.Context) {
@@ -181,8 +210,10 @@ func (w *WafAccountApi) ResetAccountOTPApi(c *gin.Context) {
 			response.FailWithMessage("token可能已经失效", c)
 			return
 		}
-		if tokenInfo.LoginAccount == "admin" {
-			response.FailWithMessage("仅admin用户可以重置2FA", c)
+		// N4 修复：原判断写反（== "admin"）——把 admin/超管自己挡在门外，却放行其它 systemAdmin 删他人 2FA。
+		// 正确策略：仅超级管理员可重置他人 2FA（角色经 Auth 中间件归一化后写入上下文）。
+		if currentRole(c) != enums.ROLE_SUPER_ADMIN {
+			response.ForbiddenWithMessage("仅超级管理员可以重置双因素认证(2FA)", c)
 			return
 		}
 		if req.LoginAccount == "admin" {

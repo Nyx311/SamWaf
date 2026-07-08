@@ -104,6 +104,7 @@ func (receiver *WafHostService) AddApi(wafHostAddReq request.WafHostAddReq) (str
 		CookieSecurityJSON:        wafHostAddReq.CookieSecurityJSON,
 		CsrfJSON:                  wafHostAddReq.CsrfJSON,
 		TamperJSON:                wafHostAddReq.TamperJSON,
+		UploadSecurityJSON:        wafHostAddReq.UploadSecurityJSON,
 		IPMode:                    wafHostAddReq.IPMode,
 	}
 	global.GWAF_LOCAL_DB.Create(wafHost)
@@ -172,6 +173,7 @@ func (receiver *WafHostService) ModifyApi(wafHostEditReq request.WafHostEditReq)
 		"CookieSecurityJSON":        wafHostEditReq.CookieSecurityJSON,
 		"CsrfJSON":                  wafHostEditReq.CsrfJSON,
 		"TamperJSON":                wafHostEditReq.TamperJSON,
+		"UploadSecurityJSON":        wafHostEditReq.UploadSecurityJSON,
 		"IPMode":                    wafHostEditReq.IPMode,
 	}
 	err := global.GWAF_LOCAL_DB.Debug().Model(model.Hosts{}).Where("CODE=?", wafHostEditReq.CODE).Updates(hostMap).Error
@@ -413,8 +415,12 @@ func (receiver *WafHostService) GetAllSSLHost() ([]model.Hosts, int64, error) {
 	/**排序*/
 	orderInfo := "create_time desc"
 
-	global.GWAF_LOCAL_DB.Model(&model.Hosts{}).Where("ssl =? ", 1).Order(orderInfo).Find(&list)
-	global.GWAF_LOCAL_DB.Model(&model.Hosts{}).Where("ssl =? ", 1).Count(&total)
+	if err := global.GWAF_LOCAL_DB.Model(&model.Hosts{}).Where("`ssl` = ? ", 1).Order(orderInfo).Find(&list).Error; err != nil {
+		return nil, 0, err
+	}
+	if err := global.GWAF_LOCAL_DB.Model(&model.Hosts{}).Where("`ssl` = ? ", 1).Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
 
 	return list, total, nil
 }
@@ -427,8 +433,12 @@ func (receiver *WafHostService) GetAllSSLBindHost() ([]model.Hosts, int64, error
 	/**排序*/
 	orderInfo := "create_time desc"
 
-	global.GWAF_LOCAL_DB.Model(&model.Hosts{}).Where("ssl =? and bind_ssl_id <> ?", 1, "").Order(orderInfo).Find(&list)
-	global.GWAF_LOCAL_DB.Model(&model.Hosts{}).Where("ssl =? and bind_ssl_id <> ?", 1, "").Count(&total)
+	if err := global.GWAF_LOCAL_DB.Model(&model.Hosts{}).Where("`ssl` = ? and bind_ssl_id <> ?", 1, "").Order(orderInfo).Find(&list).Error; err != nil {
+		return nil, 0, err
+	}
+	if err := global.GWAF_LOCAL_DB.Model(&model.Hosts{}).Where("`ssl` = ? and bind_ssl_id <> ?", 1, "").Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
 
 	return list, total, nil
 }

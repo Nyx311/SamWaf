@@ -10,6 +10,7 @@ import (
 	"io/ioutil"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -19,6 +20,95 @@ import (
 
 	"github.com/gin-gonic/gin"
 )
+
+// isPublicIP 判断 IP 是否为可安全对外访问的公网地址（用于防 SSRF）。
+// 拒绝：环回、私网(RFC1918 / RFC4193 fc00::/7)、链路本地(含云元数据 169.254.169.254)、
+// 未指定(0.0.0.0 / ::)、多播、CGNAT(100.64.0.0/10)。
+func isPublicIP(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
+		ip.IsUnspecified() || ip.IsMulticast() {
+		return false
+	}
+	if v4 := ip.To4(); v4 != nil {
+		// 云元数据地址显式兜底（169.254.0.0/16 已被链路本地覆盖，这里再拦一次）
+		if v4[0] == 169 && v4[1] == 254 {
+			return false
+		}
+		// CGNAT 100.64.0.0/10 视为内网
+		if v4[0] == 100 && v4[1] >= 64 && v4[1] <= 127 {
+			return false
+		}
+	}
+	return true
+}
+
+// IsSafeOutboundHost 校验对外访问的主机(域名或IP)是否安全：解析出的所有 IP 必须为公网。
+// 域名经 net.LookupIP 解析后逐个判定，阻断"域名解析到内网/元数据"。返回 (是否安全, 原因)。
+// 注意：这是"解析时"校验，无法完全防御 DNS 重绑定/30x 跳转到内网(需连接期再校验)，属已知残留。
+func IsSafeOutboundHost(host string) (bool, string) {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return false, "目标主机为空"
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if !isPublicIP(ip) {
+			return false, fmt.Sprintf("目标IP %s 属于内网/环回/保留地址，已拒绝", host)
+		}
+		return true, ""
+	}
+	ips, err := net.LookupIP(host)
+	if err != nil {
+		return false, fmt.Sprintf("主机名 %s 解析失败: %v", host, err)
+	}
+	if len(ips) == 0 {
+		return false, fmt.Sprintf("主机名 %s 无解析结果", host)
+	}
+	for _, ip := range ips {
+		if !isPublicIP(ip) {
+			return false, fmt.Sprintf("主机名 %s 解析到内网/保留地址 %s，已拒绝", host, ip.String())
+		}
+	}
+	return true, ""
+}
+
+// IsSafeOutboundURL 校验对外请求 URL 是否安全（防 SSRF）：仅允许 http/https，
+// 且主机(域名解析后的所有IP)必须为公网。用于通知渠道 WebhookURL 等用户可控的对外地址。
+func IsSafeOutboundURL(rawURL string) (bool, string) {
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return false, "URL 解析失败"
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return false, "仅允许 http/https 协议"
+	}
+	host := u.Hostname()
+	if host == "" {
+		return false, "URL 缺少主机"
+	}
+	return IsSafeOutboundHost(host)
+}
+
+// SafeHTTPClient 返回带 SSRF 防护的 http.Client：每次 30x 跳转都重新校验目标主机，
+// 拒绝跳转到内网/环回/链路本地(云元数据)/保留地址，堵住"公网URL跳转到内网"的绕过。
+// 初始 URL 的主机需由调用方先行 IsSafeOutboundURL 校验；本客户端负责后续整条跳转链。
+func SafeHTTPClient() *http.Client {
+	return &http.Client{
+		Timeout: 30 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return errors.New("重定向次数过多")
+			}
+			if ok, reason := IsSafeOutboundHost(req.URL.Hostname()); !ok {
+				return fmt.Errorf("重定向目标不被允许: %s", reason)
+			}
+			return nil
+		},
+	}
+}
 
 func GetExternalIp() string {
 	// 创建带超时的HTTP客户端,避免DNS解析问题
@@ -404,12 +494,19 @@ func IsIP(input string) bool {
 }
 
 // GetManageClientIP 获取管理端客户端真实IP。
-// 若 GCONFIG_MANAGE_PROXY_HEADER 为空（默认），直接返回网络层 IP（c.RemoteIP()），
-// 防止未经信任的 X-Forwarded-For 被接受。
-// 若已配置代理头（逗号分隔，按优先级排列），依次读取首个有效 IP；全部失败则回退到网络层 IP。
+// 安全默认：未配置代理头（GCONFIG_MANAGE_PROXY_HEADER 为空）时直接返回网络层 IP（c.RemoteIP()）。
+// 即便配置了代理头，也仅当“直连对端 c.RemoteIP() 属于可信代理网段 GCONFIG_MANAGE_TRUSTED_PROXIES”
+// 时才采信代理头；否则一律用网络层 IP。防止任意直连客户端伪造 X-Forwarded-For/X-Real-IP 绕过
+// 登录错误锁定 / 管理端 IP 白名单 / 令牌 IP 绑定。
 func GetManageClientIP(c *gin.Context) string {
+	remoteIP := c.RemoteIP()
+	// 未配置代理头 → 直接用网络层 IP
 	if global.GCONFIG_MANAGE_PROXY_HEADER == "" {
-		return c.RemoteIP()
+		return remoteIP
+	}
+	// 配了代理头，但只信任来自“可信代理”的头；否则用网络层 IP
+	if !isTrustedManageProxy(remoteIP) {
+		return remoteIP
 	}
 	for _, header := range strings.Split(global.GCONFIG_MANAGE_PROXY_HEADER, ",") {
 		header = strings.TrimSpace(header)
@@ -420,10 +517,49 @@ func GetManageClientIP(c *gin.Context) string {
 		if val == "" {
 			continue
 		}
-		ip := strings.TrimSpace(strings.SplitN(val, ",", 2)[0])
-		if IsValidIPv4(ip) || IsValidIPv6(ip) {
+		// 从右往左取第一个“非可信代理”的 IP：反向代理按追加语义
+		// (nginx $proxy_add_x_forwarded_for) 把真实客户端 IP 追加在右侧、客户端伪造的值留在左侧，
+		// 故取最右侧的非可信 hop 才是真实客户端；逐个跳过可信代理链。取最左会取到伪造值。
+		parts := strings.Split(val, ",")
+		for i := len(parts) - 1; i >= 0; i-- {
+			ip := strings.TrimSpace(parts[i])
+			if !IsValidIPv4(ip) && !IsValidIPv6(ip) {
+				continue
+			}
+			if isTrustedManageProxy(ip) {
+				continue // 跳过可信代理 hop
+			}
 			return ip
 		}
 	}
-	return c.RemoteIP()
+	return remoteIP
+}
+
+// isTrustedManageProxy 判断直连对端 IP 是否落在管理端可信代理网段
+// GCONFIG_MANAGE_TRUSTED_PROXIES（CIDR 或单 IP，逗号分隔）内。
+// 留空 → 返回 false（不信任任何代理头，安全默认）。
+func isTrustedManageProxy(remoteIP string) bool {
+	if global.GCONFIG_MANAGE_TRUSTED_PROXIES == "" {
+		return false
+	}
+	ip := net.ParseIP(strings.TrimSpace(remoteIP))
+	if ip == nil {
+		return false
+	}
+	for _, entry := range strings.Split(global.GCONFIG_MANAGE_TRUSTED_PROXIES, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		if strings.Contains(entry, "/") {
+			if _, ipnet, err := net.ParseCIDR(entry); err == nil && ipnet.Contains(ip) {
+				return true
+			}
+			continue
+		}
+		if single := net.ParseIP(entry); single != nil && single.Equal(ip) {
+			return true
+		}
+	}
+	return false
 }

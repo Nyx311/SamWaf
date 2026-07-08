@@ -5,6 +5,7 @@ import (
 	"SamWaf/global"
 	"SamWaf/innerbean"
 	"SamWaf/model"
+	"SamWaf/utils"
 	"SamWaf/wafnotify/dingtalk"
 	"SamWaf/wafnotify/email"
 	"SamWaf/wafnotify/feishu"
@@ -62,7 +63,7 @@ func (receiver *WafNotifySenderService) SendNotification(messageType, title, con
 
 // getChannelById 根据ID获取渠道
 func (receiver *WafNotifySenderService) getChannelById(channelId string, channel *model.NotifyChannel) error {
-	return global.GWAF_LOCAL_DB.Where("id = ? and status = ?", channelId, 1).First(channel).Error
+	return global.GWAF_LOCAL_DB.Where("id = ? and `status` = ?", channelId, 1).First(channel).Error
 }
 
 // sendToChannel 发送到具体渠道
@@ -74,14 +75,26 @@ func (receiver *WafNotifySenderService) sendToChannel(channel model.NotifyChanne
 
 	switch channel.Type {
 	case "dingtalk":
-		notifier := dingtalk.NewDingTalkNotifier(channel.WebhookURL, channel.Secret)
-		err = notifier.SendMarkdown(title, content)
+		if ok, reason := utils.IsSafeOutboundURL(channel.WebhookURL); !ok {
+			err = fmt.Errorf("WebhookURL 目标不被允许: %s", reason)
+		} else {
+			notifier := dingtalk.NewDingTalkNotifier(channel.WebhookURL, channel.Secret)
+			err = notifier.SendMarkdown(title, content)
+		}
 	case "feishu":
-		notifier := feishu.NewFeishuNotifier(channel.WebhookURL, channel.Secret)
-		err = notifier.SendMarkdown(title, content)
+		if ok, reason := utils.IsSafeOutboundURL(channel.WebhookURL); !ok {
+			err = fmt.Errorf("WebhookURL 目标不被允许: %s", reason)
+		} else {
+			notifier := feishu.NewFeishuNotifier(channel.WebhookURL, channel.Secret)
+			err = notifier.SendMarkdown(title, content)
+		}
 	case "wechatwork":
-		notifier := wechatwork.NewWechatWorkNotifier(channel.WebhookURL)
-		err = notifier.SendMarkdown(title, content)
+		if ok, reason := utils.IsSafeOutboundURL(channel.WebhookURL); !ok {
+			err = fmt.Errorf("WebhookURL 目标不被允许: %s", reason)
+		} else {
+			notifier := wechatwork.NewWechatWorkNotifier(channel.WebhookURL)
+			err = notifier.SendMarkdown(title, content)
+		}
 	case "email":
 		notifier, notifierErr := email.NewEmailNotifier(channel.ConfigJSON)
 		if notifierErr != nil {

@@ -9,9 +9,10 @@ import (
 	"SamWaf/service/waf_service"
 	"SamWaf/utils"
 	"fmt"
-	"github.com/gin-gonic/gin"
 	"strings"
 	"time"
+
+	"github.com/gin-gonic/gin"
 )
 
 var (
@@ -123,10 +124,15 @@ func Auth() gin.HandlerFunc {
 					return
 				}
 
-				// 如果只是IP不匹配但指纹匹配，记录警告日志但允许通过
-				if !ipMatched && fingerprintMatched {
-					zlog.Warn(fmt.Sprintf("IP不匹配但设备指纹匹配，允许通过。原IP:%v 当前IP:%v 指纹:%v",
-						tokenInfo.LoginIp, currentIP, tokenInfo.DeviceFingerprint))
+				// N11 修复
+				// 开启严格IP绑定即要求令牌与登录时的真实 IP 一致，IP 变化需重新登录。
+				if !ipMatched {
+					zlog.Warn(fmt.Sprintf("严格IP绑定不匹配，请求拒绝。原IP:%v 当前IP:%v", tokenInfo.LoginIp, currentIP))
+					//令牌有效但绑定IP不匹配，删除缓存，强制重新登录
+					global.GCACHE_WAFCACHE.Remove(enums.CACHE_TOKEN + tokenStr)
+					response.AuthFailWithMessage("登录环境已变化(IP)，需要重新登录", c)
+					c.Abort()
+					return
 				}
 
 				//刷新token时间
@@ -144,6 +150,16 @@ func Auth() gin.HandlerFunc {
 					if remainingTime > 0 && remainingTime < 2*time.Minute {
 						zlog.Debug(fmt.Sprintf("%v 当前token有效缓存剩余时间 %v  小于2分钟进行缓存可用时间延期处理", innerName, expireTime))
 						global.GCACHE_WAFCACHE.SetWithTTlRenewTime(enums.CACHE_TOKEN+tokenStr, tokenInfo, time.Duration(global.GCONFIG_RECORD_TOKEN_EXPIRE_MINTUTES)*time.Minute)
+					}
+				}
+
+				//强制改密门：需改密的令牌只放行改密/注销/ws，其余一律拦截（默认口令/被重置账号在改密前拿不到其他权限）
+				if tokenInfo.NeedChangePassword == 1 {
+					p := c.Request.URL.Path
+					if p != "/api/v1/account/changemypwd" && p != "/api/v1/logout" && p != "/api/v1/ws" {
+						response.NeedChangePwdWithMessage("请先修改初始/重置密码后再进行其他操作", c)
+						c.Abort()
+						return
 					}
 				}
 

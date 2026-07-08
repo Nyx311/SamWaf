@@ -5,6 +5,16 @@ type WafVpConfigIpWhitelistGetResp struct {
 	IpWhitelist string `json:"ip_whitelist"` // IP白名单，多个IP用逗号分隔
 }
 
+// WafVpConfigManageTrustedProxiesGetResp 管理端可信代理网段获取响应
+type WafVpConfigManageTrustedProxiesGetResp struct {
+	TrustedProxies string `json:"trusted_proxies"` // 可信代理网段（CIDR/IP，逗号分隔）
+}
+
+// WafVpConfigCorsAllowOriginsGetResp CORS 跨域来源白名单获取响应
+type WafVpConfigCorsAllowOriginsGetResp struct {
+	CorsAllowOrigins string `json:"cors_allow_origins"` // CORS 跨域来源白名单（逗号分隔）
+}
+
 // WafVpConfigSslStatusGetResp SSL状态获取响应
 type WafVpConfigSslStatusGetResp struct {
 	SslEnable    bool   `json:"ssl_enable"`     // 是否启用SSL
