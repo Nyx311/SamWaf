@@ -4,8 +4,11 @@ services:
   samwaf-instance:
     image: samwaf:cus-1.4-beta2
     container_name: samwaf
+    user: "0:0"
+    privileged: true
     cap_add:
       - NET_ADMIN
+      - NET_RAW
     ports:
       - "26666:26666"
       - "80:80"
