@@ -357,9 +357,23 @@ func (waf *WafEngine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 						hostStr = "http://" + hostStr
 					}
 					currentDay, _ := strconv.Atoi(datetimeNow.Format("20060102"))
+					region := utils.GetCountry(clientIP)
+					country, province, city := "未知", "", ""
+					if len(region) > 0 && region[0] != "" {
+						country = region[0]
+					}
+					if len(region) > 2 {
+						province = region[2]
+					}
+					if len(region) > 3 {
+						city = region[3]
+					}
 					weblogbean := innerbean.WebLog{
 						HOST:          hostStr,
 						URL:           r.RequestURI,
+						COUNTRY:       country,
+						PROVINCE:      province,
+						CITY:          city,
 						SRC_IP:        clientIP,
 						SRC_PORT:      clientPort,
 						CREATE_TIME:   datetimeNow.Format("2006-01-02 15:04:05"),
@@ -1331,13 +1345,13 @@ func (waf *WafEngine) modifyResponse() func(*http.Response) error {
 				//隐私保护（全局）
 				if waf.rt().HostTarget[global.GWAF_GLOBAL_HOST_NAME] != nil {
 					for i := 0; i < len(waf.rt().HostTarget[global.GWAF_GLOBAL_HOST_NAME].LdpUrlLists); i++ {
-					// 将全局规则URL也转为小写
-					lowerGlobalRuleURL := strings.ToLower(waf.rt().HostTarget[global.GWAF_GLOBAL_HOST_NAME].LdpUrlLists[i].Url)
+						// 将全局规则URL也转为小写
+						lowerGlobalRuleURL := strings.ToLower(waf.rt().HostTarget[global.GWAF_GLOBAL_HOST_NAME].LdpUrlLists[i].Url)
 
-					if (waf.rt().HostTarget[global.GWAF_GLOBAL_HOST_NAME].LdpUrlLists[i].CompareType == "等于" && lowerGlobalRuleURL == lowerRequestURI) ||
-						(waf.rt().HostTarget[global.GWAF_GLOBAL_HOST_NAME].LdpUrlLists[i].CompareType == "前缀匹配" && strings.HasPrefix(lowerRequestURI, lowerGlobalRuleURL)) ||
-						(waf.rt().HostTarget[global.GWAF_GLOBAL_HOST_NAME].LdpUrlLists[i].CompareType == "后缀匹配" && strings.HasSuffix(lowerRequestURI, lowerGlobalRuleURL)) ||
-						(waf.rt().HostTarget[global.GWAF_GLOBAL_HOST_NAME].LdpUrlLists[i].CompareType == "包含匹配" && strings.Contains(lowerRequestURI, lowerGlobalRuleURL)) {
+						if (waf.rt().HostTarget[global.GWAF_GLOBAL_HOST_NAME].LdpUrlLists[i].CompareType == "等于" && lowerGlobalRuleURL == lowerRequestURI) ||
+							(waf.rt().HostTarget[global.GWAF_GLOBAL_HOST_NAME].LdpUrlLists[i].CompareType == "前缀匹配" && strings.HasPrefix(lowerRequestURI, lowerGlobalRuleURL)) ||
+							(waf.rt().HostTarget[global.GWAF_GLOBAL_HOST_NAME].LdpUrlLists[i].CompareType == "后缀匹配" && strings.HasSuffix(lowerRequestURI, lowerGlobalRuleURL)) ||
+							(waf.rt().HostTarget[global.GWAF_GLOBAL_HOST_NAME].LdpUrlLists[i].CompareType == "包含匹配" && strings.Contains(lowerRequestURI, lowerGlobalRuleURL)) {
 
 							ldpFlag = true
 							break
