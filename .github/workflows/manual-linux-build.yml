@@ -2,6 +2,15 @@ name: Manual Linux Build
 
 on:
   workflow_dispatch:
+    inputs:
+      release_version:
+        description: 'Version to embed, or latest to use upstream latest release'
+        required: false
+        default: latest
+      upstream_repository:
+        description: 'Repository used when release_version is latest'
+        required: false
+        default: samwafgo/SamWaf
 
 permissions:
   contents: read
@@ -20,6 +29,38 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Resolve SamWaf release version
+        env:
+          REQUESTED_VERSION: ${{ inputs.release_version }}
+          UPSTREAM_REPOSITORY: ${{ inputs.upstream_repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          if ! echo "${UPSTREAM_REPOSITORY}" | grep -Eq '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'; then
+            echo "::error::Invalid upstream repository: ${UPSTREAM_REPOSITORY}"
+            exit 1
+          fi
+
+          if [ -z "${REQUESTED_VERSION}" ] || [ "${REQUESTED_VERSION}" = "latest" ]; then
+            RELEASE_VERSION="$(curl -fsSL \
+              -H 'Accept: application/vnd.github+json' \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              "https://api.github.com/repos/${UPSTREAM_REPOSITORY}/releases/latest" \
+              | python3 -c 'import json, sys; print(json.load(sys.stdin)["tag_name"])')"
+          else
+            RELEASE_VERSION="${REQUESTED_VERSION}"
+          fi
+
+          if ! echo "${RELEASE_VERSION}" | grep -Eq '^v[0-9][0-9A-Za-z._+-]*$'; then
+            echo "::error::Invalid release version: ${RELEASE_VERSION}"
+            exit 1
+          fi
+
+          echo "GWAF_RELEASE_VERSION=${RELEASE_VERSION}" >> "$GITHUB_ENV"
+          echo "GWAF_RELEASE_VERSION=${RELEASE_VERSION}"
+
       - name: Download SamWafWeb
         run: |
           curl -L https://github.com/Nyx311/SamWafWeb/releases/latest/download/dist.zip -o dist.zip
@@ -34,6 +75,8 @@ jobs:
 
       - name: Build Linux binary (${{ matrix.arch }})
         run: |
+          set -euo pipefail
+
           BUILDTIME=$(date +'%Y%m%d')
           if [ "${{ matrix.arch }}" = "amd64" ]; then
             OUT_NAME="SamWafLinuxAmd64"
@@ -47,7 +90,7 @@ jobs:
             -v "$PWD":/src -w /src \
             -e CGO_ENABLED=1 -e GOOS=linux -e GOARCH=${{ matrix.arch }} \
             -e GOPROXY=https://goproxy.cn,direct \
-            golang:1.25 sh -c "go build -ldflags='-X SamWaf/global.GWAF_RELEASE=true -X SamWaf/global.GWAF_RUNTIME_WIN7_VERSION=false -X SamWaf/global.GWAF_RELEASE_VERSION_NAME=${BUILDTIME} -X SamWaf/global.GWAF_RELEASE_VERSION=v1.3.20 -s -w -extldflags \"-static\"' -o /src/release/${OUT_NAME} ./cmd/samwaf/main.go"
+            golang:1.25 sh -c "go build -ldflags='-X SamWaf/global.GWAF_RELEASE=true -X SamWaf/global.GWAF_RUNTIME_WIN7_VERSION=false -X SamWaf/global.GWAF_RELEASE_VERSION_NAME=${BUILDTIME} -X SamWaf/global.GWAF_RELEASE_VERSION=${GWAF_RELEASE_VERSION} -s -w -extldflags \"-static\"' -o /src/release/${OUT_NAME} ./cmd/samwaf/main.go"
 
       - name: Upload Linux binary (${{ matrix.arch }})
         uses: actions/upload-artifact@v4
