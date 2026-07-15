@@ -7,6 +7,9 @@ WORKDIR /app
 ENV TZ=Asia/Shanghai
 
 # 更新并安装时区数据
+# iptables 供”防火墙IP封禁”功能使用（提供 iptables / iptables-save）
+# 注意：容器还需以 --cap-add=NET_ADMIN --network host 启动，规则才能对宿主机流量生效
+# 使用阿里云镜像源加速国内构建，并额外安装 ip6tables 以支持 IPv6 封禁
 RUN cat /etc/apk/repositories | sed 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' > /etc/apk/repositories.tmp && \
     mv /etc/apk/repositories.tmp /etc/apk/repositories && \
     apk update && \

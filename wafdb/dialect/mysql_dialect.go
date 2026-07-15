@@ -20,17 +20,29 @@ func (d *MySQLDialect) ForceIndexClause(table, idx string) string {
 	return fmt.Sprintf("%s FORCE INDEX (%s)", table, idx)
 }
 
-func (d *MySQLDialect) FormatTimeWithOffset(colExpr string, offsetMin int) string {
-	sign := "+"
-	h := offsetMin / 60
-	m := offsetMin % 60
-	if offsetMin < 0 {
-		sign = "-"
-		h = -h
-		m = -m
-	}
-	tz := fmt.Sprintf("%s%02d:%02d", sign, h, m)
-	return fmt.Sprintf("DATE_FORMAT(CONVERT_TZ(%s,'+00:00','%s'),'%%Y-%%m-%%d %%H:%%i:%%s')", colExpr, tz)
+func (d *MySQLDialect) Quote(ident string) string { return mysqlQuote(ident) }
+
+// BatchDeleteSQL uses a flat DELETE ... LIMIT. MySQL has no rowid/ctid pseudo-column,
+// and rejects a LIMIT-bearing subquery on the table being deleted from (error 1093),
+// so the rowid form used by SQLite/PostgreSQL is not available here.
+func (d *MySQLDialect) BatchDeleteSQL(table, where string, limit int) string {
+	return fmt.Sprintf("DELETE FROM %s WHERE %s LIMIT %d", mysqlQuote(table), where, limit)
+}
+
+func (d *MySQLDialect) GroupConcatDistinct(expr string) string {
+	return fmt.Sprintf("GROUP_CONCAT(DISTINCT %s)", expr)
+}
+
+func (d *MySQLDialect) InsertIgnoreSQL(table, quotedCols, rowPlaceholders string) string {
+	return fmt.Sprintf("INSERT IGNORE INTO %s (%s) VALUES %s",
+		mysqlQuote(table), quotedCols, rowPlaceholders)
+}
+
+// FormatLocalTime formats the column as-is: with loc=Local in the DSN the
+// DATETIME column already holds the local wall clock, so any timezone
+// conversion here would shift the value a second time.
+func (d *MySQLDialect) FormatLocalTime(colExpr string) string {
+	return fmt.Sprintf("DATE_FORMAT(%s,'%%Y-%%m-%%d %%H:%%i:%%s')", colExpr)
 }
 
 func (d *MySQLDialect) RenameTable(db *gorm.DB, src, dst string) error {
