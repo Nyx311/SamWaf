@@ -65,6 +65,7 @@ func RunCoreDBMigrations(db *gorm.DB) error {
 						&model.CacheRule{},
 						&model.Tunnel{},
 						&model.CaServerInfo{},
+						&model.UIPreference{},
 					); err != nil {
 						return fmt.Errorf("同步表结构失败: %w", err)
 					}
@@ -103,6 +104,7 @@ func RunCoreDBMigrations(db *gorm.DB) error {
 						&model.CacheRule{},
 						&model.Tunnel{},
 						&model.CaServerInfo{},
+						&model.UIPreference{},
 					); err != nil {
 						return fmt.Errorf("创建core表失败: %w", err)
 					}
@@ -896,7 +898,9 @@ func RunCoreDBMigrations(db *gorm.DB) error {
 				}
 
 				// 历史数据默认值为 false（保持原有行为：继续检测全局CC）
-				if err := tx.Exec("UPDATE anti_ccs SET skip_global_cc = 0 WHERE skip_global_cc IS NULL").Error; err != nil {
+				// 用 false 而非 0：skip_global_cc 是 boolean 列，PostgreSQL 不接受整数字面量
+				// （42804: type boolean but expression is of type integer）；false 三种引擎通用。
+				if err := tx.Exec("UPDATE anti_ccs SET skip_global_cc = false WHERE skip_global_cc IS NULL").Error; err != nil {
 					zlog.Warn("设置 skip_global_cc 默认值失败", "error", err.Error())
 				}
 
@@ -1255,6 +1259,57 @@ func RunCoreDBMigrations(db *gorm.DB) error {
 				}
 				if tx.Migrator().HasColumn(&model.HostPathRule{}, "response_time_out") {
 					_ = tx.Migrator().DropColumn(&model.HostPathRule{}, "response_time_out")
+				}
+				return nil
+			},
+		},
+		// 迁移: 为 hosts 表添加 disable_http2 字段（per-host 对外 HTTP/2 开关，0启用/1关闭）
+		{
+			ID: "202607220001_add_hosts_disable_http2",
+			Migrate: func(tx *gorm.DB) error {
+				zlog.Info("迁移 202607220001: 为 hosts 表添加 disable_http2 字段")
+				if tx.Migrator().HasColumn(&model.Hosts{}, "disable_http2") {
+					zlog.Info("disable_http2 字段已存在，跳过添加")
+					return nil
+				}
+				if err := tx.Migrator().AddColumn(&model.Hosts{}, "DisableHTTP2"); err != nil {
+					return fmt.Errorf("添加 disable_http2 字段失败: %w", err)
+				}
+				// 存量站点回填 0（=保持现状：对外启用 HTTP/2）
+				if err := tx.Exec("UPDATE hosts SET disable_http2 = 0 WHERE disable_http2 IS NULL").Error; err != nil {
+					zlog.Warn("回填 disable_http2 默认值失败", "error", err.Error())
+				}
+				zlog.Info("disable_http2 字段添加成功")
+				return nil
+			},
+			Rollback: func(tx *gorm.DB) error {
+				zlog.Info("回滚 202607220001: 删除 hosts 表的 disable_http2 字段")
+				if tx.Migrator().HasColumn(&model.Hosts{}, "disable_http2") {
+					return tx.Migrator().DropColumn(&model.Hosts{}, "disable_http2")
+				}
+				return nil
+			},
+		},
+		// 迁移: 创建界面偏好表（按登录账号保存管理端界面偏好，如访问日志列配置）
+		{
+			ID: "202607280001_add_ui_preferences_table",
+			Migrate: func(tx *gorm.DB) error {
+				zlog.Info("迁移 202607280001: 创建界面偏好表")
+				if err := tx.AutoMigrate(&model.UIPreference{}); err != nil {
+					return fmt.Errorf("创建界面偏好表失败: %w", err)
+				}
+				// 同一账号同一偏好名只允许一行
+				if err := safeCreateIndex(tx, "ui_preferences", "uni_ui_pref",
+					"CREATE UNIQUE INDEX IF NOT EXISTS uni_ui_pref ON ui_preferences (user_code, tenant_id, login_account, pref_name)"); err != nil {
+					zlog.Warn("创建索引 uni_ui_pref 失败", "error", err.Error())
+				}
+				zlog.Info("界面偏好表创建成功")
+				return nil
+			},
+			Rollback: func(tx *gorm.DB) error {
+				zlog.Info("回滚 202607280001: 删除界面偏好表")
+				if tx.Migrator().HasTable(&model.UIPreference{}) {
+					return tx.Migrator().DropTable(&model.UIPreference{})
 				}
 				return nil
 			},

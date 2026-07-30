@@ -564,7 +564,52 @@ func (waf *WafEngine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		r.Header.Add("waf_req_uuid", weblogbean.REQ_UUID)
+		// 反向代理环路检测：SamWaf 每转发一跳就把 waf_req_hop 递增并带给后端；
+		maxHop := int(global.GCONFIG_RECORD_PROXY_LOOP_MAX_HOP)
+		if maxHop > 0 {
+			hop := 0
+			if v := r.Header.Get("waf_req_hop"); v != "" {
+				hop, _ = strconv.Atoi(v)
+			}
+			if hop >= maxHop {
+				// 告警节流：同一 host 5 分钟内只发一次，避免环路把告警刷爆
+				loopAlertKey := "proxy_loop_alert_" + hostCode
+				if !global.GCACHE_WAFCACHE.IsKeyExist(loopAlertKey) {
+					global.GCACHE_WAFCACHE.SetWithTTl(loopAlertKey, "1", 5*time.Minute)
+					serverName := global.GWAF_CUSTOM_SERVER_NAME
+					if serverName == "" {
+						serverName = "未命名服务器"
+					}
+					global.GQEQUE_MESSAGE_DB.Enqueue(innerbean.SystemErrorMessageInfo{
+						BaseMessageInfo: innerbean.BaseMessageInfo{
+							OperaType: "反向代理环路拦截",
+							Server:    serverName,
+						},
+						ErrorType: "反向代理环路",
+						ErrorMsg:  fmt.Sprintf("检测到反向代理环路，已拦截。Host:%s 访客IP:%s 跳数:%d(阈值:%d)，请检查该站点后端是否回指SamWaf自身", weblogbean.HOST, weblogbean.SRC_IP, hop, maxHop),
+						Time:      time.Now().Format("2006-01-02 15:04:05"),
+					})
+				}
+				zlog.Warn("反向代理环路拦截", weblogbean.HOST, weblogbean.SRC_IP, hop)
+				// isLog=false：不走 EchoErrorInfo 内置的"命中保护规则"推送（那条不节流、且把运维故障误标成攻击）；
+				// 通知只保留上面那条节流且语义准确的系统告警。响应仍支持按 proxy_loop 拦截页配置返回自定义码（含508）
+				// proxy_loop 默认下发 508 Loop Detected（EchoErrorInfo 内置按类型特判）；用户配了 proxy_loop 拦截页则以其为准
+				loopRespCode := EchoErrorInfo(w, r, &weblogbean, "反向代理环路", "检测到反向代理环路，请求已被终止", hostTarget, waf.rt().HostTarget[waf.rt().HostCode[global.GWAF_GLOBAL_HOST_CODE]], false, "proxy_loop")
+				// 手动补一条拦截 weblog，保证攻击日志/仪表盘有记录（等价于 EchoErrorInfo 的 isLog 分支，但不发重复推送）
+				weblogbean.TimeSpent = time.Now().UnixNano()/1e6 - weblogbean.UNIX_ADD_TIME
+				weblogbean.RULE = "反向代理环路"
+				weblogbean.ACTION = "阻止"
+				weblogbean.STATUS = "阻止访问"
+				weblogbean.STATUS_CODE = loopRespCode // 与实际下发码一致（默认508，或用户自定义拦截页配置的码）
+				weblogbean.TASK_FLAG = 1
+				weblogbean.GUEST_IDENTIFICATION = "可疑用户"
+				global.GQEQUE_LOG_DB.Enqueue(&weblogbean)
+				return
+			}
+			r.Header.Set("waf_req_hop", strconv.Itoa(hop+1))
+		}
+
+		r.Header.Set("waf_req_uuid", weblogbean.REQ_UUID) // Set 替换，保证每请求恒为单值，避免入站累积
 
 		if hostTarget.Host.GUARD_STATUS == 1 {
 			//自定义规则放行动作的结果：ruleSkipAll 跳过后续所有检测，ruleSkipModules 跳过指定检测
@@ -1974,8 +2019,11 @@ func (waf *WafEngine) StartProxyServer(innruntime innerbean.ServerRunTime) {
 					Handler: waf,
 					TLSConfig: &tls.Config{
 						GetCertificate: waf.GetCertificateFunc,
-						MinVersion:     utils.ParseTLSVersion(global.GCONFIG_RECORD_SSLMinVerson),
-						MaxVersion:     utils.ParseTLSVersion(global.GCONFIG_RECORD_SSLMaxVerson),
+						// 按 SNI 逐连接定制 ALPN，实现 per-host 的对外 HTTP/2 开关：
+						// 命中 DisableHTTP2==1 的站点只广告 http/1.1，兼容原生 WebSocket 客户端。
+						GetConfigForClient: waf.GetTLSConfigForClient,
+						MinVersion:         utils.ParseTLSVersion(global.GCONFIG_RECORD_SSLMinVerson),
+						MaxVersion:         utils.ParseTLSVersion(global.GCONFIG_RECORD_SSLMaxVerson),
 					},
 				}
 				serclone, _ := waf.ServerOnline.Get(innruntime.Port)
@@ -1986,16 +2034,32 @@ func (waf *WafEngine) StartProxyServer(innruntime innerbean.ServerRunTime) {
 				zlog.Info("启动HTTPS 服务器" + strconv.Itoa(innruntime.Port))
 
 				if global.GCONFIG_ENABLE_HTTP3 == 1 {
+					// h3 用独立 TLSConfig：不挂 h2 的 GetConfigForClient，否则会把 "h3" 从
+					// NextProtos 里剔掉、打断整个 HTTP/3（h3 与 h2 是独立 ALPN，互不影响）。
+					h3TLS := &tls.Config{
+						GetCertificate: waf.GetCertificateFunc,
+						MinVersion:     utils.ParseTLSVersion(global.GCONFIG_RECORD_SSLMinVerson),
+						MaxVersion:     utils.ParseTLSVersion(global.GCONFIG_RECORD_SSLMaxVerson),
+					}
 					h3 := &http3.Server{
 						Addr:      ":" + strconv.Itoa(innruntime.Port),
 						Handler:   waf,
-						TLSConfig: svr.TLSConfig,
+						TLSConfig: h3TLS,
 					}
 					if global.GCONFIG_ENABLE_HTTP3_BBR == 1 {
 						h3.QUICConfig.Congestion = func() quic.SendAlgorithmWithDebugInfos { return quic.NewBBRv1(nil) }
 					}
+					h3Port := strconv.Itoa(innruntime.Port)
 					svr.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-						h3.SetQUICHeaders(w.Header())
+						// 关了 h2 的站点不广告 h3(Alt-Svc)：原生 WebSocket 客户端同样不能走 h3，
+						// 避免其被诱导升级到 h3 后再次握手失败，让该站点彻底只走 http/1.1。
+						reqDomain := r.Host
+						if idx := strings.IndexByte(reqDomain, ':'); idx >= 0 {
+							reqDomain = reqDomain[:idx]
+						}
+						if !waf.isHTTP2DisabledForServerName(reqDomain, h3Port) {
+							h3.SetQUICHeaders(w.Header())
+						}
 						waf.ServeHTTP(w, r)
 					})
 					go func() {

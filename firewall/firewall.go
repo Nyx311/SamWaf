@@ -3,6 +3,7 @@
 package firewall
 
 import (
+	"SamWaf/common/wafexec"
 	"bufio"
 	"fmt"
 	"os"
@@ -107,7 +108,7 @@ func (fw *FireWallEngine) IsFirewallEnabled() bool {
 	if err != nil {
 		return false
 	}
-	out, err := exec.Command(path, "-L").CombinedOutput()
+	out, err := wafexec.FixStdin(exec.Command(path, "-L")).CombinedOutput()
 	if err != nil {
 		return false
 	}
@@ -145,7 +146,7 @@ func (fw *FireWallEngine) checkAvailable() error {
 		}
 	}
 
-	out, err := exec.Command("iptables", "-S", "INPUT").CombinedOutput()
+	out, err := wafexec.FixStdin(exec.Command("iptables", "-S", "INPUT")).CombinedOutput()
 	if err != nil {
 		output := strings.TrimSpace(string(out))
 		if strings.Contains(output, "Permission denied") ||
@@ -164,6 +165,8 @@ func (fw *FireWallEngine) checkAvailable() error {
 }
 
 func (fw *FireWallEngine) executeCommand(cmd *exec.Cmd) (error, string) {
+	// 只补 Stdin：下面要取 StdoutPipe/StderrPipe，Stdout/Stderr 必须留给 os/exec 自己接管
+	wafexec.FixStdin(cmd)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		fmt.Println(err)
@@ -227,7 +230,7 @@ func (fw *FireWallEngine) isIPInRulesIptables(ip string) (bool, error) {
 		fmt.Printf("[ERROR] 获取iptables规则失败: %v\n", err)
 		return false, fmt.Errorf("failed to find iptables-save: %v", err)
 	}
-	cmd := exec.Command(path)
+	cmd := wafexec.FixStdin(exec.Command(path))
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		fmt.Printf("[ERROR] 获取iptables规则失败: %v\n", err)
@@ -526,7 +529,7 @@ func (fw *FireWallEngine) GetBlockedIPListIptables() ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to find iptables-save: %v", err)
 	}
-	cmd := exec.Command(path)
+	cmd := wafexec.FixStdin(exec.Command(path))
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get blocked IP list: %v", err)
