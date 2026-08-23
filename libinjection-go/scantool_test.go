@@ -7,6 +7,38 @@ import (
 
 func mkUA(s string) *innerbean.WebLog  { return &innerbean.WebLog{USER_AGENT: s} }
 func mkURL(s string) *innerbean.WebLog { return &innerbean.WebLog{URL: s} }
+func mkHdr(s string) *innerbean.WebLog { return &innerbean.WebLog{HEADER: s} }
+
+// D2-6/7：工具名塞头里、扫描器头名标记、探测路径指纹
+func TestIsScan_HeaderAndProbes(t *testing.T) {
+	cases := []*innerbean.WebLog{
+		mkHdr("X-SamWafPoc-Test: sqlmap/1.8.3#stable\r\n"),              // D2-6 工具名在自定义头
+		mkHdr("Accept: */*\r\nX-Probe: Mozilla/5.00 (Nikto/2.5.0)\r\n"), // 工具名在任意头
+		mkHdr("X-Scan-Memo: 12345\r\n"),                                 // D2-6 头名标记
+		mkHdr("X-Scanner: probe\r\n"),                                   // D2-6 头名标记
+		mkURL("/w00tw00t.at.blackhats.romanian.anti-sec"),               // D2-7 探测路径
+		mkURL("/muieblackcat"),                                          // D2-7 探测路径
+		mkURL("/thereisnowaythat-you-canbe-a-search-engine-really"),     // D2-7
+	}
+	for _, c := range cases {
+		if !IsScan(c) {
+			t.Errorf("应判定为扫描器但漏过: URL=%q HEADER=%q", c.URL, c.HEADER)
+		}
+	}
+}
+
+func TestIsScan_HeaderNoFP(t *testing.T) {
+	cases := []*innerbean.WebLog{
+		mkHdr("Referer: https://site.com/s?q=hello\r\nAccept-Language: zh-CN\r\n"),
+		mkHdr("X-Requested-With: XMLHttpRequest\r\nX-Custom-Id: user-123\r\n"),
+		mkURL("/products/w00t-brand-shoes"), // w00t 不是 w00tw00t，不误判
+	}
+	for _, c := range cases {
+		if IsScan(c) {
+			t.Errorf("正常请求被误判为扫描器: URL=%q HEADER=%q", c.URL, c.HEADER)
+		}
+	}
+}
 
 func TestIsScan_Detects(t *testing.T) {
 	cases := []*innerbean.WebLog{

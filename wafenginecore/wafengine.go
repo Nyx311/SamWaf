@@ -439,6 +439,19 @@ func (waf *WafEngine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		// S1 归一化：为检测生成解码副本（原文保留用于落库/展示），覆盖 body、cookie
+		// 及多层编码的表单值绕过面；各 check 改吃这些解码副本。
+		weblogbean.BodyDecoded = wafhttpcore.NormalizeForDetection(weblogbean.BODY)
+		weblogbean.CookiesDecoded = wafhttpcore.NormalizeForDetection(weblogbean.COOKIES)
+		// JSON 体逐值提取（json 解析天然解 \uXXXX）+ 直接父键名，供 XSS/SQLi 逐值检测(避免整块喂
+		// libinjection 造成误报)与“按字段排除”(E)
+		weblogbean.BodyFields, weblogbean.BodyValues = wafhttpcore.ExtractJSONFieldValues(weblogbean.BODY)
+		for k, vals := range formValues {
+			for i, v := range vals {
+				formValues[k][i] = wafhttpcore.NormalizeForDetection(v)
+			}
+		}
+
 		// 检测是否已经被CC封禁（使用与CC检测相同的IP模式）
 		ccCheckIP := model.GetClientIPByMode(hostTarget.Host.IPMode, weblogbean.NetSrcIp, weblogbean.SRC_IP)
 		ccCacheKey := enums.CACHE_CCVISITBAN_PRE + ccCheckIP

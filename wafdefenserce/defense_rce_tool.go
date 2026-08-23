@@ -23,6 +23,12 @@ var (
 	reWinSub         = regexp.MustCompile(`(?i)(?:\bnet\s+(?:user|localgroup|group|share|use|accounts|view|stop|start|pause|continue)\b|\breg\s+(?:add|query|delete|export|import|save)\b|\bsc\s+(?:create|config|query|start|stop|delete)\b|\bcmd(?:\.exe)?\s*/[ckq]|\bshutdown\s+[/-][a-z])`) // Win 常见词+子命令
 	reWinDestructive = regexp.MustCompile(`(?i)(?:\b(?:del|erase|rd|rmdir|ren|rename|move|copy|attrib|cipher)\b\s+(?:/[a-z]|[a-z]:\\|\*|[+-][a-z])|\bformat\s+[a-z]:)`)                                                                                                                         // Win 破坏性命令+参数上下文
 	rePwsh           = regexp.MustCompile(`(?i)(?:powershell(?:\.exe)?\s+-e(?:nc|ncodedcommand)?\b|\binvoke-expression\b|\biex\b\s*\(|\bdownloadstring\b|\bnet\.webclient\b|\binvoke-webrequest\b|\biwr\b\s+https?|\bremove-item\b|\bclear-content\b)`)                                         // PowerShell 执行/下载/删除
+
+	// D1-6 反混淆(对标 OWASP CRS t:cmdLine)：$IFS 空格绕过 + 删 \ " ' ^ 后再判，打掉 who^ami / c'a't / ca\t / cat$IFS/etc 变体
+	reIFS             = regexp.MustCompile(`(?i)\$\{?ifs\}?(?:\$\d+)?`)                                                                                                                                                      // $IFS / ${IFS} / $IFS$9
+	cmdObfCharsDelete = strings.NewReplacer("\\", "", "\"", "", "'", "", "^", "")                                                                                                                                            // 删混淆插入字符
+	reMultiSpace      = regexp.MustCompile(`\s+`)                                                                                                                                                                            // 压缩空白
+	reDistinctCmdWord = regexp.MustCompile(`(?i)\b(?:whoami|uname|hostname|ifconfig|ipconfig|systeminfo|netstat|tasklist|taskkill|powershell|netcat|nslookup|certutil|bitsadmin|wmic|schtasks|vssadmin|bcdedit|diskpart)\b`) // 去混淆后现形的独特命令(非日常英文，误报低)
 )
 
 func DetermineRCE(args ...string) (bool, string) {
@@ -40,13 +46,41 @@ func osCmdInjection(args ...string) (bool, string) {
 		if strings.TrimSpace(arg) == "" {
 			continue
 		}
-		if reSubstDollar.MatchString(arg) || reSubstBacktick.MatchString(arg) ||
-			reMetaCmd.MatchString(arg) || reArgCmd.MatchString(arg) || reBareId.MatchString(arg) ||
-			reWinSub.MatchString(arg) || reWinDestructive.MatchString(arg) || rePwsh.MatchString(arg) {
+		if matchRceRegexes(arg) {
 			return true, "存在OS命令注入"
+		}
+		// D1-6：仅当含混淆字符时才反混淆后复判，缩小误报面
+		if deobf, hadObf := cmdLineNormalize(arg); hadObf {
+			if matchRceRegexes(deobf) {
+				return true, "存在OS命令注入(反混淆)"
+			}
+			// 独特命令“去混淆后有、原串无” → 混淆凑出的命令名(who^ami)，避开 prose 里的裸命令词
+			if reDistinctCmdWord.MatchString(deobf) && !reDistinctCmdWord.MatchString(strings.ToLower(arg)) {
+				return true, "存在OS命令注入(反混淆)"
+			}
 		}
 	}
 	return false, "未知"
+}
+
+// matchRceRegexes 跑全部 OS 命令注入正则(原串/反混淆串共用)
+func matchRceRegexes(arg string) bool {
+	return reSubstDollar.MatchString(arg) || reSubstBacktick.MatchString(arg) ||
+		reMetaCmd.MatchString(arg) || reArgCmd.MatchString(arg) || reBareId.MatchString(arg) ||
+		reWinSub.MatchString(arg) || reWinDestructive.MatchString(arg) || rePwsh.MatchString(arg)
+}
+
+// cmdLineNormalize 反混淆：$IFS→空格、删 \ " ' ^、压缩空白、小写。返回(反混淆串, 原串是否含混淆字符)。
+// 不动 ; & | 等分隔符，保留操作符上下文供既有正则复判。
+func cmdLineNormalize(s string) (string, bool) {
+	hadObf := strings.ContainsAny(s, "\\\"'^") || reIFS.MatchString(s)
+	if !hadObf {
+		return s, false
+	}
+	out := reIFS.ReplaceAllString(s, " ")
+	out = cmdObfCharsDelete.Replace(out)
+	out = reMultiSpace.ReplaceAllString(out, " ")
+	return strings.ToLower(out), true
 }
 
 func phpRCE(args ...string) (bool, string) {

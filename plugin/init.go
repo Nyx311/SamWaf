@@ -33,13 +33,27 @@ func InitPluginSystem() error {
 	pluginManager := manager.NewPluginManager(systemConfig)
 	globalobj.GWAF_RUNTIME_OBJ_PLUGIN_MANAGER = pluginManager
 
-	// 3. 如果插件系统未启用，直接返回
+	// 3. 待验证总闸：不加载任何插件二进制，只保留管理器空壳让上层判空逻辑保持一致
+	if manager.PendingVerification {
+		configuredCount := 0
+		for _, pluginConfig := range systemConfig.List {
+			if pluginConfig.Enabled {
+				configuredCount++
+			}
+		}
+		zlog.Warn(manager.PendingVerificationReason,
+			"配置文件中已启用但被跳过的插件数", configuredCount,
+			"恢复条件", "完成准备后，将 manager.PendingVerification 置为 false")
+		return nil
+	}
+
+	// 4. 如果插件系统未启用，直接返回
 	if !systemConfig.Enabled {
 		zlog.Info("插件系统未启用，跳过插件加载")
 		return nil
 	}
 
-	// 4. 加载每个启用的插件
+	// 5. 加载每个启用的插件
 	loadedCount := 0
 	for _, pluginConfig := range systemConfig.List {
 		if !pluginConfig.Enabled {
