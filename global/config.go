@@ -58,6 +58,17 @@ var (
 	GCONFIG_AI_ENABLE int64  = 0         //AI智能检测总开关 1启用 0关闭（需先在AI模型管理上传模型包）
 	GCONFIG_AI_MODE   string = "observe" //AI检测工作模式: observe(仅记录/观察) / block(达到拦截阈值则拦截)
 
+	//请求体深度检测模式（D3/S1 新增的 formValue/JSON 逐值 XSS/SQLi/RCE 检测）：
+	//observe(默认,命中只在日志标记不拦截) / block(命中即拦) / off(不做请求体深检)。
+	//默认 observe：请求体逐值检测对正常 JSON/表单流量误报较高(libinjection 本为单值设计)，
+	//先观察、用日志确认无误后再切 block；查询串检测不受此开关影响(始终拦截)。
+	GCONFIG_BODY_DETECT_MODE string = "observe"
+
+	//请求体深检字段排除清单（逗号分隔的字段名，不区分大小写，默认空）。这些字段名下的表单值/
+	//JSON 值(匹配直接父键名)跳过 XSS/SQLi/RCE 逐值检测——用于放行已知携带富文本/HTML/代码的
+	//合法字段(如 content,html,markdown)，压 block 模式误报(E)。观察日志里看是哪些字段误报再填。
+	GCONFIG_BODY_DETECT_FIELD_EXCLUDE string = ""
+
 	//自定义规则在检测链里的位置 0:默认(排在CC之后) 1:规则优先(排在黑名单之后、Bot/SQLI/XSS等之前)
 	//规则优先模式下，规则的放行动作(RF.Allow)才能跳过 Bot/SQLI/XSS/扫描/RCE/目录穿越/CC 这些检测
 	GCONFIG_RULE_CHAIN_MODE int64 = 0

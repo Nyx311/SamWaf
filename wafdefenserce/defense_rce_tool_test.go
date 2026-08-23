@@ -52,6 +52,46 @@ func TestOsCmdInjection_NoFalsePositive(t *testing.T) {
 	}
 }
 
+func TestOsCmdInjection_Deobfuscation(t *testing.T) {
+	// D1-6：混淆变体去混淆后应命中
+	attacks := []string{
+		"who^ami",              // 插入 ^（独特命令现形）
+		`who""ami`,             // 插入 ""
+		"w'h'o'a'm'i",          // 插入 '
+		"c'a't /etc/passwd",    // 引号切分 cat + 路径
+		`ca\t /etc/passwd`,     // 反斜杠切分
+		"cat$IFS/etc/passwd",   // $IFS 空格绕过
+		"cat${IFS}/etc/passwd", // ${IFS}
+		";u'n'a'm'e -a",        // 分隔符 + 混淆命令 + flag
+		"un^ame -a",            // caret 切分 uname
+	}
+	for _, a := range attacks {
+		if ok, _ := DetermineRCE(a); !ok {
+			t.Errorf("混淆命令注入应判定但漏过: %q", a)
+		}
+	}
+}
+
+func TestOsCmdInjection_DeobfuscationNoFP(t *testing.T) {
+	// 含 \ " ' ^ / $ 但去混淆后不构成命令注入
+	benign := []string{
+		`C:\Users\test\file.txt`,    // Windows 路径含反斜杠
+		`path=C:\Program Files\app`, // 反斜杠路径
+		"O'Reilly's book",           // 撇号
+		"use powershell's new api",  // powershell 本就是完整词，非混淆凑出
+		"it's a test case",          // 撇号
+		"a^2 + b^2 = c^2",           // caret 数学式
+		`she said "hello world"`,    // 双引号
+		"price is $5 and $9 each",   // $ 非 $IFS
+		"won't don't can't",         // 撇号缩写
+	}
+	for _, b := range benign {
+		if ok, name := DetermineRCE(b); ok {
+			t.Errorf("正常输入被误判(反混淆): %q (%s)", b, name)
+		}
+	}
+}
+
 func TestPhpRCE_StillWorks(t *testing.T) {
 	if ok, _ := DetermineRCE("a=phpinfo()"); !ok {
 		t.Error("phpinfo() 应仍被检测")

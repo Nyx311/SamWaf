@@ -1,9 +1,14 @@
 # SamWaf 插件系统配置文件
 # 详细说明请参考: SamWafDoc/plugin_dev/plugin-system-design.md
+#
+# ============================ 状态：已暂停 ============================
+# 当前代码中 manager.PendingVerification = true，是硬编码总闸：
+#   把下面的 enabled 改成 true 也不会加载任何插件，本文件目前只起占位与文档作用。
+# ===========================================================================
 
 plugins:
-  # 插件系统总开关
-  enabled: true
+  # 插件系统总开关（当前被 manager.PendingVerification 总闸覆盖，恒不生效）
+  enabled: false
   
   # 插件二进制文件存放目录
   binary_dir: "./data/plugins/binaries"
@@ -41,7 +46,8 @@ plugins:
       description: "屏蔽指定的IP地址（示例：8.8.8.8）"
       type: "ip_filter"
       version: "1.0.0"
-      enabled: true  # 默认关闭，编译插件后可启用
+      enabled: false # 示例条目，保持关闭。注意：这里的 binary_path 是固定相对路径，
+                     # 一旦总闸放开又写成 true，谁能往该路径写文件谁就能以 WAF 进程身份执行
       binary_path: "./data/plugins/binaries/simple_ip_blocker.exe"
       priority: 100
       
