@@ -12,6 +12,7 @@ import (
 	"SamWaf/model"
 	"SamWaf/model/baseorm"
 	"SamWaf/model/request"
+	"SamWaf/utils"
 	"SamWaf/wafenginecore/ipset"
 	"SamWaf/waftask/threatip"
 	"errors"
@@ -117,6 +118,9 @@ func (r *WafThreatIPService) AddApi(req request.WafThreatIPChannelAddReq) error 
 	if err := validateChannelCode(req.Code); err != nil {
 		return err
 	}
+	if err := validateChannelURL(req.URL); err != nil {
+		return err
+	}
 	var cnt int64
 	global.GWAF_LOCAL_DB.Model(&model.ThreatIPChannel{}).Where("code = ?", req.Code).Count(&cnt)
 	if cnt > 0 {
@@ -150,6 +154,9 @@ func (r *WafThreatIPService) ModifyApi(req request.WafThreatIPChannelEditReq) er
 	var bean model.ThreatIPChannel
 	if err := global.GWAF_LOCAL_DB.Where("id = ?", req.Id).First(&bean).Error; err != nil {
 		return errors.New("记录不存在")
+	}
+	if err := validateChannelURL(req.URL); err != nil {
+		return err
 	}
 	landTarget := defaultStr(req.LandTarget, model.ThreatLandWAF)
 	updates := map[string]interface{}{
@@ -1084,6 +1091,19 @@ func defaultInt(v, def int) int {
 		return def
 	}
 	return v
+}
+
+// validateChannelURL 保存订阅渠道时的地址预检。
+// 真正的边界在拉取前(threatip.FetchWithStat 里的 IsAllowedOutboundURL + 带 SSRF 防护的客户端)，
+// 这里只是把明显不合法的地址在保存阶段就顶回去，省得用户配完等一轮定时任务才知道不行。
+func validateChannelURL(rawURL string) error {
+	if strings.TrimSpace(rawURL) == "" {
+		return errors.New("订阅地址不能为空")
+	}
+	if ok, reason := utils.PrecheckOutboundURL(rawURL); !ok {
+		return errors.New("订阅地址不被允许: " + reason)
+	}
+	return nil
 }
 
 // validateChannelCode 校验渠道短码：小写字母/数字/下划线，长度 1-13(为 ipset 名 samwaf_sub_<code> ≤24 预留)

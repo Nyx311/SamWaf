@@ -11,6 +11,8 @@ var (
 	GCONFIG_MANAGE_TRUSTED_PROXIES      string = ""                  //管理端可信代理网段（CIDR/IP，逗号分隔）；仅当直连来源在此网段内才采信上面的代理头，留空=不信任任何代理头
 	GCONFIG_MANAGE_CDN_PROVIDER         string = ""                  //管理端引用的CDN厂商码（管理端也挂CDN时）；设置后GetManageClientIP会额外信任该厂商中心库最新回源段，自动跟随更新
 	GCONFIG_SSL_EXPORT_ALLOWED_DIRS     string = ""                  //SSL证书导出允许的额外目录（绝对路径，逗号分隔）；只从config.yml读、不进DB/API。内置默认data/ssl_export恒允许，其余目录须运营方在此声明，攻击者/OpenAPI Key改不了
+	GCONFIG_BATCH_IMPORT_ALLOWED_DIRS   string = ""                  //批量任务本地来源允许的额外目录（绝对路径，逗号分隔）；只从config.yml读、不进DB/API。内置默认data/import恒允许，留空=只允许该默认目录
+	GCONFIG_OUTBOUND_ALLOWED_HOSTS      string = ""                  //用户可配的对外拉取地址允许清单（主机名/IP/CIDR，逗号分隔）；只从config.yml读、不进DB/API。留空=只允许公网目标；内网镜像源须运营方在此带外声明
 	GCONFIG_RECORD_AUTO_LOAD_SSL        int64  = 1                   //是否每天凌晨3点自动加载ssl证书
 	GCONFIG_RECORD_KAFKA_ENABLE         int64  = 0                   //kafka 是否激活
 	GCONFIG_RECORD_KAFKA_URL            string = "127.0.0.1:9092"    //kafka url地址

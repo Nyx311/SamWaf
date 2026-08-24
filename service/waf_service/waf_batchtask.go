@@ -8,10 +8,13 @@ import (
 	"SamWaf/model"
 	"SamWaf/model/baseorm"
 	"SamWaf/model/request"
+	"SamWaf/utils"
 	"encoding/json"
 	"errors"
-	"gorm.io/gorm"
+	"strings"
 	"time"
+
+	"gorm.io/gorm"
 )
 
 type WafBatchTaskService struct{}
@@ -23,6 +26,9 @@ func (receiver *WafBatchTaskService) AddApi(req request.BatchTaskAddReq) error {
 	err := receiver.CheckIsExistApi(req.BatchTaskName)
 	if err == nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 		return errors.New("任务名已存在")
+	}
+	if err = receiver.checkTaskInput(req.BatchType, req.BatchSourceType, req.BatchTriggerType, req.BatchExecuteMethod, req.BatchSource); err != nil {
+		return err
 	}
 	if err = receiver.checkExtraConfig(req.BatchType, req.BatchExtraConfig); err != nil {
 		return err
@@ -46,6 +52,33 @@ func (receiver *WafBatchTaskService) AddApi(req request.BatchTaskAddReq) error {
 		Remark:             req.Remark,
 	}
 	global.GWAF_LOCAL_DB.Create(bean)
+	return nil
+}
+
+// checkTaskInput 保存前校验四个枚举字段与数据源。
+func (receiver *WafBatchTaskService) checkTaskInput(batchType, sourceType, triggerType, executeMethod, source string) error {
+	if !enums.IsValidBatchType(batchType) {
+		return errors.New("任务类型非法")
+	}
+	if !enums.IsValidBatchSourceType(sourceType) {
+		return errors.New("来源类型非法")
+	}
+	if !enums.IsValidBatchTriggerType(triggerType) {
+		return errors.New("触发类型非法")
+	}
+	if !enums.IsValidBatchExecuteMethod(executeMethod) {
+		return errors.New("执行方式非法")
+	}
+	source = strings.TrimSpace(source)
+	if source == "" {
+		return errors.New("来源内容不能为空")
+	}
+	if enums.IsBatchLocalSource(sourceType) {
+		return utils.PrecheckBatchLocalPath(source)
+	}
+	if ok, reason := utils.PrecheckOutboundURL(source); !ok {
+		return errors.New("来源地址不被允许: " + reason)
+	}
 	return nil
 }
 
@@ -88,6 +121,9 @@ func (receiver *WafBatchTaskService) ModifyApi(req request.BatchTaskEditReq) err
 	global.GWAF_LOCAL_DB.Where("batch_task_name = ?", req.BatchTaskName).Find(&bean)
 	if bean.Id != "" && bean.BatchTaskName != req.BatchTaskName {
 		return errors.New("该任务已经存在")
+	}
+	if err := receiver.checkTaskInput(req.BatchType, req.BatchSourceType, req.BatchTriggerType, req.BatchExecuteMethod, req.BatchSource); err != nil {
+		return err
 	}
 	if err := receiver.checkExtraConfig(req.BatchType, req.BatchExtraConfig); err != nil {
 		return err

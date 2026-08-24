@@ -6,10 +6,12 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"SamWaf/utils"
 )
 
-// fetchClient 威胁情报订阅拉取用的 HTTP 客户端(独立超时，参照 wafowasp/upgrader.go 的模式)
-var fetchClient = &http.Client{Timeout: 2 * time.Minute}
+// fetchTimeout 威胁情报订阅拉取的整体超时(参照 wafowasp/upgrader.go 的模式)
+const fetchTimeout = 2 * time.Minute
 
 // maxFetchBytes 单次拉取的响应体上限(防超大/投毒响应耗尽内存)：64MB
 const maxFetchBytes = 64 * 1024 * 1024
@@ -37,18 +39,25 @@ func Fetch(url string) ([]byte, error) {
 func FetchWithStat(url string) ([]byte, FetchStat, error) {
 	start := time.Now()
 	stat := FetchStat{}
+	// 错误信息会进日志与渠道的"上次状态"（前端可见），订阅地址可能带 user:token@，先抹掉凭证
+	safeURL := utils.RedactURLCredentials(url)
+
+	if ok, reason := utils.IsAllowedOutboundURL(url); !ok {
+		stat.Elapsed = time.Since(start)
+		return nil, stat, fmt.Errorf("目标地址不被允许(url=%s): %s", safeURL, reason)
+	}
 
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		stat.Elapsed = time.Since(start)
-		return nil, stat, fmt.Errorf("构造请求失败(url=%s): %v", url, err)
+		return nil, stat, fmt.Errorf("构造请求失败(url=%s): %v", safeURL, err)
 	}
 	req.Header.Set("User-Agent", "SamWaf-ThreatIP")
 
-	resp, err := fetchClient.Do(req)
+	resp, err := utils.SafeOutboundHTTPClient(fetchTimeout).Do(req)
 	if err != nil {
 		stat.Elapsed = time.Since(start)
-		return nil, stat, fmt.Errorf("请求失败(url=%s, 耗时=%s): %v", url, stat.Elapsed.Round(time.Millisecond), err)
+		return nil, stat, fmt.Errorf("请求失败(url=%s, 耗时=%s): %v", safeURL, stat.Elapsed.Round(time.Millisecond), err)
 	}
 	defer resp.Body.Close()
 	stat.StatusCode = resp.StatusCode
@@ -57,15 +66,25 @@ func FetchWithStat(url string) ([]byte, FetchStat, error) {
 		peek, _ := io.ReadAll(io.LimitReader(resp.Body, bodyPeekLen))
 		stat.Elapsed = time.Since(start)
 		return nil, stat, fmt.Errorf("HTTP 状态码 %d(url=%s, 耗时=%s, 正文摘要=%q)",
-			resp.StatusCode, url, stat.Elapsed.Round(time.Millisecond), summarize(peek))
+			resp.StatusCode, safeURL, stat.Elapsed.Round(time.Millisecond), summarize(peek))
 	}
 
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxFetchBytes))
+	// 多读 1 字节判定是否超限：静默截断会把半份订阅当成完整快照，
+	// 覆盖式落地时等于凭空放行掉后半段本该封禁的 IP。
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxFetchBytes+1))
 	stat.Bytes = len(data)
 	stat.Elapsed = time.Since(start)
 	if err != nil {
 		return nil, stat, fmt.Errorf("读取响应失败(url=%s, 已读=%d字节, 耗时=%s): %v",
-			url, stat.Bytes, stat.Elapsed.Round(time.Millisecond), err)
+			safeURL, stat.Bytes, stat.Elapsed.Round(time.Millisecond), err)
+	}
+	if len(data) > maxFetchBytes {
+		return nil, stat, fmt.Errorf("响应超过大小上限 %dMB(url=%s)，已拒绝本次拉取", maxFetchBytes/1024/1024, safeURL)
+	}
+	// 声明了 Content-Length 却没读满：连接被中途掐断，这是半份数据，不能当完整快照用
+	if resp.ContentLength >= 0 && int64(len(data)) != resp.ContentLength {
+		return nil, stat, fmt.Errorf("响应不完整(url=%s, 已读=%d字节, 声明=%d字节)，已拒绝本次拉取",
+			safeURL, len(data), resp.ContentLength)
 	}
 	return data, stat, nil
 }
