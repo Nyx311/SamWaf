@@ -25,7 +25,9 @@ import (
 
 // isPublicIP 判断 IP 是否为可安全对外访问的公网地址（用于防 SSRF）。
 // 拒绝：环回、私网(RFC1918 / RFC4193 fc00::/7)、链路本地(含云元数据 169.254.169.254)、
-// 未指定(0.0.0.0 / ::)、多播、CGNAT(100.64.0.0/10)。
+// 未指定(0.0.0.0 / ::)、多播、CGNAT(100.64.0.0/10)、其余保留段，
+// 以及三种「把 IPv4 内网地址包在 IPv6 里」的写法：v4 兼容 ::a.b.c.d、NAT64 64:ff9b::/96、6to4 2002::/16。
+// v4 映射 ::ffff:a.b.c.d 由 Go 的 To4() 自动还原，走下面的 v4 判定。
 func isPublicIP(ip net.IP) bool {
 	if ip == nil {
 		return false
@@ -34,15 +36,73 @@ func isPublicIP(ip net.IP) bool {
 		ip.IsUnspecified() || ip.IsMulticast() {
 		return false
 	}
+	// 先把内嵌的 IPv4 还原出来再判：不然 http://[64:ff9b::7f00:1]/ 这种在 NAT64 网络里
+	// 直达 127.0.0.1，却因为「它是个 IPv6 地址」被当成公网放行。
+	if embedded := embeddedIPv4(ip); embedded != nil {
+		return isPublicIPv4(embedded)
+	}
 	if v4 := ip.To4(); v4 != nil {
-		// 云元数据地址显式兜底（169.254.0.0/16 已被链路本地覆盖，这里再拦一次）
-		if v4[0] == 169 && v4[1] == 254 {
-			return false
+		return isPublicIPv4(v4)
+	}
+	return true
+}
+
+// embeddedIPv4 取出 IPv6 地址里内嵌的 IPv4（v4 兼容 ::a.b.c.d / NAT64 64:ff9b::/96 / 6to4 2002::/16），
+// 不是这三种写法时返回 nil。
+func embeddedIPv4(ip net.IP) net.IP {
+	v6 := ip.To16()
+	if v6 == nil || ip.To4() != nil {
+		return nil
+	}
+	// 6to4 2002:V4ADDR::/16
+	if v6[0] == 0x20 && v6[1] == 0x02 {
+		return net.IPv4(v6[2], v6[3], v6[4], v6[5]).To4()
+	}
+	// NAT64 64:ff9b::/96
+	if v6[0] == 0x00 && v6[1] == 0x64 && v6[2] == 0xff && v6[3] == 0x9b {
+		allZero := true
+		for i := 4; i < 12; i++ {
+			if v6[i] != 0 {
+				allZero = false
+				break
+			}
 		}
-		// CGNAT 100.64.0.0/10 视为内网
-		if v4[0] == 100 && v4[1] >= 64 && v4[1] <= 127 {
-			return false
+		if allZero {
+			return net.IPv4(v6[12], v6[13], v6[14], v6[15]).To4()
 		}
+	}
+	// IPv4 兼容地址 ::a.b.c.d（前 96 位全 0，且不是 :: 与 ::1，那两个已被上面拦掉）
+	for i := 0; i < 12; i++ {
+		if v6[i] != 0 {
+			return nil
+		}
+	}
+	return net.IPv4(v6[12], v6[13], v6[14], v6[15]).To4()
+}
+
+// isPublicIPv4 IPv4 保留段判定。除内网/环回外，这些段也一律不是合法的对外访问目标。
+func isPublicIPv4(v4 net.IP) bool {
+	v4 = v4.To4()
+	if v4 == nil {
+		return false
+	}
+	if v4.IsLoopback() || v4.IsPrivate() || v4.IsLinkLocalUnicast() ||
+		v4.IsUnspecified() || v4.IsMulticast() {
+		return false
+	}
+	switch {
+	case v4[0] == 0: // 0.0.0.0/8 "本网络"
+		return false
+	case v4[0] == 169 && v4[1] == 254: // 云元数据显式兜底（链路本地已覆盖，这里再拦一次）
+		return false
+	case v4[0] == 100 && v4[1] >= 64 && v4[1] <= 127: // CGNAT 100.64.0.0/10
+		return false
+	case v4[0] == 192 && v4[1] == 0 && v4[2] == 0: // 192.0.0.0/24 IETF 协议分配
+		return false
+	case v4[0] == 198 && (v4[1] == 18 || v4[1] == 19): // 198.18.0.0/15 基准测试
+		return false
+	case v4[0] >= 240: // 240.0.0.0/4 保留 + 255.255.255.255 广播
+		return false
 	}
 	return true
 }

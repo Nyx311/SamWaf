@@ -8,12 +8,13 @@ import (
 	"SamWaf/wafowasp"
 	"crypto/rand"
 	"fmt"
-	"github.com/denisbrodbeck/machineid"
-	"github.com/spf13/viper"
 	"math/big"
 	"os"
 	"strings"
 	"time"
+
+	"github.com/denisbrodbeck/machineid"
+	"github.com/spf13/viper"
 )
 
 // generateSecurityEntryPath 生成18位随机安全路径码（大小写字母+数字）
@@ -234,6 +235,25 @@ func LoadAndInitConfig() {
 		global.GCONFIG_SSL_EXPORT_ALLOWED_DIRS = config.GetString("security.ssl_export_allowed_dirs")
 	} else {
 		config.Set("security.ssl_export_allowed_dirs", global.GCONFIG_SSL_EXPORT_ALLOWED_DIRS)
+		configChanged = true
+	}
+
+	//批量任务「本地路径」来源允许的额外目录（绝对路径，逗号分隔）。同 ssl_export_allowed_dirs 口径：
+	//只放 config.yml、不进数据库/API——「能读宿主机哪些目录」属运营方带外授权，
+	//攻击者/OpenAPI Key/普通管理员都不能改。内置默认 data/import 恒允许；留空=只允许该默认目录（fail-closed）。
+	if config.IsSet("security.batch_import_allowed_dirs") {
+		global.GCONFIG_BATCH_IMPORT_ALLOWED_DIRS = config.GetString("security.batch_import_allowed_dirs")
+	} else {
+		config.Set("security.batch_import_allowed_dirs", global.GCONFIG_BATCH_IMPORT_ALLOWED_DIRS)
+		configChanged = true
+	}
+
+	//用户可配的对外拉取地址允许清单（主机名/IP/CIDR，逗号分隔）。覆盖：批量任务远端来源、
+	//威胁情报订阅、CDN 回源段拉取。默认只允许公网目标；确有内网镜像源的部署，
+	if config.IsSet("security.outbound_allowed_hosts") {
+		global.GCONFIG_OUTBOUND_ALLOWED_HOSTS = config.GetString("security.outbound_allowed_hosts")
+	} else {
+		config.Set("security.outbound_allowed_hosts", global.GCONFIG_OUTBOUND_ALLOWED_HOSTS)
 		configChanged = true
 	}
 
