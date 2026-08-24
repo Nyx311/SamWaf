@@ -3,7 +3,7 @@
 // core 库 CRUD 三库回归 —— 批 B：签名/流程较特殊的 service
 // （PrivateInfo 按 key 改、Rule 多裸参+软删、SslConfig 需 PEM、OPlatformKey 返回密钥、
 //
-//	Center 无删、以及 #885 CreateInner 三库回归守卫）。
+//	以及 #885 CreateInner 三库回归守卫）。
 package waf_service
 
 import (
@@ -92,25 +92,6 @@ func runCoreCRUDCasesB(t *testing.T, db *gorm.DB) {
 		}
 		fatalIf(t, WafHostPathRuleServiceApp.DelApi(request.WafHostPathRuleDelReq{Id: bean.Id}))
 		assertGone(t, db, &model.HostPathRule{}, bean.Id)
-	})
-
-	t.Run("Center", func(t *testing.T) {
-		tid := "ct_" + sfx()
-		uc := "uc_" + sfx()
-		fatalIf(t, CenterServiceApp.AddApi(request.CenterClientUpdateReq{
-			ClientServerName: "s1", ClientUserCode: uc, ClientTenantId: tid, ClientIP: "1.2.3.4", ClientPort: "80",
-		}))
-		bean := CenterServiceApp.GetDetailByTencentUserCode(tid, uc)
-		if bean.Id == "" {
-			t.Fatalf("Center 新增后未定位到记录")
-		}
-		fatalIf(t, CenterServiceApp.ModifyApi(request.CenterClientUpdateReq{
-			ClientServerName: "s2", ClientUserCode: uc, ClientTenantId: tid, ClientIP: "5.6.7.8", ClientPort: "443",
-		}))
-		got := CenterServiceApp.GetDetailByTencentUserCode(tid, uc)
-		if got.ClientServerName != "s2" || got.ClientIP != "5.6.7.8" {
-			t.Fatalf("Center 更新未落库: %+v", got)
-		}
 	})
 
 	t.Run("OPlatformKey", func(t *testing.T) {

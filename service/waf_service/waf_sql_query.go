@@ -53,6 +53,7 @@ var sensitiveTableSubstrings = []string{
 	"config",       // system_configs / *config* 键值配置表（可能明文存密钥）
 	"plugin",       // waf_plugin_* 插件配置/日志（参数/值/IO 可能含凭证）
 	"cdn_provider", // cdn_provider（CDN 厂商认证凭证 SecretId/SecretKey 加密落库，整表不可查）
+	"center",       // centers（中心管控已下架、表随迁移删除；规则保留作兜底，防迁移失败时残表被查）
 	// 统一访问认证：access_account 已被 "account" 覆盖、access_token 被 "token" 覆盖、
 	// access_config 被 "config" 覆盖，但仍显式列出，免得日后有人改了上面那几个子串就悄悄放开了。
 	"access_account",

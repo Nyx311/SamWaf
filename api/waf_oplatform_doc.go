@@ -499,7 +499,6 @@ var routeModuleMap = map[string]string{
 	"/api/v1/systemconfig":         "系统配置",
 	"/api/v1/wafcommon":            "公共接口",
 	"/api/v1/onekeymod":            "一键模式",
-	"/api/v1/center":               "管理中心",
 	"/api/v1/license":              "License管理",
 	"/api/v1/batchtask":            "批量任务",
 	"/api/v1/task":                 "任务管理",
@@ -578,7 +577,6 @@ func shouldExcludeRoute(path string) bool {
 		"/api/v1/public/login",
 		"/api/v1/logout",
 		"/api/v1/ws",
-		"/api/v1/center/update",
 		"/api/v1/oplatform/doc",
 	}
 	for _, prefix := range excludePrefixes {
