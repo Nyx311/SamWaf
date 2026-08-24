@@ -48,7 +48,6 @@ func RunCoreDBMigrations(db *gorm.DB) error {
 						&model.SystemConfig{},
 						&model.DelayMsg{},
 						&model.ShareDb{},
-						&model.Center{},
 						&model.Sensitive{},
 						&model.LoadBalance{},
 						&model.SslConfig{},
@@ -87,7 +86,6 @@ func RunCoreDBMigrations(db *gorm.DB) error {
 						&model.SystemConfig{},
 						&model.DelayMsg{},
 						&model.ShareDb{},
-						&model.Center{},
 						&model.Sensitive{},
 						&model.LoadBalance{},
 						&model.SslConfig{},
@@ -134,7 +132,6 @@ func RunCoreDBMigrations(db *gorm.DB) error {
 					&model.SystemConfig{},
 					&model.DelayMsg{},
 					&model.ShareDb{},
-					&model.Center{},
 					&model.Sensitive{},
 					&model.LoadBalance{},
 					&model.SslConfig{},
@@ -1938,6 +1935,48 @@ func RunCoreDBMigrations(db *gorm.DB) error {
 			Rollback: func(tx *gorm.DB) error {
 				zlog.Info("回滚 202608220001: 删除升级须知记录表")
 				return tx.Migrator().DropTable(&model.UpgradeNoticeRecord{})
+			},
+		},
+		// 迁移: 删除中心管控客户端表。
+		// 中心管控功能已整体下架（该链路从未接通，正常部署下此表始终为空），
+		// 相关路由/中间件/服务已删除，表随之删除，不留无人读取的残留数据。
+		{
+			ID: "202608240002_drop_centers_table",
+			Migrate: func(tx *gorm.DB) error {
+				if !tx.Migrator().HasTable("centers") {
+					return nil
+				}
+				// 正常部署下这张表应当是空的（客户端自注册从未接通）。
+				// 非空则记一条，让运维知道曾有过写入，数据随功能一并清除。
+				var cnt int64
+				if err := tx.Table("centers").Count(&cnt).Error; err == nil && cnt > 0 {
+					zlog.Warn(fmt.Sprintf("迁移 202608240002: centers 表存在 %d 条记录，随中心管控功能一并清除", cnt))
+				}
+				zlog.Info("迁移 202608240002: 删除中心管控客户端表")
+				return tx.Migrator().DropTable("centers")
+			},
+			Rollback: func(tx *gorm.DB) error {
+				// 功能已下架，模型也已删除，无法重建，回滚为空操作
+				return nil
+			},
+		},
+		// 迁移: 清掉中心管控留在系统配置表里的两项。
+		// gwaf_center_enable / gwaf_center_url 随功能下架已无任何读取方，留着只会在
+		// 「系统配置」里显示成一对改了也不起作用的开关，将来重做多节点管控时也不该
+		// 沿用这两个键（设计完全不同），直接删干净避免歧义。
+		{
+			ID: "202608240003_remove_center_system_configs",
+			Migrate: func(tx *gorm.DB) error {
+				if !tx.Migrator().HasTable(&model.SystemConfig{}) {
+					return nil
+				}
+				zlog.Info("迁移 202608240003: 删除中心管控遗留系统配置项")
+				return tx.Where("item IN ?", []string{"gwaf_center_enable", "gwaf_center_url"}).
+					Delete(&model.SystemConfig{}).Error
+			},
+			Rollback: func(tx *gorm.DB) error {
+				// 功能已下架，不重建这两个配置项
+				return nil
 			},
 		},
 	})

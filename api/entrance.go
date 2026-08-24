@@ -31,7 +31,6 @@ type APIGroup struct {
 	WafSystemConfigApi
 	WafCommonApi
 	WafOneKeyModApi
-	CenterApi
 	WafLicenseApi
 	WafSensitiveApi
 	WafLoadBalanceApi
@@ -113,8 +112,6 @@ var (
 	wafShareDbService = waf_service.WafShareDbServiceApp
 
 	wafOneKeyModService = waf_service.WafOneKeyModServiceApp
-
-	CenterService = waf_service.CenterServiceApp
 
 	wafSensitiveService = waf_service.WafSensitiveServiceApp
 

@@ -30,7 +30,6 @@ type ApiGroup struct {
 	WafCommonRouter
 	OneKeyModRouter
 	WafLicenseRouter
-	CenterRouter
 	SensitiveRouter
 	LoadBalanceRouter
 	SslConfigRouter
@@ -78,7 +77,6 @@ type ApiGroup struct {
 }
 type PublicApiGroup struct {
 	LoginRouter
-	CenterPublicRouter
 }
 
 var ApiGroupApp = new(ApiGroup)

@@ -125,10 +125,9 @@ func (web *WafWebManager) initRouter(r *gin.Engine) {
 	PublicRouterGroup := r.Group("")
 	PublicRouterGroup.Use(middleware.SecApi(), middleware.IPWhitelist(), middleware.DomainWhitelist(), middleware.ReplayProtect())
 	router.PublicApiGroupApp.InitLoginRouter(PublicRouterGroup)
-	router.PublicApiGroupApp.InitCenterRouter(PublicRouterGroup) //注册中心接收接口
 
 	RouterGroup := r.Group("")
-	RouterGroup.Use(middleware.Auth(), middleware.ReplayProtect(), middleware.OpenApiLogMiddleware(), middleware.CenterApi(), middleware.SecApi(), middleware.GinGlobalExceptionMiddleWare(), middleware.IPWhitelist(), middleware.DomainWhitelist()) //TODO 中心管控 特定
+	RouterGroup.Use(middleware.Auth(), middleware.ReplayProtect(), middleware.OpenApiLogMiddleware(), middleware.IPWhitelist(), middleware.DomainWhitelist(), middleware.SecApi(), middleware.GinGlobalExceptionMiddleWare())
 	{
 		// 共享/运维类接口：任意已登录角色可访问
 		router.ApiGroupApp.InitHostRouter(RouterGroup)
@@ -140,7 +139,6 @@ func (web *WafWebManager) initRouter(r *gin.Engine) {
 		router.ApiGroupApp.InitSysInfoRouter(RouterGroup)
 		router.ApiGroupApp.InitWafCommonRouter(RouterGroup)
 		router.ApiGroupApp.InitOneKeyModRouter(RouterGroup)
-		router.ApiGroupApp.InitCenterRouter(RouterGroup)
 		router.ApiGroupApp.InitLicenseRouter(RouterGroup)
 		router.ApiGroupApp.InitLoadBalanceRouter(RouterGroup)
 		router.ApiGroupApp.InitSslConfigRouter(RouterGroup)
@@ -232,7 +230,7 @@ func (web *WafWebManager) initRouter(r *gin.Engine) {
 	// 整组归属「系统管理员域」：账户管理/OTP/开放平台Key/SQL查询/应用管理/AI模型均为系统级敏感操作
 	// superAdmin 兜底放行；空角色(历史账号)经 NormalizeRole 视为 superAdmin，向后兼容
 	TokenOnlyRouterGroup := r.Group("")
-	TokenOnlyRouterGroup.Use(middleware.TokenOnlyAuth(), middleware.RequireRole(enums.ROLE_SYSTEM_ADMIN), middleware.ReplayProtect(), middleware.CenterApi(), middleware.SecApi(), middleware.GinGlobalExceptionMiddleWare(), middleware.IPWhitelist())
+	TokenOnlyRouterGroup.Use(middleware.TokenOnlyAuth(), middleware.RequireRole(enums.ROLE_SYSTEM_ADMIN), middleware.ReplayProtect(), middleware.IPWhitelist(), middleware.DomainWhitelist(), middleware.SecApi(), middleware.GinGlobalExceptionMiddleWare())
 	{
 		// 开放平台管理接口
 		router.ApiGroupApp.InitOPlatformKeyRouter(TokenOnlyRouterGroup)
