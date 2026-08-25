@@ -77,6 +77,7 @@ type ApiGroup struct {
 }
 type PublicApiGroup struct {
 	LoginRouter
+	SecKeyRouter
 }
 
 var ApiGroupApp = new(ApiGroup)

@@ -161,3 +161,18 @@ notes:
     en:
       title: Secret-type settings no longer display their stored values
       detail: Settings such as the GPT API key, ZeroSSL keys, the debug password and notification channel tokens now only show a "configured" state instead of echoing the stored value. Editing rules - saving with the field left blank keeps the current value (editing remarks or other fields never touches a stored secret); type a new value to replace it; use the explicit clear action to remove it.
+
+  - id: v1_3_24_transport_session_key
+    version: v1.3.24
+    kind: notice
+    level: normal
+    page: ''
+    doc: https://doc.samwaf.com/quickstart/Update.html
+    apply:
+      type: none
+    zh:
+      title: 管理端通讯改用每次会话协商的密钥
+      detail: 管理端页面与后端之间的报文，从本版本起使用每个实例、每个浏览器标签各自协商的密钥加密，首次启动会在 data/.keys 下自动生成 comm_key，无需任何配置。旧版本的独立部署前端与移动端 App 仍走原有通道，行为不变。需要注意：该密钥保护的是报文本身，能防止抓包后离线还原，但不能替代 HTTPS——防中间人仍然需要为管理端启用 TLS。进阶：可在 conf/config.yml 用 security.comm_key_file 指定自管密钥文件位置；确认不再有旧版前端或旧版 App 连入后，可把 security.comm_legacy_key 置为 false 关闭旧通道（默认保持开启，任何版本都不会自动关闭）。
+    en:
+      title: Console traffic now uses a key negotiated per session
+      detail: Messages between the console page and the backend are now encrypted with a key negotiated per instance and per browser tab. A comm_key file is generated under data/.keys on first start and no configuration is required. Separately deployed older frontends and the mobile app keep using the previous channel and are unaffected. Note that this key protects the messages themselves and prevents offline recovery from captured traffic, but it is not a replacement for HTTPS - protecting against an active man-in-the-middle still requires enabling TLS on the console. Advanced - security.comm_key_file in conf/config.yml points to a self-managed key file, and once no older frontend or app connects any more you can set security.comm_legacy_key to false to close the previous channel (it stays enabled by default and is never turned off automatically).

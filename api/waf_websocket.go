@@ -30,6 +30,10 @@ func (w *WafWebSocketApi) WebSocketMessageApi(c *gin.Context) {
 	tokenStr := c.GetHeader("Sec-WebSocket-Protocol")
 	tokenInfo := wafTokenInfoService.GetInfoByAccessToken(tokenStr)
 
+	//本次连接声明的传输会话密钥（v2 客户端才带；旧客户端为空，推送回落 legacy）。
+	//WebSocket 建连没法带自定义头，只能走查询参数。
+	keyID := c.Query("keyid")
+
 	//升级get请求为webSocket协议
 	ws, err := upGrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
@@ -60,7 +64,7 @@ func (w *WafWebSocketApi) WebSocketMessageApi(c *gin.Context) {
 
 	// 生成用户标识和会话ID
 	userKey := tokenInfo.BaseOrm.Tenant_ID + tokenInfo.BaseOrm.USER_CODE + tokenInfo.LoginAccount
-	sessionID := global.GWebSocket.AddWebSocket(userKey, ws)
+	sessionID := global.GWebSocket.AddWebSocketWithKey(userKey, keyID, ws)
 
 	zlog.Debug("WebSocket连接建立，用户: " + userKey + ", 会话ID: " + sessionID)
 

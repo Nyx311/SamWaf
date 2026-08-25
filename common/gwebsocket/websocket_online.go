@@ -29,6 +29,9 @@ type WebSocketConnection struct {
 	Conn      *Wssocket.Conn
 	SessionID string
 	UserKey   string
+	// KeyID 是该连接建连时声明的传输会话密钥标识（v2 客户端才有，旧客户端为空）。
+	// 广播时按连接各自加密，所以这个值必须跟着连接走。
+	KeyID     string
 	CreatedAt time.Time
 
 	writeMux sync.Mutex // 该连接的写出口互斥锁，禁止并发写
@@ -76,6 +79,11 @@ func (wafWebsocket *WebSocketOnline) generateSessionID() string {
 
 // 添加WebSocket连接，返回会话ID
 func (wafWebsocket *WebSocketOnline) AddWebSocket(userKey string, conn *Wssocket.Conn) string {
+	return wafWebsocket.AddWebSocketWithKey(userKey, "", conn)
+}
+
+// AddWebSocketWithKey 同 AddWebSocket，并记下该连接声明的传输会话密钥标识
+func (wafWebsocket *WebSocketOnline) AddWebSocketWithKey(userKey string, keyID string, conn *Wssocket.Conn) string {
 	wafWebsocket.Mux.Lock()
 	defer wafWebsocket.Mux.Unlock()
 
@@ -86,6 +94,7 @@ func (wafWebsocket *WebSocketOnline) AddWebSocket(userKey string, conn *Wssocket
 		Conn:      conn,
 		SessionID: sessionID,
 		UserKey:   userKey,
+		KeyID:     keyID,
 		CreatedAt: time.Now(),
 	}
 
@@ -151,6 +160,29 @@ func (wafWebsocket *WebSocketOnline) Broadcast(messageType int, data []byte) int
 	successCount := 0
 	for _, wsConn := range wafWebsocket.snapshot() {
 		if wsConn == nil {
+			continue
+		}
+		if err := wsConn.SafeWriteMessage(messageType, data); err != nil {
+			wafWebsocket.CloseSession(wsConn.SessionID)
+			continue
+		}
+		successCount++
+	}
+	return successCount
+}
+
+// BroadcastBuild 广播给所有在线连接，但报文按连接单独组装——v2 通道下每条连接的
+// 会话密钥不同，没法像 Broadcast 那样一份密文发给所有人。
+// build 收到该连接的 KeyID（旧客户端为空串），返回该连接要收到的字节；返回错误则跳过这条连接。
+// 加解密逻辑放在调用方，本包不依赖 wafsec。
+func (wafWebsocket *WebSocketOnline) BroadcastBuild(messageType int, build func(keyID string) ([]byte, error)) int {
+	successCount := 0
+	for _, wsConn := range wafWebsocket.snapshot() {
+		if wsConn == nil {
+			continue
+		}
+		data, err := build(wsConn.KeyID)
+		if err != nil {
 			continue
 		}
 		if err := wsConn.SafeWriteMessage(messageType, data); err != nil {

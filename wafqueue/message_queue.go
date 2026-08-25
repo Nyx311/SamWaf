@@ -2,14 +2,13 @@ package wafqueue
 
 import (
 	"SamWaf/common/uuid"
+	"SamWaf/common/wsmsg"
 	"SamWaf/common/zlog"
 	"SamWaf/global"
 	"SamWaf/innerbean"
 	"SamWaf/model"
 	"SamWaf/service/waf_service"
 	"SamWaf/utils"
-	"SamWaf/wafsec"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -283,23 +282,20 @@ func handleIPBanMessage(msg innerbean.IPBanMessageInfo) {
 // 写入必须走 global.GWebSocket.Broadcast：它按连接加锁串行化并带写超时，
 // 直接对裸连接 WriteMessage 会与 ping 回显、定时任务撞成 concurrent write panic。
 func sendToWebSocket(messageType, messageData string, messageAttach interface{}, cmdType string) {
-	msgBody, _ := json.Marshal(model.MsgDataPacket{
+	dataPacket := model.MsgDataPacket{
 		MessageId:           uuid.GenUUID(),
 		MessageType:         messageType,
 		MessageData:         messageData,
 		MessageAttach:       messageAttach,
 		MessageDateTime:     time.Now().Format("2006-01-02 15:04:05"),
 		MessageUnReadStatus: true,
-	})
-	encryptStr, _ := wafsec.AesEncrypt(msgBody, global.GWAF_COMMUNICATION_KEY)
-	msgBytes, err := json.Marshal(model.MsgPacket{
-		MsgCode:       "200",
-		MsgDataPacket: encryptStr,
-		MsgCmdType:    cmdType,
-	})
-	if err != nil {
-		zlog.Debug("组装websocket报文错误", err)
-		return
 	}
-	global.GWebSocket.Broadcast(websocket.TextMessage, msgBytes)
+	// 按连接各自的会话密钥组装：v2 连接一份，旧连接回落 legacy
+	global.GWebSocket.BroadcastBuild(websocket.TextMessage, func(keyID string) ([]byte, error) {
+		msgBytes, err := wsmsg.Build(keyID, dataPacket, cmdType)
+		if err != nil {
+			zlog.Debug("组装websocket报文错误", err)
+		}
+		return msgBytes, err
+	})
 }

@@ -349,6 +349,12 @@ func (m *wafSystenService) run() {
 		os.Exit(1)
 	}
 
+	//初始化每实例传输密钥(X25519)：首启生成 data/.keys/comm_key(0600)，供管理端 v2 通道
+	//与客户端协商每会话密钥。失败不退出——传输层还有 legacy 通道可用，管理端不至于打不开。
+	if err := wafsec.InitCommKey(utils.GetCurrentDir(), global.GCONFIG_COMM_KEY_FILE); err != nil {
+		zlog.Error("初始化传输密钥失败，管理端将只提供 legacy 传输通道，请检查 data/.keys 目录权限或 security.comm_key_file 配置", "error", err)
+	}
+
 	//初始化本地数据库
 	if _, err := wafdb.InitCoreDb(""); err != nil {
 		zlog.Error("初始化核心数据库失败，程序退出，请检查conf/config.yml数据库配置是否正确", "error", err)

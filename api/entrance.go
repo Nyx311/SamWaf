@@ -25,6 +25,7 @@ type APIGroup struct {
 	WafAccountLogApi
 	WafLoginHistoryApi
 	WafLoginApi
+	WafSecKeyApi
 	WafSysLogApi
 	WafWebSocketApi
 	WafSysInfoApi
