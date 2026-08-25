@@ -238,6 +238,16 @@ func LoadAndInitConfig() {
 		configChanged = true
 	}
 
+	//每实例静态数据加密密钥(DEK)文件的自管路径。同 ssl_export_allowed_dirs 口径：
+	//只放 config.yml、不进数据库/API——密钥来源属运营方带外授权。留空=默认 data/.keys/data_key
+	//（首次启动自动生成、权限 0600）。指定自管文件便于把密钥与数据库分盘保管或统一托管。
+	if config.IsSet("security.data_key_file") {
+		global.GCONFIG_DATA_KEY_FILE = config.GetString("security.data_key_file")
+	} else {
+		config.Set("security.data_key_file", global.GCONFIG_DATA_KEY_FILE)
+		configChanged = true
+	}
+
 	//批量任务「本地路径」来源允许的额外目录（绝对路径，逗号分隔）。同 ssl_export_allowed_dirs 口径：
 	//只放 config.yml、不进数据库/API——「能读宿主机哪些目录」属运营方带外授权，
 	//攻击者/OpenAPI Key/普通管理员都不能改。内置默认 data/import 恒允许；留空=只允许该默认目录（fail-closed）。

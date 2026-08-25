@@ -8,14 +8,82 @@ import (
 	"SamWaf/model"
 	"SamWaf/model/baseorm"
 	"SamWaf/model/request"
+	"SamWaf/wafsec"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
 type WafSystemConfigService struct{}
 
 var WafSystemConfigServiceApp = new(WafSystemConfigService)
+
+// ConfigClearSentinel 前端要显式清空某个密钥类配置时提交的特殊值。
+// 因为“留空=保持原值不变”（防止只改备注把密钥冲掉），清空必须走独立标记。
+const ConfigClearSentinel = "__SAMWAF_CLEAR__"
+
+// IsSensitiveConfigItem 判断某配置项是否为密钥类（需加密落库、脱敏回显、写保护）。
+// 权威清单在 model 层（service 与 wafdb 迁移共用，避免两处漂移）。
+func IsSensitiveConfigItem(item string) bool {
+	return model.IsSensitiveConfigItem(item)
+}
+
+// encConfigValue / decConfigValue 密钥类配置值的落库加解密（每实例 DEK，swk1 前缀）。
+// 非密钥项原样返回，行为不变。
+//
+// 加密失败时退回明文并告警，而不是让保存失败：配置页是运维自救入口，不能因加密不可用锁死；
+// 下次启动的存量迁移会把这类明文行重新加密，可自愈。
+func encConfigValue(item, plain string) string {
+	if plain == "" || !model.IsSensitiveConfigItem(item) {
+		return plain
+	}
+	// 防御：哨兵值代表“清空”，任何路径都不该把它当密钥本身加密落库。
+	if plain == ConfigClearSentinel {
+		return ""
+	}
+	enc, err := wafsec.DataEncrypt(plain)
+	if err != nil || enc == "" {
+		zlog.Error("配置项加密失败，暂以原值落库", "item", item, "err", err)
+		return plain
+	}
+	return enc
+}
+
+// decConfigValue 读出明文：swk1 走 DEK 解；无前缀视为升级前的明文，原样返回（存量兜底）。
+func decConfigValue(item, stored string) string {
+	if stored == "" || !model.IsSensitiveConfigItem(item) {
+		return stored
+	}
+	if !wafsec.IsDataKeyCiphertext(stored) {
+		return stored
+	}
+	plain, err := wafsec.DataDecrypt(stored, global.GWAF_COMMUNICATION_KEY)
+	if err != nil {
+		zlog.Error("配置项解密失败", "item", item, "err", err)
+		return ""
+	}
+	return plain
+}
+
+// decryptConfigBean 就地把 bean 的 Value 还原为明文（读取路径统一入口）。
+func decryptConfigBean(bean *model.SystemConfig) {
+	if bean == nil {
+		return
+	}
+	bean.Value = decConfigValue(bean.Item, bean.Value)
+}
+
+// MaskSensitiveConfig 对密钥类配置项抹空 Value 并置 HasValue，供页面列表/详情接口使用。
+// 只处理页面回显，绝不改动库内数据；内部读取真实值走 GetDetailByItemApi 等 getter，不经此。
+func MaskSensitiveConfig(bean *model.SystemConfig) {
+	if bean == nil || !IsSensitiveConfigItem(bean.Item) {
+		return
+	}
+	bean.IsSensitive = true
+	bean.HasValue = strings.TrimSpace(bean.Value) != ""
+	bean.Value = ""
+}
 
 func (receiver *WafSystemConfigService) AddApi(wafSystemConfigAddReq request.WafSystemConfigAddReq) error {
 	// 幂等保护：先检查 item 是否已存在，存在则跳过，防止重复插入
@@ -35,7 +103,7 @@ func (receiver *WafSystemConfigService) AddApi(wafSystemConfigAddReq request.Waf
 		},
 		ItemClass: wafSystemConfigAddReq.ItemClass,
 		Item:      wafSystemConfigAddReq.Item,
-		Value:     wafSystemConfigAddReq.Value,
+		Value:     encConfigValue(wafSystemConfigAddReq.Item, wafSystemConfigAddReq.Value),
 		IsSystem:  "0",
 		Remarks:   wafSystemConfigAddReq.Remarks,
 		HashInfo:  "",
@@ -56,7 +124,7 @@ func (receiver *WafSystemConfigService) ModifyApi(req request.WafSystemConfigEdi
 	editMap := map[string]interface{}{
 		"Item":        req.Item,
 		"ItemClass":   req.ItemClass,
-		"Value":       req.Value,
+		"Value":       encConfigValue(req.Item, req.Value),
 		"Remarks":     req.Remarks,
 		"ItemType":    req.ItemType,
 		"Options":     req.Options,
@@ -77,7 +145,7 @@ func (receiver *WafSystemConfigService) ModifyByItemApi(req request.WafSystemCon
 	}
 
 	editMap := map[string]interface{}{
-		"Value":       req.Value,
+		"Value":       encConfigValue(req.Item, req.Value),
 		"UPDATE_TIME": customtype.JsonTime(time.Now()),
 	}
 
@@ -101,24 +169,31 @@ func (receiver *WafSystemConfigService) SyncMetaByItemApi(item string, itemClass
 	return global.GWAF_LOCAL_DB.Model(model.SystemConfig{}).Where("item = ?", item).Updates(editMap).Error
 }
 
+// 以下 Get* 一律返回【明文】Value：密钥类配置在库里是 swk1 密文，读取时统一解密，
+// 让所有调用方（内部逻辑与 API 层）拿到的都是可直接使用的值。
+// 页面回显的脱敏由 API handler 的 MaskSensitiveConfig 单独负责，不在这里做。
 func (receiver *WafSystemConfigService) GetDetailApi(req request.WafSystemConfigDetailReq) model.SystemConfig {
 	var bean model.SystemConfig
 	global.GWAF_LOCAL_DB.Where("id=?", req.Id).Find(&bean)
+	decryptConfigBean(&bean)
 	return bean
 }
 func (receiver *WafSystemConfigService) GetDetailByItemApi(req request.WafSystemConfigDetailByItemReq) model.SystemConfig {
 	var bean model.SystemConfig
 	global.GWAF_LOCAL_DB.Where("Item=?", req.Item).Find(&bean)
+	decryptConfigBean(&bean)
 	return bean
 }
 func (receiver *WafSystemConfigService) GetDetailByIdApi(id string) model.SystemConfig {
 	var bean model.SystemConfig
 	global.GWAF_LOCAL_DB.Where("id=?", id).Find(&bean)
+	decryptConfigBean(&bean)
 	return bean
 }
 func (receiver *WafSystemConfigService) GetDetailByItem(item string) model.SystemConfig {
 	var bean model.SystemConfig
 	global.GWAF_LOCAL_DB.Where("Item=?", item).Find(&bean)
+	decryptConfigBean(&bean)
 	return bean
 }
 func (receiver *WafSystemConfigService) GetListApi(req request.WafSystemConfigSearchReq) ([]model.SystemConfig, int64, error) {
@@ -150,6 +225,9 @@ func (receiver *WafSystemConfigService) GetListApi(req request.WafSystemConfigSe
 	}
 	global.GWAF_LOCAL_DB.Model(&model.SystemConfig{}).Where(whereField, whereValues...).Limit(req.PageSize).Offset(req.PageSize * (req.PageIndex - 1)).Find(&list)
 	global.GWAF_LOCAL_DB.Model(&model.SystemConfig{}).Where(whereField, whereValues...).Count(&total)
+	for i := range list {
+		decryptConfigBean(&list[i])
+	}
 
 	return list, total, nil
 }
@@ -215,6 +293,16 @@ func (receiver *WafSystemConfigService) GetAllConfigs() map[string]model.SystemC
 	for _, config := range configs {
 		if _, exists := configMap[config.Item]; !exists {
 			configMap[config.Item] = config
+		}
+	}
+
+	// 密钥类配置在库里是密文，这里统一还原为明文再交给调用方。
+	// 必须在返回前完成：配置加载会拿 Value 与默认值比较并写入全局变量，
+	// 若带着密文出去，全局变量拿到的就是密文而非真正的密钥。
+	for item, config := range configMap {
+		if model.IsSensitiveConfigItem(item) {
+			config.Value = decConfigValue(item, config.Value)
+			configMap[item] = config
 		}
 	}
 

@@ -131,3 +131,33 @@ notes:
     en:
       title: PostgreSQL is now supported as a database backend
       detail: From v1.3.22 you can set database.driver to postgres in conf/config.yml. Existing SQLite and MySQL deployments are unaffected and need no action.
+
+  - id: v1_3_24_data_key
+    version: v1.3.24
+    kind: notice
+    level: high
+    page: ''
+    doc: https://doc.samwaf.com/quickstart/Update.html
+    apply:
+      type: none
+    zh:
+      title: 敏感凭证改用每实例独立密钥加密存储
+      detail: 首次启动本版本时会在安装目录自动生成 data/.keys 密钥目录，统一访问认证、CDN 厂商凭证、管理端两步验证等敏感数据将自动迁移为新格式，升级过程无感、功能不受影响。两件事需要注意：① 备份与搬迁时 data/.keys 必须随数据库文件一起带走，缺了它相关凭证将无法读取、需要重新录入；② 如需回滚到旧版本，回滚前先执行一次 ./SamWaf --rekey-legacy 再更换程序，或直接恢复升级前的完整备份。进阶：可在 conf/config.yml 用 security.data_key_file 指定自管密钥文件位置。
+    en:
+      title: Sensitive credentials are now encrypted with a per-instance key
+      detail: On first start this version creates a data/.keys directory under the install path, and credentials such as unified access accounts, CDN provider keys and console two-factor secrets are migrated to the new format automatically - the upgrade is transparent. Two things to note. First, when backing up or moving the installation, data/.keys must travel together with the database files; without it those credentials cannot be read and must be re-entered. Second, before rolling back to an older build, run ./SamWaf --rekey-legacy once and then swap the binary, or simply restore the full pre-upgrade backup. Advanced - security.data_key_file in conf/config.yml lets you point to a self-managed key file.
+
+  - id: v1_3_24_secret_not_echo
+    version: v1.3.24
+    kind: notice
+    level: normal
+    page: ''
+    doc: https://doc.samwaf.com/quickstart/Update.html
+    apply:
+      type: none
+    zh:
+      title: 配置页的密钥类内容不再显示原文
+      detail: GPT 授权密钥、ZeroSSL 密钥、调试密码、通知渠道令牌等密钥类配置，页面上从本版本起只显示「已配置」状态，不再回显原文。编辑规则：留空保存＝保持原值不变（只改备注等其它字段完全不影响已存密钥）；需要更换时直接输入新值保存；需要清除时使用「清空」操作。
+    en:
+      title: Secret-type settings no longer display their stored values
+      detail: Settings such as the GPT API key, ZeroSSL keys, the debug password and notification channel tokens now only show a "configured" state instead of echoing the stored value. Editing rules - saving with the field left blank keeps the current value (editing remarks or other fields never touches a stored secret); type a new value to replace it; use the explicit clear action to remove it.

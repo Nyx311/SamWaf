@@ -2,11 +2,13 @@ package waf_service
 
 import (
 	"SamWaf/common/uuid"
+	"SamWaf/common/zlog"
 	"SamWaf/customtype"
 	"SamWaf/global"
 	"SamWaf/model"
 	"SamWaf/model/baseorm"
 	"SamWaf/model/request"
+	"SamWaf/wafsec"
 	"errors"
 	"time"
 )
@@ -14,6 +16,41 @@ import (
 type WafOtpService struct{}
 
 var WafOtpServiceApp = new(WafOtpService)
+
+// encManageOtpSecret 管理端 2FA 密钥加密落库（每实例 DEK，产出 swk1 密文；空值原样返回）。
+// 复用同包 encryptAccessSecret；加密失败时退回原文，避免把 2FA 直接锁死不可用。
+func encManageOtpSecret(plain string) string {
+	if plain == "" {
+		return ""
+	}
+	enc, err := encryptAccessSecret(plain)
+	if err != nil || enc == "" {
+		zlog.Error("管理端2FA密钥加密失败，退回原文落库", "err", err)
+		return plain
+	}
+	return enc
+}
+
+// decManageOtpSecret 读出管理端 2FA 密钥明文：swk1 走 DEK 解；无前缀视为升级前的
+// 明文（存量兜底，迁移完成前/迁移失败时仍可校验），原样返回。
+func decManageOtpSecret(stored string) string {
+	if stored == "" {
+		return ""
+	}
+	if wafsec.IsDataKeyCiphertext(stored) {
+		return decryptAccessSecret(stored)
+	}
+	return stored
+}
+
+// decryptOtpBean 就地把 Secret 还原为明文。所有 Get* 统一调用，
+// 让调用方拿到的永远是可直接用于校验的明文，不必各自记得解密。
+func decryptOtpBean(bean *model.Otp) {
+	if bean == nil {
+		return
+	}
+	bean.Secret = decManageOtpSecret(bean.Secret)
+}
 
 func (receiver *WafOtpService) AddApi(req request.WafOtpAddReq) error {
 	var bean = &model.Otp{
@@ -27,7 +64,7 @@ func (receiver *WafOtpService) AddApi(req request.WafOtpAddReq) error {
 
 		UserName: req.UserName,
 		Url:      req.Url,
-		Secret:   req.Secret,
+		Secret:   encManageOtpSecret(req.Secret),
 		Issuer:   req.Issuer,
 		Remarks:  req.Remarks,
 	}
@@ -98,7 +135,7 @@ func (receiver *WafOtpService) ModifyApi(req request.WafOtpEditReq) error {
 
 		"UserName": req.UserName,
 		"Url":      req.Url,
-		"Secret":   req.Secret,
+		"Secret":   encManageOtpSecret(req.Secret),
 		"Issuer":   req.Issuer,
 		"Remarks":  req.Remarks,
 
@@ -121,7 +158,7 @@ func (receiver *WafOtpService) BindApi(req request.WafOtpBindReq) error {
 
 		UserName: req.UserName,
 		Url:      req.Url,
-		Secret:   req.Secret,
+		Secret:   encManageOtpSecret(req.Secret),
 		Issuer:   req.Issuer,
 		Remarks:  req.Remarks,
 	}
@@ -129,19 +166,24 @@ func (receiver *WafOtpService) BindApi(req request.WafOtpBindReq) error {
 	return nil
 }
 
+// 以下 Get* 一律返回【明文】Secret：库里是 swk1 密文，读取时统一解密，
+// 调用方拿到即可直接用于 TOTP 校验。
 func (receiver *WafOtpService) GetDetailApi(req request.WafOtpDetailReq) model.Otp {
 	var bean model.Otp
 	global.GWAF_LOCAL_DB.Where("id=?", req.Id).Find(&bean)
+	decryptOtpBean(&bean)
 	return bean
 }
 func (receiver *WafOtpService) GetDetailByIdApi(id string) model.Otp {
 	var bean model.Otp
 	global.GWAF_LOCAL_DB.Where("id=?", id).Find(&bean)
+	decryptOtpBean(&bean)
 	return bean
 }
 func (receiver *WafOtpService) GetDetailByUserNameApi(userName string) model.Otp {
 	var bean model.Otp
 	global.GWAF_LOCAL_DB.Where("user_name=?", userName).Find(&bean)
+	decryptOtpBean(&bean)
 	return bean
 }
 
@@ -150,6 +192,9 @@ func (receiver *WafOtpService) GetListApi(req request.WafOtpSearchReq) ([]model.
 	var total int64 = 0
 	global.GWAF_LOCAL_DB.Model(&model.Otp{}).Limit(req.PageSize).Offset(req.PageSize * (req.PageIndex - 1)).Find(&list)
 	global.GWAF_LOCAL_DB.Model(&model.Otp{}).Count(&total)
+	for i := range list {
+		decryptOtpBean(&list[i])
+	}
 
 	return list, total, nil
 }
