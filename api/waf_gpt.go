@@ -6,6 +6,7 @@ import (
 	"SamWaf/model"
 	"SamWaf/model/common/response"
 	"SamWaf/model/request"
+	"SamWaf/service/waf_service"
 	"SamWaf/wafsec"
 	"SamWaf/waftask"
 	"bufio"
@@ -279,9 +280,13 @@ func (w *WafGPTApi) SaveGptConfigApi(c *gin.Context) {
 		{Item: "gpt_url", Value: strings.TrimSpace(req.GptUrl)},
 		{Item: "gpt_model", Value: strings.TrimSpace(req.GptModel)},
 	}
-	// 只有传了新密钥才更新，避免前端因不回传明文而把密钥清空
-	if strings.TrimSpace(req.GptToken) != "" {
-		items = append(items, request.WafSystemConfigEditByItemReq{Item: "gpt_token", Value: strings.TrimSpace(req.GptToken)})
+	// 密钥三态：留空=保留原密钥(前端不回显明文，空提交不能当成清空)；
+	// 哨兵值=用户显式清空；其余=更新为新密钥。
+	if token := strings.TrimSpace(req.GptToken); token != "" {
+		if token == waf_service.ConfigClearSentinel {
+			token = ""
+		}
+		items = append(items, request.WafSystemConfigEditByItemReq{Item: "gpt_token", Value: token})
 	}
 	for _, item := range items {
 		if err := wafSystemConfigService.ModifyByItemApi(item); err != nil {

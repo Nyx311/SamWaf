@@ -33,6 +33,7 @@ import (
 	"SamWaf/wafqueue"
 	"SamWaf/wafreg"
 	"SamWaf/wafsafeclear"
+	"SamWaf/wafsec"
 	"SamWaf/wafsnowflake"
 	"SamWaf/waftask"
 	"SamWaf/waftunnelengine"
@@ -340,11 +341,21 @@ func (m *wafSystenService) run() {
 		global.GUPDATE_VERSION_URL = "http://127.0.0.1:8111/"
 	}
 
+	//初始化每实例静态数据加密密钥(DEK)：首启生成 data/.keys/data_key(0600)，或用
+	//config.yml 的 security.data_key_file 指定自管路径。须在数据库初始化之前就绪，
+	//否则落库敏感字段(Access 密钥/CDN 凭证/2FA 密钥)无法按新格式加解密。
+	if err := wafsec.InitDataKey(utils.GetCurrentDir(), global.GCONFIG_DATA_KEY_FILE); err != nil {
+		zlog.Error("初始化数据加密密钥失败，程序退出，请检查 data/.keys 目录权限或 security.data_key_file 配置", "error", err)
+		os.Exit(1)
+	}
+
 	//初始化本地数据库
 	if _, err := wafdb.InitCoreDb(""); err != nil {
 		zlog.Error("初始化核心数据库失败，程序退出，请检查conf/config.yml数据库配置是否正确", "error", err)
 		os.Exit(1)
 	}
+	//存量敏感字段静态加密迁移：把旧格式密文一次性重写为每实例 DEK 密文(幂等，单行失败跳过)。
+	wafdb.MigrateDataKeyEncryption(global.GWAF_LOCAL_DB)
 	if _, err := wafdb.InitLogDb(""); err != nil {
 		zlog.Error("初始化日志数据库失败，程序退出，请检查conf/config.yml数据库配置是否正确", "error", err)
 		os.Exit(1)
@@ -1188,6 +1199,29 @@ func main() {
 				os.Exit(1)
 			}
 			fmt.Println("已触发零停机滚动重启，请观察日志：新 Worker 就绪后旧 Worker 将优雅排空退出。")
+		case "rekey": //把遗留(旧格式)敏感字段升级为当前数据密钥(DEK)的新格式，供手动补跑迁移
+			if err := wafsec.InitDataKey(utils.GetCurrentDir(), global.GCONFIG_DATA_KEY_FILE); err != nil {
+				fmt.Println("数据密钥初始化失败:", err)
+				os.Exit(1)
+			}
+			if _, err := wafdb.InitCoreDb(""); err != nil {
+				fmt.Println("核心数据库初始化失败:", err)
+				os.Exit(1)
+			}
+			n := wafdb.RekeyDataKey(global.GWAF_LOCAL_DB)
+			fmt.Printf("已把 %d 行遗留敏感字段升级为当前数据密钥格式。\n", n)
+			fmt.Println("注意：本命令不做密钥轮换；请勿在替换 data_key 文件后运行它。")
+		case "rekey-legacy": //把落库敏感字段重写回旧通讯密钥格式(降级到旧版二进制前执行)
+			if err := wafsec.InitDataKey(utils.GetCurrentDir(), global.GCONFIG_DATA_KEY_FILE); err != nil {
+				fmt.Println("数据密钥初始化失败:", err)
+				os.Exit(1)
+			}
+			if _, err := wafdb.InitCoreDb(""); err != nil {
+				fmt.Println("核心数据库初始化失败:", err)
+				os.Exit(1)
+			}
+			n := wafdb.RekeyToLegacy(global.GWAF_LOCAL_DB)
+			fmt.Printf("已把 %d 行敏感字段重写回旧格式，现在可以安全降级到旧版本。\n", n)
 		case "resetpwd": //重制密码
 			wafdb.InitCoreDb("")
 			wafdb.ResetAdminPwd()

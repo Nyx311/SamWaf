@@ -16,12 +16,25 @@ import (
 	"SamWaf/wafnotify/webhook"
 	"SamWaf/wafnotify/wechatwork"
 	"errors"
+	"strings"
 	"time"
 )
 
 type WafNotifyChannelService struct{}
 
 var WafNotifyChannelServiceApp = new(WafNotifyChannelService)
+
+// MaskNotifyChannelSecret 列表/详情接口对渠道的 Secret/AccessToken 抹空、只回“是否已配置”。
+// 只处理页面回显，不改库内数据；发送通知走 GetAllChannels 等内部读取，拿到的是真实值。
+func MaskNotifyChannelSecret(bean *model.NotifyChannel) {
+	if bean == nil {
+		return
+	}
+	bean.HasSecret = strings.TrimSpace(bean.Secret) != ""
+	bean.HasAccessToken = strings.TrimSpace(bean.AccessToken) != ""
+	bean.Secret = ""
+	bean.AccessToken = ""
+}
 
 // AddApi 添加通知渠道
 func (receiver *WafNotifyChannelService) AddApi(req request.WafNotifyChannelAddReq) error {

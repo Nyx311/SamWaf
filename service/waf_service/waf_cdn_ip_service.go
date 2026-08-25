@@ -421,12 +421,13 @@ func (r *WafCDNIPService) providerInUse(code string) bool {
 	return cnt > 0
 }
 
-// encCred/decCred 凭证 AES 加解密(复用通讯密钥；空值原样返回)
+// encCred/decCred 凭证静态加解密(每实例 DEK；空值原样返回)。
+// 写入产出 swk1 新格式；读取兼容升级前的旧通讯密钥密文(无前缀)。
 func encCred(s string) string {
 	if strings.TrimSpace(s) == "" {
 		return ""
 	}
-	c, err := wafsec.AesEncrypt([]byte(s), global.GWAF_COMMUNICATION_KEY)
+	c, err := wafsec.DataEncrypt(s)
 	if err != nil {
 		zlog.Error("CDN 凭证加密失败", err.Error())
 		return ""
@@ -438,12 +439,12 @@ func decCred(c string) string {
 	if strings.TrimSpace(c) == "" {
 		return ""
 	}
-	b, err := wafsec.AesDecrypt(c, global.GWAF_COMMUNICATION_KEY)
+	b, err := wafsec.DataDecrypt(c, global.GWAF_COMMUNICATION_KEY)
 	if err != nil {
 		zlog.Error("CDN 凭证解密失败", err.Error())
 		return ""
 	}
-	return string(b)
+	return b
 }
 
 // parseFastlyJSON 解析 Fastly public-ip-list：{"addresses":[...],"ipv6_addresses":[...]}
