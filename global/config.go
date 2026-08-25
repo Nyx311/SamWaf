@@ -12,6 +12,8 @@ var (
 	GCONFIG_MANAGE_CDN_PROVIDER         string = ""                  //管理端引用的CDN厂商码（管理端也挂CDN时）；设置后GetManageClientIP会额外信任该厂商中心库最新回源段，自动跟随更新
 	GCONFIG_SSL_EXPORT_ALLOWED_DIRS     string = ""                  //SSL证书导出允许的额外目录（绝对路径，逗号分隔）；只从config.yml读、不进DB/API。内置默认data/ssl_export恒允许，其余目录须运营方在此声明，攻击者/OpenAPI Key改不了
 	GCONFIG_DATA_KEY_FILE               string = ""                  //每实例静态数据加密密钥(DEK)文件的自管路径；只从config.yml读、不进DB/API。留空=默认data/.keys/data_key(首启自动生成,0600)
+	GCONFIG_COMM_KEY_FILE               string = ""                  //每实例传输密钥(X25519)文件的自管路径；只从config.yml读、不进DB/API。留空=默认data/.keys/comm_key(首启自动生成,0600)
+	GCONFIG_COMM_LEGACY_KEY             bool   = true                //是否保留 legacy 传输通道(旧客户端用内置密钥的CBC报文)。默认开，任何版本不自动翻转；确认无旧独立前端/旧App后可手动关
 	GCONFIG_BATCH_IMPORT_ALLOWED_DIRS   string = ""                  //批量任务本地来源允许的额外目录（绝对路径，逗号分隔）；只从config.yml读、不进DB/API。内置默认data/import恒允许，留空=只允许该默认目录
 	GCONFIG_OUTBOUND_ALLOWED_HOSTS      string = ""                  //用户可配的对外拉取地址允许清单（主机名/IP/CIDR，逗号分隔）；只从config.yml读、不进DB/API。留空=只允许公网目标；内网镜像源须运营方在此带外声明
 	GCONFIG_RECORD_AUTO_LOAD_SSL        int64  = 1                   //是否每天凌晨3点自动加载ssl证书

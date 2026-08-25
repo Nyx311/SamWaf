@@ -52,21 +52,7 @@ func Auth() gin.HandlerFunc {
 		}
 
 		// 获取请求头中 token，实际是一个完整被签名过的 token；a complete, signed token
-		tokenStr := ""
-		loginType := c.GetHeader("X-Login-Type")
-
-		if c.Request.RequestURI == "/api/v1/ws" {
-			tokenStr = c.GetHeader("Sec-WebSocket-Protocol")
-		} else if strings.HasPrefix(c.Request.RequestURI, "/api/v1/waflog/attack/download") {
-			tokenStr = c.Query("X-Token")
-		} else {
-			// 根据登录类型获取不同的token头部
-			if loginType == "mobile" {
-				tokenStr = c.GetHeader("X-Mobile-Token")
-			} else {
-				tokenStr = c.GetHeader("X-Token")
-			}
-		}
+		tokenStr := extractTokenStr(c)
 		if tokenStr == "" {
 			zlog.Debug("无token")
 
@@ -192,7 +178,7 @@ func Auth() gin.HandlerFunc {
 				}
 
 				//检测是否强制2Fa绑定
-				if global.GCONFIG_RECORD_FORCE_BIND_2FA == 1 && c.Request.RequestURI != "/api/v1/ws" && c.Request.RequestURI != "/api/v1/logout" {
+				if global.GCONFIG_RECORD_FORCE_BIND_2FA == 1 && c.Request.URL.Path != "/api/v1/ws" && c.Request.URL.Path != "/api/v1/logout" {
 					otpBean := wafOtpService.GetDetailByUserNameApi(tokenInfo.LoginAccount)
 					if otpBean.UserName == "" {
 						//需要强制跳转2fa绑定界面
@@ -232,6 +218,29 @@ func bindFailCounterTTL() time.Duration {
 	return ttl
 }
 
+// extractTokenStr 按请求路径挑选令牌来源。
+//
+// 判定一律基于 URL.Path，**不能用 RequestURI**——后者带查询串，给这两条路由加任何
+// 查询参数（例如 WebSocket 的 ?keyid=）都会让相等判断失配，于是落到常规请求头分支：
+// WebSocket 握手带不了自定义头，令牌取空，连接被判鉴权失败，页面表现为收不到通知。
+//
+//   - /api/v1/ws                     令牌在 Sec-WebSocket-Protocol（浏览器 WS API 只能这样带）
+//   - /api/v1/waflog/attack/download 令牌在查询串（下载走 window.open，同样带不了头）
+//   - 其余                            常规请求头，移动端与 Web 各用各的
+func extractTokenStr(c *gin.Context) string {
+	reqPath := c.Request.URL.Path
+	if reqPath == "/api/v1/ws" {
+		return c.GetHeader("Sec-WebSocket-Protocol")
+	}
+	if strings.HasPrefix(reqPath, "/api/v1/waflog/attack/download") {
+		return c.Query("X-Token")
+	}
+	if c.GetHeader("X-Login-Type") == "mobile" {
+		return c.GetHeader("X-Mobile-Token")
+	}
+	return c.GetHeader("X-Token")
+}
+
 // isFingerprintExemptPath 判断当前请求是否豁免设备指纹比对。
 // WebSocket 握手、SSE(text/event-stream)、带查询串令牌的下载都由浏览器按各自的规则发头，
 // 与页面里 XHR 的 Accept-Encoding/Accept-Language 天然不同，参与比对只会误杀。
@@ -242,7 +251,7 @@ func isFingerprintExemptPath(c *gin.Context) bool {
 	if strings.Contains(strings.ToLower(c.GetHeader("Accept")), "text/event-stream") {
 		return true
 	}
-	uri := c.Request.RequestURI
+	uri := c.Request.URL.Path
 	if uri == "/api/v1/ws" || strings.HasPrefix(uri, "/api/v1/waflog/attack/download") {
 		return true
 	}

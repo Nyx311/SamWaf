@@ -397,9 +397,18 @@ type TokenUsage struct {
 	TotalTokens      int `json:"total_tokens"`
 }
 
-// buildDeltaPayload 组装一条加密后的 SSE 消息体
-func buildDeltaPayload(content string, role string) (string, error) {
-	encryptStr, _ := wafsec.AesEncrypt([]byte(content), global.GWAF_COMMUNICATION_KEY)
+// buildDeltaPayload 组装一条加密后的 SSE 消息体。
+// keyID 为本次请求声明的会话密钥标识：有效则走 v2（swt2），为空或已失效回落 legacy。
+func buildDeltaPayload(keyID string, content string, role string) (string, error) {
+	var encryptStr string
+	if keyID != "" {
+		if enc, encErr := wafsec.TransportEncrypt(keyID, []byte(content)); encErr == nil {
+			encryptStr = enc
+		}
+	}
+	if encryptStr == "" {
+		encryptStr, _ = wafsec.AesEncrypt([]byte(content), global.GWAF_COMMUNICATION_KEY)
+	}
 	msg := Delta{
 		Content: encryptStr,
 		Role:    &role,
@@ -412,17 +421,19 @@ func buildDeltaPayload(content string, role string) (string, error) {
 }
 
 // SendDeltaMessage 发送信息
-func SendDeltaMessage(messageChan chan<- string, content string, role ...string) {
+func SendDeltaMessage(messageChan chan<- string, keyID string, content string, role ...string) {
 	// 设置默认角色为 assistant
 	r := "assistant"
 	if len(role) > 0 {
 		r = role[0]
 	}
-	if payload, err := buildDeltaPayload(content, r); err == nil {
+	if payload, err := buildDeltaPayload(keyID, content, r); err == nil {
 		messageChan <- payload
 	}
 }
 func (w *WafGPTApi) ChatApi(c *gin.Context) {
+	// 本次请求声明的会话密钥标识，贯穿整条 SSE 流
+	keyID := c.Request.Header.Get(response.HeaderKeyID)
 
 	var req request.WafGptSendReq
 	err := c.ShouldBindJSON(&req)
@@ -431,7 +442,7 @@ func (w *WafGPTApi) ChatApi(c *gin.Context) {
 		// 注意 StreamMiddleware 已经把 Content-Type 定成 text/event-stream 了，
 		// 这时候再 c.JSON 前端也当流读，所以错误也顺着 SSE 回，气泡里能直接看到。
 		zlog.Error("GPT对话请求解析失败:" + err.Error())
-		if payload, buildErr := buildDeltaPayload("对话请求解析失败："+err.Error(), "assistant"); buildErr == nil {
+		if payload, buildErr := buildDeltaPayload(keyID, "对话请求解析失败："+err.Error(), "assistant"); buildErr == nil {
 			c.SSEvent("message", payload)
 		}
 		return
@@ -448,7 +459,7 @@ func (w *WafGPTApi) ChatApi(c *gin.Context) {
 
 			// 未配置密钥时不去请求空地址，直接回一条可读提示，前端也会在打开助手时先检测并引导配置
 			if !IsGPTConfigured() {
-				SendDeltaMessage(messageChan, "尚未配置AI密钥，请点击【AI 参数设置】填写接口地址/模型/密钥后再使用。", "assistant")
+				SendDeltaMessage(messageChan, keyID, "尚未配置AI密钥，请点击【AI 参数设置】填写接口地址/模型/密钥后再使用。", "assistant")
 				stopChan <- true
 				return
 			}
@@ -516,7 +527,7 @@ func (w *WafGPTApi) ChatApi(c *gin.Context) {
 			client := &http.Client{}
 			resp, err := client.Do(req)
 			if err != nil {
-				SendDeltaMessage(messageChan, fmt.Sprintf("访问报错%v", err.Error()), "assistant")
+				SendDeltaMessage(messageChan, keyID, fmt.Sprintf("访问报错%v", err.Error()), "assistant")
 				stopChan <- true
 				return
 			}
@@ -548,7 +559,7 @@ func (w *WafGPTApi) ChatApi(c *gin.Context) {
 						// 判断残留数据中是否有错误信息
 						lineStr := strings.TrimSpace(string(line))
 						if strings.Contains(lineStr, `"error":`) {
-							SendDeltaMessage(messageChan, fmt.Sprintf("Error: %s", lineStr), "assistant")
+							SendDeltaMessage(messageChan, keyID, fmt.Sprintf("Error: %s", lineStr), "assistant")
 							stopChan <- true
 							return
 						}
@@ -563,7 +574,7 @@ func (w *WafGPTApi) ChatApi(c *gin.Context) {
 
 						// 处理流结束标记
 						if content == "[DONE]" {
-							SendDeltaMessage(messageChan, "[DONE]", "assistant")
+							SendDeltaMessage(messageChan, keyID, "[DONE]", "assistant")
 							stopChan <- true
 							return
 						}
@@ -578,7 +589,7 @@ func (w *WafGPTApi) ChatApi(c *gin.Context) {
 						for _, choice := range response.Choices {
 							// 发送内容增量
 							if choice.Delta.Content != "" {
-								SendDeltaMessage(messageChan, choice.Delta.Content, "assistant")
+								SendDeltaMessage(messageChan, keyID, choice.Delta.Content, "assistant")
 							}
 
 							// 处理停止条件
