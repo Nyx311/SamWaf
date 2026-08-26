@@ -130,14 +130,23 @@ func (w *WafVpConfigApi) GetLocalCertStatusApi(c *gin.Context) {
 		caPEM = string(raw)
 	}
 
+	// 证书能不能真的把 HTTPS 起起来。前端据此在重启前就把问题摆出来，
+	// 而不是等重启完打不开才发现——那时候只能上服务器改配置文件
+	certProblem := ""
+	if err := localca.CheckServerCert(paths); err != nil {
+		certProblem = err.Error()
+	}
+
 	response.OkWithDetailed(gin.H{
 		"has_ca": localca.CASummary(paths) != nil,
 		"ca":     localca.CASummary(paths),
 		"ca_pem": caPEM,
 		// 当前管理端证书是不是本地 CA 签的：手工上传与 ACME 绑定的证书不该被这条路径接管
-		"is_local": localca.IsIssuedByLocalCA(paths),
-		"cert":     current,
-		"sans":     localca.SANsOf(current),
+		"is_local":     localca.IsIssuedByLocalCA(paths),
+		"cert":         current,
+		"sans":         localca.SANsOf(current),
+		"cert_usable":  certProblem == "",
+		"cert_problem": certProblem,
 	}, "获取本地证书状态成功", c)
 }
 

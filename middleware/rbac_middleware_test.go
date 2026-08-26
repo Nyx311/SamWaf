@@ -59,3 +59,41 @@ func TestRequireRole(t *testing.T) {
 		})
 	}
 }
+
+// 管理端本地证书接口（generateLocalCert / rotateLocalCa / clearLocalCert）的权限矩阵。
+//
+// 这几个接口都会覆盖或删除管理端证书文件，破坏面与 uploadSslCert / restartManager 同级，
+// 因此挂 RequireRole(ROLE_SYSTEM_ADMIN)。这里把"谁能调、谁不能调"钉死，
+// 防止后来被挪到不带 RequireRole 的共享组里。
+func TestLocalCertApiRoleMatrix(t *testing.T) {
+	cases := []struct {
+		name        string
+		role        string
+		openapi     bool
+		wantReached bool
+	}{
+		{"超级管理员可调", enums.ROLE_SUPER_ADMIN, false, true},
+		{"系统管理员可调", enums.ROLE_SYSTEM_ADMIN, false, true},
+		{"安全管理员不可调", enums.ROLE_SECURITY_ADMIN, false, false},
+		{"审计管理员不可调", enums.ROLE_AUDIT_ADMIN, false, false},
+		// 现状如实记录：RequireRole 对 OpenAPI Key 放行（见其实现内的说明），
+		// 因此任意有效 Key 都能调这些破坏性接口，不受账号角色约束。
+		// 这条不是断言"应该如此"，而是锁住当前事实——真要收紧时这条用例会立刻变红，
+		// 提醒同步修改本注释与相关文档。
+		{"OpenAPI Key 当前被放行", "", true, true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := setupRBACRouter(tc.role, tc.openapi, enums.ROLE_SYSTEM_ADMIN)
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/t", nil))
+
+			reached := w.Body.String() == "reached"
+			if reached != tc.wantReached {
+				t.Fatalf("role=%q openapi=%v 期望放行=%v，实际=%v（状态码 %d，响应 %s）",
+					tc.role, tc.openapi, tc.wantReached, reached, w.Code, w.Body.String())
+			}
+		})
+	}
+}

@@ -1,12 +1,14 @@
 package api
 
 import (
+	"SamWaf/common/zlog"
 	"SamWaf/global"
 	"SamWaf/model/common/response"
 	"SamWaf/model/request"
 	response2 "SamWaf/model/response"
 	"SamWaf/service/waf_service"
 	"SamWaf/utils"
+	"SamWaf/utils/localca"
 	"SamWaf/wafconfig"
 	"SamWaf/wafenginecore/clientip"
 	"crypto/tls"
@@ -651,6 +653,31 @@ func (w *WafVpConfigApi) UpdateDomainWhitelistApi(c *gin.Context) {
 // @Security     ApiKeyAuth
 // @Router       /vipconfig/restartManager [post]
 func (w *WafVpConfigApi) RestartManagerApi(c *gin.Context) {
+	// 重启前先确认这次重启不会把人关在门外。
+	//
+	// 启用了 SSL 却拿着一张不可用的证书重启：HTTPS 起不来；若同时开着"仅允许HTTPS"，
+	// 管理端只会回 503，此后只能上服务器改 conf/config.yml 才能进来。重启是这个链路上
+	// 唯一还能拦住的地方——保存开关时证书可能还没配，等重启完就来不及了。
+	//
+	// 不做成死拦：Force 留一个显式的出口，供确实要重启（比如正准备去改配置文件）的场景。
+	var req struct {
+		Force bool `json:"force"`
+	}
+	_ = c.ShouldBindJSON(&req) // 老前端不带请求体，绑定失败按 Force=false 处理
+
+	if global.GWAF_SSL_ENABLE && !req.Force {
+		if err := localca.CheckServerCert(localca.DefaultPaths(utils.GetCurrentDir())); err != nil {
+			msg := "已启用SSL，但管理端证书当前不可用：" + err.Error() + "。现在重启会导致管理端以HTTPS启动失败"
+			if global.GWAF_SSL_FORCE_HTTPS {
+				msg += "，且「仅允许HTTPS」已开启，届时管理端只会返回503"
+			}
+			msg += "。请先配置好管理端证书再重启。"
+			zlog.Error("拒绝重启管理端", msg)
+			response.FailWithMessage(msg, c)
+			return
+		}
+	}
+
 	response.OkWithMessage("管理端将在1秒后重启，请稍候5-10秒后重新访问", c)
 
 	// 延迟后重启，给时间返回响应
