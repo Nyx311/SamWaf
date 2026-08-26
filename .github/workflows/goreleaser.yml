@@ -22,9 +22,15 @@ jobs:
         with:
           fetch-depth: 0
       - name: Set up Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v5
         with:
-          go-version: '1.21.4'
+          # 与 Win7 专用版同一版本，且不低于 go.mod 里的 toolchain，避免构建时再下载一次工具链
+          go-version: '1.25.11'
+          check-latest: false
+          # 关掉 Go 缓存：tag 触发的 run 拿不到别的 ref 存下的缓存，每次必然未命中，
+          # 结果是"只写不读"——白花 30~140s 打包上传，还把仓库 10GB 缓存额度顶满导致互相驱逐。
+          # 等哪天在 main 上加了缓存预热 job（默认分支的缓存所有 ref 都能读），再把这里改回 true。
+          cache: false
       
       # 说明：tar/gzip/wget/curl 是 ubuntu-latest 镜像自带的，原来的 "Install basic tools"
       # 步骤只是白跑一次 apt，却是 2026-08-19 卡住 72 分钟的那一步，已删除。
@@ -146,9 +152,15 @@ jobs:
           fetch-depth: 0
       
       - name: Set up Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v5
         with:
-          go-version: '1.21.4'
+          # 与 Win7 专用版同一版本，且不低于 go.mod 里的 toolchain，避免构建时再下载一次工具链
+          go-version: '1.25.11'
+          check-latest: false
+          # 关掉 Go 缓存：tag 触发的 run 拿不到别的 ref 存下的缓存，每次必然未命中，
+          # 结果是"只写不读"——白花 30~140s 打包上传，还把仓库 10GB 缓存额度顶满导致互相驱逐。
+          # 等哪天在 main 上加了缓存预热 job（默认分支的缓存所有 ref 都能读），再把这里改回 true。
+          cache: false
       
       - name: Download SamWafWeb
         run: |
@@ -251,6 +263,10 @@ jobs:
           # 锁定小版本
           go-version: '1.25.11'
           check-latest: false
+          # 关掉 Go 缓存：tag 触发的 run 拿不到别的 ref 存下的缓存，每次必然未命中，
+          # 结果是"只写不读"——白花 30~140s 打包上传，还把仓库 10GB 缓存额度顶满导致互相驱逐。
+          # 等哪天在 main 上加了缓存预热 job（默认分支的缓存所有 ref 都能读），再把这里改回 true。
+          cache: false
 
       # mingw 和 upx 合并成一次 apt（原来分两步 = 两次抢锁两次拉源，翻倍的卡死概率）
       - name: Install dependencies for Windows cross-compilation

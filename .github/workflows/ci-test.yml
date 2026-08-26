@@ -32,9 +32,11 @@ jobs:
           fetch-depth: 0
 
       - name: Set up Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v5
         with:
-          go-version: '1.21.4'
+          # 与 Win7 专用版同一版本，且不低于 go.mod 里的 toolchain，避免构建时再下载一次工具链
+          go-version: '1.25.11'
+          check-latest: false
 
       - name: Install dependencies
         timeout-minutes: 15
@@ -152,9 +154,11 @@ jobs:
           fetch-depth: 0
 
       - name: Set up Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v5
         with:
-          go-version: '1.21.4'
+          # 与 Win7 专用版同一版本，且不低于 go.mod 里的 toolchain，避免构建时再下载一次工具链
+          go-version: '1.25.11'
+          check-latest: false
 
       - name: Install dependencies for Windows cross-compilation
         timeout-minutes: 15
@@ -225,9 +229,9 @@ jobs:
   #       uses: actions/checkout@v4
 
   #     - name: Set up Go
-  #       uses: actions/setup-go@v4
+  #       uses: actions/setup-go@v5
   #       with:
-  #         go-version: '1.21.4'
+  #         go-version: '1.25.11'
 
   #     - name: Go mod verify
   #       run: go mod verify
