@@ -5,6 +5,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
@@ -324,6 +325,40 @@ func CurrentServerCert(p Paths) *CertSummary {
 		return nil
 	}
 	return summarize(cert)
+}
+
+// CheckServerCert 判断当前管理端证书能不能真的把 HTTPS 起起来。
+//
+// 检的是 tls 监听会踩的那几样：文件在不在、能不能解析、证书与私钥是不是一对、
+// 有效期是不是当前。不限定来源——手工上传的、证书夹绑定的、本地 CA 签的都走这里。
+//
+// 用在重启之前：启用了 SSL 却拿着一张不可用的证书重启，轻则 HTTPS 起不来，
+// 重则叠加"仅允许HTTPS"后管理端只回 503，人就被关在门外了。
+func CheckServerCert(p Paths) error {
+	certPEM, err := os.ReadFile(p.SrvCert)
+	if err != nil {
+		return fmt.Errorf("读取证书文件失败(%s): %v", filepath.Base(p.SrvCert), err)
+	}
+	keyPEM, err := os.ReadFile(p.SrvKey)
+	if err != nil {
+		return fmt.Errorf("读取私钥文件失败(%s): %v", filepath.Base(p.SrvKey), err)
+	}
+	// 这一步同时覆盖了"能否解析"和"证书与私钥是否配对"
+	if _, err = tls.X509KeyPair(certPEM, keyPEM); err != nil {
+		return fmt.Errorf("证书与私钥不可用: %v", err)
+	}
+	cert, err := parseCertPEM(certPEM)
+	if err != nil {
+		return fmt.Errorf("证书解析失败: %v", err)
+	}
+	now := time.Now()
+	if now.Before(cert.NotBefore) {
+		return fmt.Errorf("证书尚未生效（生效时间 %s），请检查服务器时间", cert.NotBefore.Format("2006-01-02 15:04:05"))
+	}
+	if now.After(cert.NotAfter) {
+		return fmt.Errorf("证书已于 %s 过期", cert.NotAfter.Format("2006-01-02 15:04:05"))
+	}
+	return nil
 }
 
 // SANsOf 取出证书里的全部访问名，续期时原样沿用

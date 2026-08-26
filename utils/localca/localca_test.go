@@ -1,10 +1,15 @@
 package localca
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"os"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -347,5 +352,95 @@ func TestClearLocalKeepsForeignServerCert(t *testing.T) {
 	}
 	if _, err := os.Stat(p.CACert); !os.IsNotExist(err) {
 		t.Fatal("本地 CA 没被删掉")
+	}
+}
+
+// CheckServerCert 是"重启会不会把人关在门外"的判定依据，几条失败路径都要认得出来
+func TestCheckServerCertDetectsUnusable(t *testing.T) {
+	dir := t.TempDir()
+	p := DefaultPaths(dir)
+
+	// 1) 什么都没有
+	if err := CheckServerCert(p); err == nil {
+		t.Fatal("证书文件不存在时应当报错")
+	}
+
+	// 2) 正常签发的证书应当通过
+	if _, err := IssueServerCert(p, []string{"localhost", "127.0.0.1"}, 0); err != nil {
+		t.Fatalf("签发失败: %v", err)
+	}
+	if err := CheckServerCert(p); err != nil {
+		t.Fatalf("刚签发的证书应当可用，却报: %v", err)
+	}
+
+	// 3) 私钥换成另一张证书的——最典型的"上传时贴错文件"
+	other := DefaultPaths(t.TempDir())
+	if _, err := IssueServerCert(other, []string{"localhost"}, 0); err != nil {
+		t.Fatalf("签发对照证书失败: %v", err)
+	}
+	otherKey, err := os.ReadFile(other.SrvKey)
+	if err != nil {
+		t.Fatalf("读取对照私钥失败: %v", err)
+	}
+	if err := os.WriteFile(p.SrvKey, otherKey, 0600); err != nil {
+		t.Fatalf("写入失败: %v", err)
+	}
+	if err := CheckServerCert(p); err == nil {
+		t.Fatal("证书与私钥不配对时应当报错")
+	}
+
+	// 4) 证书内容损坏
+	if err := os.WriteFile(p.SrvCert, []byte("not a certificate"), 0644); err != nil {
+		t.Fatalf("写入失败: %v", err)
+	}
+	if err := CheckServerCert(p); err == nil {
+		t.Fatal("证书损坏时应当报错")
+	}
+}
+
+// 过期证书必须被判为不可用：它是"管理端重启后打不开"最常见的原因
+func TestCheckServerCertRejectsExpired(t *testing.T) {
+	dir := t.TempDir()
+	p := DefaultPaths(dir)
+
+	caCert, caKey, err := EnsureCA(p)
+	if err != nil {
+		t.Fatalf("建CA失败: %v", err)
+	}
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("生成密钥失败: %v", err)
+	}
+	serial, err := randomSerial()
+	if err != nil {
+		t.Fatalf("生成序列号失败: %v", err)
+	}
+	now := time.Now()
+	tpl := &x509.Certificate{
+		SerialNumber: serial,
+		Subject:      pkix.Name{CommonName: "localhost"},
+		NotBefore:    now.AddDate(0, 0, -10),
+		NotAfter:     now.AddDate(0, 0, -1), // 昨天就过期了
+		DNSNames:     []string{"localhost"},
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tpl, caCert, &key.PublicKey, caKey)
+	if err != nil {
+		t.Fatalf("签发失败: %v", err)
+	}
+	if err := writeFileAtomic(p.SrvCert, pemBlock("CERTIFICATE", der), 0644); err != nil {
+		t.Fatalf("写证书失败: %v", err)
+	}
+	if err := writeKeyFile(p.SrvKey, key); err != nil {
+		t.Fatalf("写私钥失败: %v", err)
+	}
+
+	err = CheckServerCert(p)
+	if err == nil {
+		t.Fatal("已过期的证书应当被判为不可用")
+	}
+	if !strings.Contains(err.Error(), "过期") {
+		t.Fatalf("错误信息要说清是过期，实际: %v", err)
 	}
 }
