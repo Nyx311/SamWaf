@@ -384,6 +384,7 @@ func RunTaskInitMigrations(db *gorm.DB) error {
 					enums.TASK_SSL_PATH_LOAD,
 					enums.TASK_BATCH,
 					enums.TASK_SSL_EXPIRE_CHECK,
+					enums.TASK_MANAGER_CERT_CHECK,
 					enums.TASK_NOTICE,
 					enums.TASK_CLEAR_WEBCACHE,
 				}
@@ -621,6 +622,45 @@ func RunTaskInitMigrations(db *gorm.DB) error {
 			Rollback: func(tx *gorm.DB) error {
 				zlog.Info("回滚 202608070003: 删除主机防爆破解封任务")
 				return tx.Where("task_method = ?", enums.TASK_HOSTGUARD_CLEAN_EXPIRED).Delete(&model.Task{}).Error
+			},
+		},
+		// 管理端证书检测：本地CA签的自动续期，绑定证书夹的交给既有ACME链路，手工上传的按阈值提醒。
+		// 单独一个任务是因为既有的 SSL 到期检测只覆盖被防护站点的域名列表，管理端自己的证书不在其中。
+		{
+			ID: "202608250001_add_manager_cert_task",
+			Migrate: func(tx *gorm.DB) error {
+				zlog.Info("迁移 202608250001: 创建管理端证书检测任务")
+
+				var count int64
+				tx.Model(&model.Task{}).Where("task_method = ?", enums.TASK_MANAGER_CERT_CHECK).Count(&count)
+				if count > 0 {
+					zlog.Info("管理端证书检测任务已存在，跳过", "task_method", enums.TASK_MANAGER_CERT_CHECK)
+					return nil
+				}
+
+				task := model.Task{
+					BaseOrm: baseorm.BaseOrm{
+						Id:          uuid.GenUUID(),
+						USER_CODE:   global.GWAF_USER_CODE,
+						Tenant_ID:   global.GWAF_TENANT_ID,
+						CREATE_TIME: customtype.JsonTime(time.Now()),
+						UPDATE_TIME: customtype.JsonTime(time.Now()),
+					},
+					TaskName:   "每天05:30检测管理端证书（本地证书自动续期）",
+					TaskUnit:   enums.TASK_DAY,
+					TaskValue:  1,
+					TaskAt:     "05:30",
+					TaskMethod: enums.TASK_MANAGER_CERT_CHECK,
+				}
+				if err := tx.Create(&task).Error; err != nil {
+					return fmt.Errorf("创建管理端证书检测任务失败: %w", err)
+				}
+				zlog.Info("管理端证书检测任务创建成功")
+				return nil
+			},
+			Rollback: func(tx *gorm.DB) error {
+				zlog.Info("回滚 202608250001: 删除管理端证书检测任务")
+				return tx.Where("task_method = ?", enums.TASK_MANAGER_CERT_CHECK).Delete(&model.Task{}).Error
 			},
 		},
 	})

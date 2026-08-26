@@ -392,9 +392,13 @@ func (web *WafWebManager) StartLocalServer() error {
 		},
 	}
 
-	// 开启了仅HTTPS但未启用SSL/无证书时，提示该开关不会生效（不强制，避免锁死）
+	// 「仅允许HTTPS」开着却没启用 SSL 属矛盾配置：既然根本不打算提供 HTTPS，
+	// 这个开关就无从谈起。这里只告警不拒绝——拒绝会把"曾经开过 force_https、后来关掉 SSL"
+	// 的存量部署直接挡在门外，而这种组合多半是遗留值而非真实意图。
+	// 真正需要 fail-closed 的是"打算走 HTTPS 却拿不到证书"，那条在 serveHTTPFallback 里处理。
 	if global.GWAF_SSL_FORCE_HTTPS && !global.GWAF_SSL_ENABLE {
-		zlog.Warn(web.LogName, "已开启「仅允许HTTPS」但未启用SSL，将照常以HTTP提供服务（开关不生效）")
+		zlog.Warn(web.LogName, "已开启「仅允许HTTPS」但未启用SSL，该开关不生效，仍以HTTP提供服务；"+
+			"如需强制HTTPS请先启用SSL并配置证书")
 	}
 	err := waf_service.WafTokenInfoServiceApp.ReloadAllValidTokensToCache()
 	if err != nil {
@@ -416,40 +420,19 @@ func (web *WafWebManager) StartLocalServer() error {
 		// 检查证书文件是否存在
 		if _, err := os.Stat(certPath); err != nil {
 			zlog.Warn(web.LogName, "SSL证书文件不存在，降级使用 HTTP: ", certPath)
-			// 降级到 HTTP
-			zlog.Info(web.LogName, "启动 HTTP 管理端（降级模式）, port:", global.GWAF_LOCAL_SERVER_PORT)
-			if err := web.listenAndServeHTTPReuse(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				errMsg := fmt.Sprintf("启动管理界面失败: %s", err.Error())
-				zlog.Error(web.LogName, errMsg)
-				return err
-			}
-			return nil
+			return web.serveHTTPFallback("管理端证书文件不存在")
 		}
 
 		if _, err := os.Stat(keyPath); err != nil {
 			zlog.Warn(web.LogName, "SSL私钥文件不存在，降级使用 HTTP: ", keyPath)
-			// 降级到 HTTP
-			zlog.Info(web.LogName, "启动 HTTP 管理端（降级模式）, port:", global.GWAF_LOCAL_SERVER_PORT)
-			if err := web.listenAndServeHTTPReuse(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				errMsg := fmt.Sprintf("启动管理界面失败: %s", err.Error())
-				zlog.Error(web.LogName, errMsg)
-				return err
-			}
-			return nil
+			return web.serveHTTPFallback("管理端私钥文件不存在")
 		}
 
 		// 尝试加载证书
 		cert, err := tls.LoadX509KeyPair(certPath, keyPath)
 		if err != nil {
 			zlog.Warn(web.LogName, "SSL证书加载失败，降级使用 HTTP: ", err.Error())
-			// 降级到 HTTP
-			zlog.Info(web.LogName, "启动 HTTP 管理端（降级模式）, port:", global.GWAF_LOCAL_SERVER_PORT)
-			if err := web.listenAndServeHTTPReuse(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				errMsg := fmt.Sprintf("启动管理界面失败: %s", err.Error())
-				zlog.Error(web.LogName, errMsg)
-				return err
-			}
-			return nil
+			return web.serveHTTPFallback("管理端证书加载失败：" + err.Error())
 		}
 
 		// 使用混合监听器，同时支持 HTTPS 和 HTTP（降级方案）
@@ -469,6 +452,68 @@ func (web *WafWebManager) StartLocalServer() error {
 		}
 	}
 
+	return nil
+}
+
+// httpsRequiredNotice 是 fail-closed 时回给访问者的全部内容。
+// 单独成函数是为了能被单测直接断言——这段文案是运维在管理端打不开时唯一的线索，
+// 少一条恢复路径就意味着有人得去翻源码。
+func httpsRequiredNotice(reason string) string {
+	return "管理端已开启「仅允许HTTPS」，但当前无法提供 HTTPS 服务。\n" +
+		"原因：" + reason + "\n\n" +
+		"为避免管理端以明文提供服务，已拒绝全部 HTTP 请求。\n" +
+		"恢复方式（任选其一，改完需重启 SamWaf）：\n" +
+		"  1. 修复管理端证书（data/ssl/manager/domain.crt 与 domain.key）\n" +
+		"  2. conf/config.yml 设 security.ssl_force_https: false —— 保留 HTTPS，同时允许 HTTP 访问\n" +
+		"  3. conf/config.yml 设 security.ssl_enable: false —— 关闭 HTTPS，回到纯 HTTP\n"
+}
+
+// httpsRequiredHandler 占住端口但不挂管理端路由：任何请求都只回 503 与修复指引。
+func httpsRequiredHandler(reason string) http.Handler {
+	notice := httpsRequiredNotice(reason)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(notice))
+	})
+}
+
+// serveHTTPFallback 处理"启用了 SSL 但拿不到可用证书"的情形。
+//
+// 分两种走向，取决于「仅允许HTTPS」：
+//   - 关闭（默认）：降级为纯 HTTP，保证管理端还能进——可用性优先，与历史行为一致。
+//   - 开启：**拒绝以明文提供管理端服务**。运维显式声明过"只走 HTTPS"，而证书过期/损坏
+//     恰恰是最常见的失败；此时若静默降级，管理端会在运维毫不知情的情况下以明文接受登录，
+//     口令明文过网。这里改为 fail-closed。
+//
+// fail-closed 不等于把端口一关了事——那样运维只看到"连接被拒绝"，无从判断原因。
+// 端口照常监听，但**不挂管理端路由**，任何请求只回 503 与修复指引：既不可能泄露任何东西，
+// 也不会让人误以为进程挂了。
+func (web *WafWebManager) serveHTTPFallback(reason string) error {
+	if !global.GWAF_SSL_FORCE_HTTPS {
+		zlog.Info(web.LogName, "启动 HTTP 管理端（降级模式）, port:", global.GWAF_LOCAL_SERVER_PORT)
+		if err := web.listenAndServeHTTPReuse(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errMsg := fmt.Sprintf("启动管理界面失败: %s", err.Error())
+			zlog.Error(web.LogName, errMsg)
+			return err
+		}
+		return nil
+	}
+
+	zlog.Error(web.LogName, "「仅允许HTTPS」已开启但无法提供 HTTPS（"+reason+"），已拒绝明文服务；"+
+		"请修复证书，或在 conf/config.yml 关闭 security.ssl_force_https / security.ssl_enable 后重启")
+
+	// 换掉 Handler：管理端路由不再挂载，明文端口上不会出现登录框或任何接口。
+	// 复用同一个 HttpServer 是为了让既有的优雅关闭/重启链路照常生效。
+	web.HttpServer.Handler = httpsRequiredHandler(reason)
+
+	zlog.Info(web.LogName, "启动 HTTP 管理端（仅回 503 提示，不提供管理功能）, port:", global.GWAF_LOCAL_SERVER_PORT)
+	if err := web.listenAndServeHTTPReuse(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		errMsg := fmt.Sprintf("启动管理界面失败: %s", err.Error())
+		zlog.Error(web.LogName, errMsg)
+		return err
+	}
 	return nil
 }
 

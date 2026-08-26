@@ -25,6 +25,7 @@ func (receiver *WafVpConfigRouter) InitWafVpConfigRouter(group *gin.RouterGroup)
 	router.GET("/api/v1/vipconfig/getDomainWhitelist", wafVpConfigApi.GetDomainWhitelistApi)
 	router.GET("/api/v1/vipconfig/getSslForceHttps", wafVpConfigApi.GetSslForceHttpsApi)
 	router.GET("/api/v1/vipconfig/getSslBindCert", wafVpConfigApi.GetSslBindCertApi)
+	router.GET("/api/v1/vipconfig/localCertStatus", wafVpConfigApi.GetLocalCertStatusApi)
 
 	// N7：写接口仅系统管理员(或超管)可操作。这些是系统级访问控制/证书/重启等高危配置，
 	// 尤其含 P0-3 的 IP 白名单与可信代理网段——低权限角色(审计/安全)不得篡改。
@@ -38,6 +39,11 @@ func (receiver *WafVpConfigRouter) InitWafVpConfigRouter(group *gin.RouterGroup)
 	writeRouter.POST("/api/v1/vipconfig/updateCorsAllowOrigins", wafVpConfigApi.UpdateCorsAllowOriginsApi)
 	writeRouter.POST("/api/v1/vipconfig/updateSslEnable", wafVpConfigApi.UpdateSslEnableApi)
 	writeRouter.POST("/api/v1/vipconfig/uploadSslCert", wafVpConfigApi.UploadSslCertApi)
+	// 本地证书：与上传证书同权限——落地效果一样(都会覆盖管理端证书文件)
+	writeRouter.POST("/api/v1/vipconfig/generateLocalCert", wafVpConfigApi.GenerateLocalCertApi)
+	// 重建CA与清除属破坏性操作，权限同上（都会覆盖/删除管理端证书文件）
+	writeRouter.POST("/api/v1/vipconfig/rotateLocalCa", wafVpConfigApi.RotateLocalCaApi)
+	writeRouter.POST("/api/v1/vipconfig/clearLocalCert", wafVpConfigApi.ClearLocalCertApi)
 	writeRouter.POST("/api/v1/vipconfig/restartManager", wafVpConfigApi.RestartManagerApi)
 	writeRouter.POST("/api/v1/vipconfig/updateSecurityEntry", wafVpConfigApi.UpdateSecurityEntryApi)
 	writeRouter.POST("/api/v1/vipconfig/updateNoticeTitle", wafVpConfigApi.UpdateNoticeTitleApi)
