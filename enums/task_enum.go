@@ -15,6 +15,7 @@ const (
 	TASK_SSL_PATH_LOAD                = "task_ssl_path_load"                //SSL证书可自动加载路径下的证书
 	TASK_BATCH                        = "task_batch"                        //批量任务
 	TASK_SSL_EXPIRE_CHECK             = "task_ssl_expire_check"             //SSL证书到期检测
+	TASK_MANAGER_CERT_CHECK           = "task_manager_cert_check"           //管理端证书到期检测与本地证书自动续期
 	TASK_NOTICE                       = "task_notice"                       //通知信息
 	TASK_HEALTH                       = "task_health"                       //健康检测
 	TASK_CLEAR_CC_WINDOWS             = "task_clear_cc_windows"             //清除ccWindows记录

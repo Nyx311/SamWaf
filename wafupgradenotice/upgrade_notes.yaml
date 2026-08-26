@@ -176,3 +176,33 @@ notes:
     en:
       title: Console traffic now uses a key negotiated per session
       detail: Messages between the console page and the backend are now encrypted with a key negotiated per instance and per browser tab. A comm_key file is generated under data/.keys on first start and no configuration is required. Separately deployed older frontends and the mobile app keep using the previous channel and are unaffected. Note that this key protects the messages themselves and prevents offline recovery from captured traffic, but it is not a replacement for HTTPS - protecting against an active man-in-the-middle still requires enabling TLS on the console. Advanced - security.comm_key_file in conf/config.yml points to a self-managed key file, and once no older frontend or app connects any more you can set security.comm_legacy_key to false to close the previous channel (it stays enabled by default and is never turned off automatically).
+
+  - id: v1_3_24_manager_local_cert
+    version: v1.3.24
+    kind: notice
+    level: normal
+    page: ''
+    doc: https://doc.samwaf.com/guide/VpConfig.html
+    apply:
+      type: none
+    zh:
+      title: 管理端可一键生成本地证书并自动续期
+      detail: 「系统配置 - 管理端 SSL」新增「本地证书」：没有域名（或不想走证书申请）时，可由本机生成长效 CA 并给管理端签发证书，把根证书导入日常访问的电脑一次即可长期使用。填写访问地址时请把实际用到的域名与 IP 全部列出，浏览器只认列表里的地址。证书剩余不足 30 天会自动重签，CA 保持不变，已导入根证书的电脑无需再次导入。有域名的部署更推荐用 DNS 验证申请证书后绑定证书夹，同样不需要开放 80 端口。另外，以 HTTP 访问管理端时页面顶部会出现提示条（本机 localhost/127.0.0.1 访问不提示），可本次收起，下次登录重新出现。
+    en:
+      title: The console can now generate a local certificate and renew it automatically
+      detail: System Settings - Management SSL gains a Local certificate section. When you have no domain (or prefer not to use ACME), SamWaf can generate a long-lived CA on the machine and sign a console certificate with it; importing the root CA once on the computers you browse from is enough for the long run. List every domain and IP you actually use when filling in the access addresses - browsers only accept the addresses in that list. The certificate is reissued automatically when fewer than 30 days remain, and the CA stays the same so computers that already imported it need no further action. Deployments that do have a domain are better served by requesting a certificate with DNS validation and binding the certificate folder, which also avoids opening port 80. In addition, accessing the console over plain HTTP now shows a banner at the top of the page (local access via localhost or 127.0.0.1 is exempt); it can be hidden for the current session and reappears at the next login.
+
+  - id: v1_3_24_force_https_fail_closed
+    version: v1.3.24
+    kind: notice
+    level: high
+    page: ''
+    doc: https://doc.samwaf.com/faq/#_3-4
+    apply:
+      type: none
+    zh:
+      title: 开启「仅允许HTTPS」后，证书不可用时将不再降级为HTTP
+      detail: 以往管理端证书缺失或加载失败时会自动降级成纯HTTP，即使「仅允许HTTPS」处于开启状态。自本版本起，开启该开关后遇到证书不可用将拒绝以明文提供管理端服务：端口仍在监听，但不挂载任何管理功能，访问只会得到一段说明如何恢复的503提示。这样做是因为证书过期或损坏是最常见的情况，而此时静默改用HTTP会让管理端在无人察觉时以明文接受登录。未开启该开关的部署行为不变，仍然自动降级。若升级后管理端打不开并看到该503提示，按提示三选一处理：修复证书；或在conf/config.yml把security.ssl_force_https改为false；或把security.ssl_enable改为false，改完重启即可。
+    en:
+      title: With Force HTTPS enabled, an unusable certificate no longer falls back to HTTP
+      detail: Previously the console fell back to plain HTTP whenever its certificate was missing or failed to load, even with Force HTTPS enabled. From this version on, that switch means the console refuses to be served in the clear - the port keeps listening but no console functionality is mounted, and every request returns a 503 notice explaining how to recover. The reason is that an expired or broken certificate is the most common failure, and silently switching to HTTP would let the console accept logins in the clear without anyone noticing. Deployments that do not enable the switch are unaffected and still fall back automatically. If the console does not open after upgrading and shows that 503 notice, follow one of the three options it lists - fix the certificate, set security.ssl_force_https to false in conf/config.yml, or set security.ssl_enable to false - then restart.
