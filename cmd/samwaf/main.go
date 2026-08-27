@@ -21,8 +21,10 @@ import (
 	"SamWaf/wafappengine"
 	"SamWaf/wafconfig"
 	"SamWaf/wafdb"
+	"SamWaf/wafdiag"
 	"SamWaf/wafenginecore"
 	"SamWaf/wafenginecore/wafcaptcha"
+	"SamWaf/wafhostguard"
 	"SamWaf/wafinit"
 	"SamWaf/wafipban"
 	"SamWaf/wafipc"
@@ -32,6 +34,7 @@ import (
 	"SamWaf/wafqueue"
 	"SamWaf/wafreg"
 	"SamWaf/wafsafeclear"
+	"SamWaf/wafsec"
 	"SamWaf/wafsnowflake"
 	"SamWaf/waftask"
 	"SamWaf/waftunnelengine"
@@ -39,7 +42,6 @@ import (
 	"embed"
 	"crypto/tls"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
@@ -66,8 +68,9 @@ import (
 //go:embed exedata/ip2region.xdb
 var Ip2regionBytes []byte // 当前目录，解析为[]byte类型
 
-//go:embed exedata/GeoLite2-Country.mmdb
-var Ipv6CountryBytes []byte // IPv6国家解析
+// GeoLite2-Country.mmdb 自 1.3.24-beta.6 起不再内嵌，
+// 把它编进发行的二进制等同于再分发。需要 GeoLite2 的用户可自行到 MaxMind 官网下载 mmdb
+// 放进 data/ 目录，程序会照常加载。IPv6 默认改用 ip2region（Apache-2.0，可自由分发）。
 
 //go:embed exedata/ldpconfig.yml
 var ldpConfig string //隐私防护ldp
@@ -89,6 +92,9 @@ var capjs embed.FS
 
 //go:embed exedata/httpauth
 var httpauth embed.FS
+
+//go:embed exedata/access
+var accessAssets embed.FS
 
 // wafSystenService 实现了 service.Service 接口
 type wafSystenService struct{}
@@ -154,136 +160,30 @@ func (m *wafSystenService) run() {
 	//初始化步骤[加载ip数据库]
 	// 创建 IP Location Manager
 	global.GIPLOCATION_MANAGER = iplocation.NewManager()
-	// 注册内置数据库，供 manager 在磁盘无文件时兜底加载
-	iplocation.SetBuiltinData(Ip2regionBytes, Ipv6CountryBytes)
+	// 注册内置数据库，供 manager 在磁盘无文件时兜底加载。
+	// GeoLite2 已去内嵌，这里只剩 IPv4 的 ip2region 一份兜底。
+	iplocation.SetBuiltinData(Ip2regionBytes, nil)
 
-	// 根据配置加载 IPv4 数据库：每种来源读各自的文件，磁盘无文件时回落到内置数据
-	if global.GCONFIG_IP_V4_SOURCE == "ip2region" {
-		ip2RegionFilePath := filepath.Join(utils.GetCurrentDir(), "data", "ip2region.xdb")
-		var ipv4Data []byte
-		ipv4FromBuiltin := false
-		if _, err := os.Stat(ip2RegionFilePath); os.IsNotExist(err) {
-			// 使用内置数据
-			ipv4Data = Ip2regionBytes
-			ipv4FromBuiltin = true
-			zlog.Info("Using embedded IPv4 ip2region database, size: ", len(ipv4Data))
-		} else {
-			// 读取外部文件
-			fileBytes, err := ioutil.ReadFile(ip2RegionFilePath)
-			if err != nil {
-				log.Fatalf("Failed to read IP database file ip2region.xdb: %v", err)
-			}
-			ipv4Data = fileBytes
-			zlog.Info("IPv4 database ip2region.xdb loaded from file, size: ", len(ipv4Data), ip2RegionFilePath)
-		}
-
-		err := global.GIPLOCATION_MANAGER.LoadV4Ip2Region(ipv4Data, iplocation.DBFormat(global.GCONFIG_IP_V4_FORMAT))
-		if err != nil {
-			log.Fatalf("Failed to load IPv4 ip2region database: %v", err)
-		}
-		global.GIPLOCATION_MANAGER.SetV4Builtin(ipv4FromBuiltin)
-		zlog.Info("IPv4 ip2region database loaded successfully")
-	} else if global.GCONFIG_IP_V4_SOURCE == "geolite2" {
-		// GeoLite2 读的是 mmdb，与 ip2region.xdb 是两种格式，不能混用同一份字节
-		ipv4GeoLitePath := filepath.Join(utils.GetCurrentDir(), "data", "GeoLite2-Country.mmdb")
-		var ipv4Data []byte
-		ipv4FromBuiltin := false
-		if _, err := os.Stat(ipv4GeoLitePath); os.IsNotExist(err) {
-			// 内置 GeoLite2-Country.mmdb，IPv4/IPv6 共用同一份
-			ipv4Data = Ipv6CountryBytes
-			ipv4FromBuiltin = true
-			zlog.Info("Using embedded IPv4 GeoLite2 database, size: ", len(ipv4Data))
-		} else {
-			fileBytes, err := ioutil.ReadFile(ipv4GeoLitePath)
-			if err != nil {
-				log.Fatalf("Failed to read IPv4 GeoLite2 database file: %v", err)
-			}
-			ipv4Data = fileBytes
-			zlog.Info("IPv4 GeoLite2 database loaded from file, size: ", len(ipv4Data), ipv4GeoLitePath)
-		}
-
-		err := global.GIPLOCATION_MANAGER.LoadV4GeoLite2(ipv4Data)
-		if err != nil {
-			log.Fatalf("Failed to load IPv4 GeoLite2 database: %v", err)
-		}
-		global.GIPLOCATION_MANAGER.SetV4Builtin(ipv4FromBuiltin)
-		zlog.Info("IPv4 GeoLite2 database loaded successfully")
-	} else if global.GCONFIG_IP_V4_SOURCE == "ipdb" {
-		ipdbPath := filepath.Join(utils.GetCurrentDir(), "data", "iplocation.ipdb")
-		if _, err := os.Stat(ipdbPath); err == nil {
-			if err2 := global.GIPLOCATION_MANAGER.LoadIpdb(ipdbPath); err2 != nil {
-				zlog.Warn("Failed to load ipdb database (v4): ", err2)
-			} else {
-				zlog.Info("ipdb database loaded successfully (v4 source)")
-			}
-		} else {
-			zlog.Warn("ipdb database file not found, please upload iplocation.ipdb")
+	// 加载优先级与热重载共用同一份实现（磁盘文件 > 内置数据 > 同类型其它来源降级）。
+	// IP 库属于「有更好、没有也得能跑」的辅助数据：任何加载失败都只告警，
+	// 绝不能阻止 WAF 启动——防护能力不依赖地区库。
+	if err := global.GIPLOCATION_MANAGER.ReloadFromConfig(
+		filepath.Join(utils.GetCurrentDir(), "data"),
+		global.GCONFIG_IP_V4_SOURCE, global.GCONFIG_IP_V6_SOURCE,
+		global.GCONFIG_IP_V4_FORMAT, global.GCONFIG_IP_V6_FORMAT,
+	); err != nil {
+		zlog.Warn("IP地理位置数据库加载失败，地区相关功能将不可用: ", err.Error())
+	}
+	if st := global.GIPLOCATION_MANAGER.GetStatus(); st != nil {
+		zlog.Info(fmt.Sprintf("IP库加载完成 IPv4:%s(内置:%v,%d字节) IPv6:%s(内置:%v,%d字节)",
+			st.IPv4Source, st.IPv4Builtin, st.IPv4FileSize,
+			st.IPv6Source, st.IPv6Builtin, st.IPv6FileSize))
+		if st.IPv6FileSize == 0 {
+			zlog.Warn("IPv6 地区库不可用：IPv6 访客的归属地将显示为未知，且地区类自定义规则对 IPv6 请求不生效。" +
+				"可在【IP库管理】里在线下载，或自行下载 ip2region_v6.xdb 放入 data/ 目录")
 		}
 	}
 
-	// 加载 IPv6 数据库
-	if global.GCONFIG_IP_V6_SOURCE == "ip2region" {
-		// IPv6 ip2region 需要单独的文件
-		ipv6Ip2RegionPath := filepath.Join(utils.GetCurrentDir(), "data", "ip2region_v6.xdb")
-		if _, err := os.Stat(ipv6Ip2RegionPath); err == nil {
-			fileBytes, err := ioutil.ReadFile(ipv6Ip2RegionPath)
-			if err != nil {
-				zlog.Warn("Failed to read IPv6 ip2region database file: ", err)
-			} else {
-				err = global.GIPLOCATION_MANAGER.LoadV6Ip2Region(fileBytes, iplocation.DBFormat(global.GCONFIG_IP_V6_FORMAT))
-				if err != nil {
-					zlog.Warn("Failed to load IPv6 ip2region database: ", err)
-				} else {
-					global.GIPLOCATION_MANAGER.SetV6Builtin(false)
-					zlog.Info("IPv6 ip2region database loaded successfully, size: ", len(fileBytes))
-				}
-			}
-		} else {
-			zlog.Warn("IPv6 ip2region database file not found, please upload ip2region_v6.xdb")
-		}
-	} else if global.GCONFIG_IP_V6_SOURCE == "geolite2" {
-		// IPv6 GeoLite2
-		ipv6GeoLitePath := filepath.Join(utils.GetCurrentDir(), "data", "GeoLite2-Country.mmdb")
-		var ipv6Data []byte
-		ipv6FromBuiltin := false
-		if _, err := os.Stat(ipv6GeoLitePath); os.IsNotExist(err) {
-			// 使用内置数据
-			ipv6Data = Ipv6CountryBytes
-			ipv6FromBuiltin = true
-			zlog.Info("Using embedded IPv6 GeoLite2 database, size: ", len(ipv6Data))
-		} else {
-			// 读取外部文件
-			fileBytes, err := ioutil.ReadFile(ipv6GeoLitePath)
-			if err != nil {
-				log.Fatalf("Failed to read IPv6 GeoLite2 database file: %v", err)
-			}
-			ipv6Data = fileBytes
-			zlog.Info("IPv6 GeoLite2 database loaded from file, size: ", len(ipv6Data), ipv6GeoLitePath)
-		}
-
-		err := global.GIPLOCATION_MANAGER.LoadV6GeoLite2(ipv6Data)
-		if err != nil {
-			log.Fatalf("Failed to load IPv6 GeoLite2 database: %v", err)
-		}
-		global.GIPLOCATION_MANAGER.SetV6Builtin(ipv6FromBuiltin)
-		zlog.Info("IPv6 GeoLite2 database loaded successfully")
-	} else if global.GCONFIG_IP_V6_SOURCE == "ipdb" {
-		// 如果 v4 已经加载了 ipdb，跳过重复加载
-		if !global.GIPLOCATION_MANAGER.IsIpdbLoaded() {
-			ipdbPath := filepath.Join(utils.GetCurrentDir(), "data", "iplocation.ipdb")
-			if _, err := os.Stat(ipdbPath); err == nil {
-				if err2 := global.GIPLOCATION_MANAGER.LoadIpdb(ipdbPath); err2 != nil {
-					zlog.Warn("Failed to load ipdb database (v6): ", err2)
-				} else {
-					zlog.Info("ipdb database loaded successfully (v6 source)")
-				}
-			} else {
-				zlog.Warn("ipdb database file not found, please upload iplocation.ipdb")
-			}
-		} else {
-			zlog.Info("ipdb database already loaded (shared with v4)")
-		}
-	}
 	global.GWAF_DLP_CONFIG = ldpConfig
 	global.GWAF_REG_PUBLIC_KEY = publicKey
 
@@ -321,6 +221,12 @@ func (m *wafSystenService) run() {
 	if err != nil {
 		zlog.Error("httpauth", err.Error())
 	}
+
+	// 统一访问认证(Access 模式)登录页资源释放
+	err = wafinit.CheckAndReleaseDataset(accessAssets, utils.GetCurrentDir()+"/data/access", "access")
+	if err != nil {
+		zlog.Error("access", err.Error())
+	}
 	//TODO 准备释放最新spider bot
 
 	//初始化cache
@@ -343,6 +249,31 @@ func (m *wafSystenService) run() {
 	global.GWAF_MEASURE_PROCESS_DEQUEENGINE = cache.InitWafOnlyLockWrite()
 	// 创建 Snowflake 实例
 	global.GWAF_SNOWFLAKE_GEN = wafsnowflake.NewSnowflake(1609459200000, 1, 1) // 设置epoch时间、机器ID和数据中心ID
+
+	// 注入 IP 库在线下载上下文：iplocation 不能反向依赖 global/utils（会成环），
+	// 所以升级源、SSRF 安全客户端、通知回调都从这里传进去。
+	iplocation.ConfigureUpgrader(iplocation.UpgradeConfig{
+		UpdateVersionURL: global.GUPDATE_VERSION_URL,
+		NewClient:        utils.SafeHTTPClient,
+		ValidateURL:      utils.IsSafeOutboundURL,
+		NotifyFunc: func(success bool, msg string) {
+			if global.GQEQUE_MESSAGE_DB == nil {
+				return
+			}
+			successStr := "false"
+			if success {
+				successStr = "true"
+			}
+			global.GQEQUE_MESSAGE_DB.Enqueue(innerbean.UpdateResultMessageInfo{
+				BaseMessageInfo: innerbean.BaseMessageInfo{
+					OperaType: "IP库下载",
+					Server:    global.GWAF_CUSTOM_SERVER_NAME,
+				},
+				Msg:     msg,
+				Success: successStr,
+			})
+		},
+	})
 
 	// 创建owasp 管理器（支持热重载）
 	global.GWAF_OWASP_MANAGER = wafowasp.NewOwaspManager(utils.GetCurrentDir())
@@ -371,6 +302,12 @@ func (m *wafSystenService) run() {
 
 	// 初始化ip ban
 	wafipban.InitIPBanManager(global.GCACHE_WAFCACHE)
+	// 主机登录失败计数器：与上面共用同一个缓存，但 key 前缀独立。
+	// 不共用 keyspace 是因为上面那套计数会被自定义规则的 MF.GetIPFailureCount 读取，
+	// 混入 SSH/RDP 的失败会静默改变用户已有 WAF 规则的语义。
+	wafipban.InitHostLoginFailureManager(global.GCACHE_WAFCACHE)
+	// 把事件落库能力注入主机防护引擎（反向注入避免 service 与 wafhostguard 循环依赖）
+	waf_service.WafHostGuardServiceApp.InitEventSink()
 
 	//提前初始化
 	global.GDATA_CURRENT_LOG_DB_MAP = map[string]*gorm.DB{}
@@ -404,11 +341,27 @@ func (m *wafSystenService) run() {
 		global.GUPDATE_VERSION_URL = "http://127.0.0.1:8111/"
 	}
 
+	//初始化每实例静态数据加密密钥(DEK)：首启生成 data/.keys/data_key(0600)，或用
+	//config.yml 的 security.data_key_file 指定自管路径。须在数据库初始化之前就绪，
+	//否则落库敏感字段(Access 密钥/CDN 凭证/2FA 密钥)无法按新格式加解密。
+	if err := wafsec.InitDataKey(utils.GetCurrentDir(), global.GCONFIG_DATA_KEY_FILE); err != nil {
+		zlog.Error("初始化数据加密密钥失败，程序退出，请检查 data/.keys 目录权限或 security.data_key_file 配置", "error", err)
+		os.Exit(1)
+	}
+
+	//初始化每实例传输密钥(X25519)：首启生成 data/.keys/comm_key(0600)，供管理端 v2 通道
+	//与客户端协商每会话密钥。失败不退出——传输层还有 legacy 通道可用，管理端不至于打不开。
+	if err := wafsec.InitCommKey(utils.GetCurrentDir(), global.GCONFIG_COMM_KEY_FILE); err != nil {
+		zlog.Error("初始化传输密钥失败，管理端将只提供 legacy 传输通道，请检查 data/.keys 目录权限或 security.comm_key_file 配置", "error", err)
+	}
+
 	//初始化本地数据库
 	if _, err := wafdb.InitCoreDb(""); err != nil {
 		zlog.Error("初始化核心数据库失败，程序退出，请检查conf/config.yml数据库配置是否正确", "error", err)
 		os.Exit(1)
 	}
+	//存量敏感字段静态加密迁移：把旧格式密文一次性重写为每实例 DEK 密文(幂等，单行失败跳过)。
+	wafdb.MigrateDataKeyEncryption(global.GWAF_LOCAL_DB)
 	if _, err := wafdb.InitLogDb(""); err != nil {
 		zlog.Error("初始化日志数据库失败，程序退出，请检查conf/config.yml数据库配置是否正确", "error", err)
 		os.Exit(1)
@@ -443,8 +396,15 @@ func (m *wafSystenService) run() {
 	go NeverExit("ProcessStatDequeEngine", wafqueue.ProcessStatDequeEngine)
 	go NeverExit("ProcessLogDequeEngine", wafqueue.ProcessLogDequeEngine)
 
+	//运行诊断：注册队列/缓存/WebSocket 计量器并启动 10s 趋势采样（内存环形缓冲，不落盘）
+	wafdiag.RegisterBuiltins()
+	wafdiag.StartSampler()
+
 	//初始化一次系统参数信息
 	waftask.TaskLoadSetting(true)
+
+	// 校验"上次运行版本"，识别容器重建导致的降级运行(旧程序+新库)，仅记录日志不阻断
+	waftask.CheckVersionDowngrade()
 
 	// IP 数据库：配置已从 DB 读出，按持久化的数据源权威重载一次
 	// （启动早期 manager 用的是默认源，此处才是真正生效的加载点，解决重启后 ipdb 回退到 ip2region 的问题）
@@ -494,6 +454,17 @@ func (m *wafSystenService) run() {
 	}
 	//初始化路由快照(RCU 空表)，之后 StartWaf→LoadAllHost 通过 copy-on-write 填充
 	globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.InitRouting()
+	//注册引擎侧运行诊断计量器（主机/端口/证书/Transport池等对象数）
+	globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.RegisterDiagProvider()
+	//IP组匹配集必须在引擎接管流量之前发布完成：LoadHost 只预抽出组短码，
+	//真正的IP集合来自 ipset 全局快照。这里必须同步调用(不能像威胁情报那样 go 出去)——
+	//威胁情报晚生效只是少拦一点，IP组承载的是用户显式配置的白名单，晚生效就是误拦合法用户。
+	waf_service.WafIPGroupServiceApp.RebuildAllGroupMatchers()
+	//统一访问认证配置同理必须在引擎接管流量之前同步发布：
+	//访问控制晚生效就是一段裸奔窗口，而这个功能的全部意义就是不让人裸奔。
+	//快照未发布时 accessgate.Get() 返回"全部关闭"的兜底配置(误放行而非误拦)，
+	//所以这一行的作用是把真实策略尽早顶上去。
+	waf_service.WafAccessConfigServiceApp.PublishConfig()
 	http.Handle("/", globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE)
 	globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.StartWaf()
 
@@ -541,6 +512,7 @@ func (m *wafSystenService) run() {
 	globalobj.GWAF_RUNTIME_OBJ_WAF_TaskRegistry.RegisterTask(enums.TASK_SSL_PATH_LOAD, waftask.SSLReload)
 	globalobj.GWAF_RUNTIME_OBJ_WAF_TaskRegistry.RegisterTask(enums.TASK_BATCH, waftask.BatchTask)
 	globalobj.GWAF_RUNTIME_OBJ_WAF_TaskRegistry.RegisterTask(enums.TASK_SSL_EXPIRE_CHECK, waftask.SSLExpireCheck)
+	globalobj.GWAF_RUNTIME_OBJ_WAF_TaskRegistry.RegisterTask(enums.TASK_MANAGER_CERT_CHECK, waftask.ManagerCertCheck)
 	globalobj.GWAF_RUNTIME_OBJ_WAF_TaskRegistry.RegisterTask(enums.TASK_NOTICE, waftask.TaskStatusNotify)
 	globalobj.GWAF_RUNTIME_OBJ_WAF_TaskRegistry.RegisterTask(enums.TASK_HEALTH, waftask.TaskHealth)
 	globalobj.GWAF_RUNTIME_OBJ_WAF_TaskRegistry.RegisterTask(enums.TASK_CLEAR_CC_WINDOWS, waftask.TaskCC)
@@ -550,6 +522,16 @@ func (m *wafSystenService) run() {
 	globalobj.GWAF_RUNTIME_OBJ_WAF_TaskRegistry.RegisterTask(enums.TASK_DB_MONITOR, waftask.TaskDatabaseMonitor)
 	globalobj.GWAF_RUNTIME_OBJ_WAF_TaskRegistry.RegisterTask(enums.TASK_FIREWALL_CLEAN_EXPIRED, waftask.TaskFirewallCleanExpired)
 	globalobj.GWAF_RUNTIME_OBJ_WAF_TaskRegistry.RegisterTask(enums.TASK_STATS_DATA_CLEANUP, waftask.TaskStatsDataCleanup)
+	globalobj.GWAF_RUNTIME_OBJ_WAF_TaskRegistry.RegisterTask(enums.TASK_THREAT_IP_SYNC, waftask.TaskThreatIPSync)
+	globalobj.GWAF_RUNTIME_OBJ_WAF_TaskRegistry.RegisterTask(enums.TASK_ACCESS_CLEAN, waftask.TaskAccessClean)
+	globalobj.GWAF_RUNTIME_OBJ_WAF_TaskRegistry.RegisterTask(enums.TASK_HOSTGUARD_CLEAN_EXPIRED, waftask.TaskHostGuardCleanExpired)
+	globalobj.GWAF_RUNTIME_OBJ_WAF_TaskRegistry.RegisterTask(enums.TASK_TRAFFIC_FLUSH, waftask.TaskTrafficFlush)
+
+	// 进程启动重放：把各启用威胁情报渠道的快照重新灌入系统 ipset(内存态重启会丢) 并重建 WAF 并集
+	go waf_service.WafThreatIPServiceApp.RestoreAllOnStartup()
+	// 启动重放 CDN 回源段中心库(从库内快照恢复内存匹配集，不对外拉取)；
+	// 到期自动拉取由定时任务按各厂商节奏 + AutoFetch 开关处理
+	go waf_service.WafCDNIPServiceApp.RestoreAllOnStartup()
 
 	go waftask.TaskShareDbInfo()
 
@@ -562,6 +544,9 @@ func (m *wafSystenService) run() {
 	// cron 任务调度同样是单例（避免新旧 Worker 重复执行定时任务）；takeover 模式延迟到 ACTIVATE 再启动。
 	if !global.GWAF_RUNTIME_IS_TAKEOVER {
 		globalobj.GWAF_RUNTIME_OBJ_WAF_TaskScheduler.Start()
+		// 主机登录防护的日志采集同样是独占单例：两个进程同时 tail 同一份 auth.log，
+		// 同一条失败会被计两次，而 memory 缓存下两边计数器互不可见，阈值等于被腰斩。
+		wafhostguard.Start()
 		// 独占单例已在本函数内联启动完毕，这里把 activateOnce 消费掉，
 		// 使后续任何 ACTIVATE 都成为空操作。Supervisor 重启后"原地认领"存活 Worker 时
 		// 会补发一次 ACTIVATE（它无从判断该 Worker 当初是否已接管过单例），
@@ -636,7 +621,15 @@ func (m *wafSystenService) run() {
 				switch msg.Type {
 				case enums.ChanTypeAllowIP:
 					ipWhiteLists := msg.Content.([]model.IPAllowList)
-					globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.UpdateHost(msg.HostCode, func(h *wafenginmodel.HostSafe) { h.IPWhiteLists = ipWhiteLists })
+					// 编译与抽取都在 mutator 外面做：它们是纯函数但可能耗时上百 μs，
+					// 放进 mutator 会拉长路由表写锁的持有时间
+					ipWhiteIndex := wafenginecore.BuildIPAllowIndex(ipWhiteLists)
+					ipWhiteGroupCodes := wafenginecore.ExtractAllowGroupCodes(ipWhiteLists)
+					globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.UpdateHost(msg.HostCode, func(h *wafenginmodel.HostSafe) {
+						h.IPWhiteLists = ipWhiteLists
+						h.IPWhiteIndex = ipWhiteIndex
+						h.IPWhiteGroupCodes = ipWhiteGroupCodes
+					})
 					zlog.Debug("远程配置", zap.Any("IPWhiteLists", ipWhiteLists))
 					break
 				case enums.ChanTypeAllowURL:
@@ -646,7 +639,14 @@ func (m *wafSystenService) run() {
 					break
 				case enums.ChanTypeBlockIP:
 					ipBlockLists := msg.Content.([]model.IPBlockList)
-					globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.UpdateHost(msg.HostCode, func(h *wafenginmodel.HostSafe) { h.IPBlockLists = ipBlockLists })
+					// 同上：编译与抽取放在 mutator 外面，mutator 里只做字段赋值
+					ipBlockIndex := wafenginecore.BuildIPBlockIndex(ipBlockLists)
+					ipBlockGroupCodes := wafenginecore.ExtractBlockGroupCodes(ipBlockLists)
+					globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.UpdateHost(msg.HostCode, func(h *wafenginmodel.HostSafe) {
+						h.IPBlockLists = ipBlockLists
+						h.IPBlockIndex = ipBlockIndex
+						h.IPBlockGroupCodes = ipBlockGroupCodes
+					})
 					zlog.Debug("远程配置", zap.Any("IPBlockLists", msg))
 					//通知隧道引擎同步更新IP黑名单数据
 					if globalobj.GWAF_RUNTIME_OBJ_TUNNEL_ENGINE != nil {
@@ -848,6 +848,15 @@ func (m *wafSystenService) run() {
 
 			}
 			break
+		case <-global.GWAF_CHAN_HTTP3:
+			// HTTP/3 开关热生效：把所有在线 HTTPS 端口的 QUIC 监听对齐到当前配置。
+			// 必须 go 出去 —— 停 QUIC 要等在途请求排空(最长 drain_timeout)，
+			// 同步做会把整个主消息循环堵住。
+			if globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE != nil {
+				zlog.Info("HTTP/3 配置发生变更，准备重新对齐 QUIC 监听")
+				go globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.ReconcileHTTP3()
+			}
+			break
 		case host := <-global.GWAF_CHAN_HOST:
 			// 防护开关热更新(copy-on-write，按 host:port key 定位)
 			globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.UpdateHostByKey(host.Host+":"+strconv.Itoa(host.Port), func(h *wafenginmodel.HostSafe) {
@@ -974,6 +983,12 @@ func (m *wafSystenService) stopSamWaf() {
 		zlog.Warn("App Engine is nil, skipping shutdown")
 	}
 
+	// 站点流量落库：引擎已停、不会再有新字节进来，这里补最后一次，
+	// 把内存里没到 30 秒周期的增量写掉（否则每次重启都会丢掉最后不足一个周期的流量）。
+	zlog.Info("Flush SamWaf Traffic Stats...")
+	waftask.FlushTrafficStats()
+	zlog.Info("Flush SamWaf Traffic Stats finished")
+
 	zlog.Info("Shutdown SamWaf Queue Processors...")
 	// 关闭信号通道，通知所有队列处理协程退出
 	close(global.GWAF_QUEUE_SHUTDOWN_SIGNAL)
@@ -987,6 +1002,14 @@ func (m *wafSystenService) stopSamWaf() {
 	// 给任务一些时间完成当前工作
 	time.Sleep(200 * time.Millisecond)
 	zlog.Info("SamWaf Tasks notified")
+
+	// 主机登录防护要早于 cron 与关库停：Stop 里要等事件源交还 fd / journalctl 子进程 /
+	// Windows 事件订阅句柄，还要把缓冲里的事件与待同步的封禁集合落地。
+	// 停晚了就会出现"旧 Worker 还在读日志、新 Worker 也开始读"的重复计数。
+	zlog.Info("Shutdown SamWaf HostGuard...")
+	wafhostguard.Stop()
+	waf_service.WafHostGuardServiceApp.FlushEvents()
+	zlog.Info("Shutdown SamWaf HostGuard finished")
 
 	zlog.Info("Shutdown SamWaf Cron...")
 	globalobj.GWAF_RUNTIME_OBJ_WAF_TaskScheduler.Stop()
@@ -1195,6 +1218,29 @@ func main() {
 				os.Exit(1)
 			}
 			fmt.Println("已触发零停机滚动重启，请观察日志：新 Worker 就绪后旧 Worker 将优雅排空退出。")
+		case "rekey": //把遗留(旧格式)敏感字段升级为当前数据密钥(DEK)的新格式，供手动补跑迁移
+			if err := wafsec.InitDataKey(utils.GetCurrentDir(), global.GCONFIG_DATA_KEY_FILE); err != nil {
+				fmt.Println("数据密钥初始化失败:", err)
+				os.Exit(1)
+			}
+			if _, err := wafdb.InitCoreDb(""); err != nil {
+				fmt.Println("核心数据库初始化失败:", err)
+				os.Exit(1)
+			}
+			n := wafdb.RekeyDataKey(global.GWAF_LOCAL_DB)
+			fmt.Printf("已把 %d 行遗留敏感字段升级为当前数据密钥格式。\n", n)
+			fmt.Println("注意：本命令不做密钥轮换；请勿在替换 data_key 文件后运行它。")
+		case "rekey-legacy": //把落库敏感字段重写回旧通讯密钥格式(降级到旧版二进制前执行)
+			if err := wafsec.InitDataKey(utils.GetCurrentDir(), global.GCONFIG_DATA_KEY_FILE); err != nil {
+				fmt.Println("数据密钥初始化失败:", err)
+				os.Exit(1)
+			}
+			if _, err := wafdb.InitCoreDb(""); err != nil {
+				fmt.Println("核心数据库初始化失败:", err)
+				os.Exit(1)
+			}
+			n := wafdb.RekeyToLegacy(global.GWAF_LOCAL_DB)
+			fmt.Printf("已把 %d 行敏感字段重写回旧格式，现在可以安全降级到旧版本。\n", n)
 		case "resetpwd": //重制密码
 			wafdb.InitCoreDb("")
 			wafdb.ResetAdminPwd()
@@ -1429,6 +1475,9 @@ func activateSingletons() {
 		if globalobj.GWAF_RUNTIME_OBJ_WAF_TaskScheduler != nil {
 			globalobj.GWAF_RUNTIME_OBJ_WAF_TaskScheduler.Start()
 		}
+		// 主机登录防护的日志采集也必须等旧 Worker 彻底退出后才启动，
+		// 否则两个进程同时读同一份 auth.log，失败次数被重复计入，阈值等于打了对折。
+		wafhostguard.Start()
 	})
 }
 

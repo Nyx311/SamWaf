@@ -15,6 +15,7 @@ const (
 	TASK_SSL_PATH_LOAD                = "task_ssl_path_load"                //SSL证书可自动加载路径下的证书
 	TASK_BATCH                        = "task_batch"                        //批量任务
 	TASK_SSL_EXPIRE_CHECK             = "task_ssl_expire_check"             //SSL证书到期检测
+	TASK_MANAGER_CERT_CHECK           = "task_manager_cert_check"           //管理端证书到期检测与本地证书自动续期
 	TASK_NOTICE                       = "task_notice"                       //通知信息
 	TASK_HEALTH                       = "task_health"                       //健康检测
 	TASK_CLEAR_CC_WINDOWS             = "task_clear_cc_windows"             //清除ccWindows记录
@@ -24,4 +25,8 @@ const (
 	TASK_DB_MONITOR                   = "task_db_monitor"                   //数据库监控
 	TASK_FIREWALL_CLEAN_EXPIRED       = "task_firewall_clean_expired"       //清理过期防火墙IP封禁规则
 	TASK_STATS_DATA_CLEANUP           = "task_stats_data_cleanup"           //清理统计数据（按保留策略）
+	TASK_THREAT_IP_SYNC               = "task_threat_ip_sync"               //威胁情报IP订阅同步
+	TASK_ACCESS_CLEAN                 = "task_access_clean"                 //统一访问认证：清理过期会话/令牌/票据与审计日志
+	TASK_HOSTGUARD_CLEAN_EXPIRED      = "task_hostguard_clean_expired"      //主机防爆破：解封到期封禁(每分钟，因最短阶梯只有5分钟)
+	TASK_TRAFFIC_FLUSH                = "task_traffic_flush"                //站点流量计量落库(30秒一次，引擎侧字节计量与日志解耦)
 )

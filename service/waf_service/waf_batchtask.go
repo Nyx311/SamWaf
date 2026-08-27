@@ -3,13 +3,18 @@ package waf_service
 import (
 	"SamWaf/common/uuid"
 	"SamWaf/customtype"
+	"SamWaf/enums"
 	"SamWaf/global"
 	"SamWaf/model"
 	"SamWaf/model/baseorm"
 	"SamWaf/model/request"
+	"SamWaf/utils"
+	"encoding/json"
 	"errors"
-	"gorm.io/gorm"
+	"strings"
 	"time"
+
+	"gorm.io/gorm"
 )
 
 type WafBatchTaskService struct{}
@@ -21,6 +26,12 @@ func (receiver *WafBatchTaskService) AddApi(req request.BatchTaskAddReq) error {
 	err := receiver.CheckIsExistApi(req.BatchTaskName)
 	if err == nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 		return errors.New("任务名已存在")
+	}
+	if err = receiver.checkTaskInput(req.BatchType, req.BatchSourceType, req.BatchTriggerType, req.BatchExecuteMethod, req.BatchSource); err != nil {
+		return err
+	}
+	if err = receiver.checkExtraConfig(req.BatchType, req.BatchExtraConfig); err != nil {
+		return err
 	}
 	var bean = &model.BatchTask{
 		BaseOrm: baseorm.BaseOrm{
@@ -44,6 +55,62 @@ func (receiver *WafBatchTaskService) AddApi(req request.BatchTaskAddReq) error {
 	return nil
 }
 
+// checkTaskInput 保存前校验四个枚举字段与数据源。
+func (receiver *WafBatchTaskService) checkTaskInput(batchType, sourceType, triggerType, executeMethod, source string) error {
+	if !enums.IsValidBatchType(batchType) {
+		return errors.New("任务类型非法")
+	}
+	if !enums.IsValidBatchSourceType(sourceType) {
+		return errors.New("来源类型非法")
+	}
+	if !enums.IsValidBatchTriggerType(triggerType) {
+		return errors.New("触发类型非法")
+	}
+	if !enums.IsValidBatchExecuteMethod(executeMethod) {
+		return errors.New("执行方式非法")
+	}
+	source = strings.TrimSpace(source)
+	if source == "" {
+		return errors.New("来源内容不能为空")
+	}
+	if enums.IsBatchLocalSource(sourceType) {
+		return utils.PrecheckBatchLocalPath(source)
+	}
+	if ok, reason := utils.PrecheckOutboundURL(source); !ok {
+		return errors.New("来源地址不被允许: " + reason)
+	}
+	return nil
+}
+
+// checkExtraConfig 保存前校验额外配置。
+//
+// IP组任务必须指向一个真实存在的组：留到执行时才发现配错，用户只能去翻日志
+// 才知道定时任务一直在空跑，所以在这里就挡下来。
+func (receiver *WafBatchTaskService) checkExtraConfig(batchType string, extraConfig string) error {
+	if batchType != enums.BATCHTASK_IPGROUP {
+		return nil
+	}
+	var config struct {
+		GroupCode string `json:"group_code"`
+	}
+	if extraConfig != "" {
+		if err := json.Unmarshal([]byte(extraConfig), &config); err != nil {
+			return errors.New("额外配置不是合法的JSON:" + err.Error())
+		}
+	}
+	if config.GroupCode == "" {
+		return errors.New("请选择目标IP组")
+	}
+	var cnt int64
+	global.GWAF_LOCAL_DB.Model(&model.IPGroup{}).
+		Where("group_code = ? AND user_code = ? AND tenant_id = ?", config.GroupCode, global.GWAF_USER_CODE, global.GWAF_TENANT_ID).
+		Count(&cnt)
+	if cnt == 0 {
+		return errors.New("目标IP组不存在")
+	}
+	return nil
+}
+
 func (receiver *WafBatchTaskService) CheckIsExistApi(batchName string) error {
 	return global.GWAF_LOCAL_DB.First(&model.BatchTask{}, "batch_task_name = ?", batchName).Error
 }
@@ -54,6 +121,12 @@ func (receiver *WafBatchTaskService) ModifyApi(req request.BatchTaskEditReq) err
 	global.GWAF_LOCAL_DB.Where("batch_task_name = ?", req.BatchTaskName).Find(&bean)
 	if bean.Id != "" && bean.BatchTaskName != req.BatchTaskName {
 		return errors.New("该任务已经存在")
+	}
+	if err := receiver.checkTaskInput(req.BatchType, req.BatchSourceType, req.BatchTriggerType, req.BatchExecuteMethod, req.BatchSource); err != nil {
+		return err
+	}
+	if err := receiver.checkExtraConfig(req.BatchType, req.BatchExtraConfig); err != nil {
+		return err
 	}
 
 	beanMap := map[string]interface{}{

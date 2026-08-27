@@ -14,17 +14,24 @@ type APIGroup struct {
 	WafAntiCCApi
 	WafIPFailureApi
 	WafBlockIpApi
+	WafIPGroupApi
+	WafAccessAccountApi
+	WafAccessConfigApi
+	WafAccessSessionApi
+	WafAccessAuditApi
+	WafIPGroupItemApi
 	WafBlockUrlApi
 	WafAccountApi
 	WafAccountLogApi
+	WafLoginHistoryApi
 	WafLoginApi
+	WafSecKeyApi
 	WafSysLogApi
 	WafWebSocketApi
 	WafSysInfoApi
 	WafSystemConfigApi
 	WafCommonApi
 	WafOneKeyModApi
-	CenterApi
 	WafLicenseApi
 	WafSensitiveApi
 	WafLoadBalanceApi
@@ -46,12 +53,19 @@ type APIGroup struct {
 	WafVpConfigApi
 	WafFileApi
 	WafSystemMonitorApi
+	WafDiagnosticApi
 	WafCaServerInfoApi
 	WafSqlQueryApi
 	WafNotifyChannelApi
 	WafNotifySubscriptionApi
 	WafNotifyLogApi
 	WafFirewallIPBlockApi
+	WafHostGuardApi
+	WafHostConnApi
+	WafThreatIPApi
+	WafThreatIPExcludeApi
+	WafCDNIPApi
+	WafIPLookupApi
 	WafPluginApi
 	WafLogFileWriteApi
 	WafIPLocationApi
@@ -64,6 +78,7 @@ type APIGroup struct {
 	WafAppApi
 	WafAIApi
 	WafUIPreferenceApi
+	WafUpgradeNoticeApi
 }
 
 var APIGroupAPP = new(APIGroup)
@@ -80,9 +95,17 @@ var (
 	wafIpBlockService  = waf_service.WafBlockIpServiceApp
 	wafUrlBlockService = waf_service.WafBlockUrlServiceApp
 
-	wafAccountService    = waf_service.WafAccountServiceApp
-	wafAccountLogService = waf_service.WafAccountLogServiceApp
-	wafTokenInfoService  = waf_service.WafTokenInfoServiceApp
+	wafIPGroupService       = waf_service.WafIPGroupServiceApp
+	wafAccessAccountService = waf_service.WafAccessAccountServiceApp
+	wafAccessConfigService  = waf_service.WafAccessConfigServiceApp
+	wafAccessSessionService = waf_service.WafAccessSessionServiceApp
+	wafAccessAuditService   = waf_service.WafSecurityAuditServiceApp
+	wafIPGroupItemService   = waf_service.WafIPGroupItemServiceApp
+
+	wafAccountService      = waf_service.WafAccountServiceApp
+	wafAccountLogService   = waf_service.WafAccountLogServiceApp
+	wafLoginHistoryService = waf_service.WafLoginHistoryServiceApp
+	wafTokenInfoService    = waf_service.WafTokenInfoServiceApp
 
 	wafSysLogService       = waf_service.WafSysLogServiceApp
 	wafSystemConfigService = waf_service.WafSystemConfigServiceApp
@@ -91,8 +114,6 @@ var (
 	wafShareDbService = waf_service.WafShareDbServiceApp
 
 	wafOneKeyModService = waf_service.WafOneKeyModServiceApp
-
-	CenterService = waf_service.CenterServiceApp
 
 	wafSensitiveService = waf_service.WafSensitiveServiceApp
 
@@ -132,6 +153,14 @@ var (
 	wafSqlQueryService = waf_service.WafSqlQueryServiceApp
 
 	wafFirewallIPBlockService = waf_service.WafFirewallIPBlockServiceApp
+	wafHostGuardService       = waf_service.WafHostGuardServiceApp
+	wafHostConnService        = waf_service.WafHostConnServiceApp
+	wafThreatIPService        = waf_service.WafThreatIPServiceApp
+	wafCDNIPService           = waf_service.WafCDNIPServiceApp
+
+	wafThreatIPExcludeService      = waf_service.WafThreatIPExcludeServiceApp
+	wafThreatIPExcludeAuditService = waf_service.WafThreatIPExcludeAuditApp
+	wafIPLookupService             = waf_service.WafIPLookupServiceApp
 
 	wafOPlatformKeyService = waf_service.WafOPlatformKeyServiceApp
 	wafOPlatformLogService = waf_service.WafOPlatformLogServiceApp
@@ -142,4 +171,6 @@ var (
 	wafAppChangeLogService  = waf_service.WafAppChangeLogServiceApp
 
 	wafUIPreferenceService = waf_service.WafUIPreferenceServiceApp
+
+	wafUpgradeNoticeService = waf_service.WafUpgradeNoticeServiceApp
 )

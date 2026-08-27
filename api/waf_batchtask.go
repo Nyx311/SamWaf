@@ -1,11 +1,12 @@
 package api
 
 import (
-	"SamWaf/enums"
 	"SamWaf/model/common/response"
 	"SamWaf/model/request"
+	"SamWaf/utils"
 	"SamWaf/waftask"
 	"errors"
+
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 )
@@ -83,7 +84,7 @@ func (s *WafBatchTaskApi) ModifyBatchTaskApi(c *gin.Context) {
 	if err == nil {
 		err = wafBatchTaskService.ModifyApi(req)
 		if err != nil {
-			response.FailWithMessage("编辑发生错误", c)
+			response.FailWithMessage("编辑发生错误:"+err.Error(), c)
 		} else {
 
 			response.OkWithMessage("编辑成功", c)
@@ -93,24 +94,33 @@ func (s *WafBatchTaskApi) ModifyBatchTaskApi(c *gin.Context) {
 	}
 }
 
-// ManualBatchTaskApi 手工执行任务
+// ManualBatchTaskApi 手工执行任务。
 func (s *WafBatchTaskApi) ManualBatchTaskApi(c *gin.Context) {
 	var req request.BatchTaskManualReq
 	err := c.ShouldBind(&req)
-	if err == nil {
-		bean := wafBatchTaskService.GetDetailByIdApi(req.Id)
-		switch bean.BatchType {
-		case enums.BATCHTASK_IPALLOW:
-			waftask.IPAllowBatch(bean)
-			break
-		case enums.BATCHTASK_IPDENY:
-			waftask.IPDenyBatch(bean)
-			break
-		case enums.BATCHTASK_SENSITIVE:
-			waftask.SensitiveBatch(bean)
-		}
-		response.OkWithMessage("手工执行任务成功", c)
-	} else {
+	if err != nil {
 		response.FailWithMessage("手工执行任务失败", c)
+		return
 	}
+	bean := wafBatchTaskService.GetDetailByIdApi(req.Id)
+	if bean.Id == "" {
+		response.FailWithMessage("手工执行任务失败:任务不存在", c)
+		return
+	}
+	runErr := waftask.ExecuteBatchTask(bean)
+
+	account, _ := c.Get("loginAccount")
+	role, _ := c.Get("userRole")
+	accountStr, _ := account.(string)
+	roleStr, _ := role.(string)
+	if roleStr != "" {
+		accountStr = accountStr + "[" + roleStr + "]"
+	}
+	waftask.AuditBatchTaskRun(bean, accountStr, utils.GetManageClientIP(c), runErr)
+
+	if runErr != nil {
+		response.FailWithMessage("手工执行任务失败:"+runErr.Error(), c)
+		return
+	}
+	response.OkWithMessage("手工执行任务成功", c)
 }

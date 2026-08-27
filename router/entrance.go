@@ -12,9 +12,16 @@ type ApiGroup struct {
 	AntiCCRouter
 	IPFailureRouter
 	BlockIpRouter
+	IPGroupRouter
+	AccessAccountRouter
+	AccessConfigRouter
+	AccessSessionRouter
+	AccessAuditRouter
+	IPGroupItemRouter
 	BlockUrlRouter
 	AccountRouter
 	AccountLogRouter
+	LoginHistoryRouter
 	LoginOutRouter
 	SysLogRouter
 	WebSocketRouter
@@ -23,7 +30,6 @@ type ApiGroup struct {
 	WafCommonRouter
 	OneKeyModRouter
 	WafLicenseRouter
-	CenterRouter
 	SensitiveRouter
 	LoadBalanceRouter
 	SslConfigRouter
@@ -44,12 +50,18 @@ type ApiGroup struct {
 	WafVpConfigRouter
 	WafFileRouter
 	WafSystemMonitorRouter
+	WafDiagnosticRouter
 	WafCaServerInfoRouter
 	SqlQueryRouter
 	NotifyChannelRouter
 	NotifySubscriptionRouter
 	NotifyLogRouter
 	FirewallIPBlockRouter
+	HostGuardRouter
+	HostConnRouter
+	ThreatIPRouter
+	CDNIPRouter
+	IPLookupRouter
 	PluginRouter
 	LogFileWriteRouter
 	IPLocationRouter
@@ -62,10 +74,11 @@ type ApiGroup struct {
 	WafAppRouter
 	WafAIRouter
 	WafUIPreferenceRouter
+	UpgradeNoticeRouter
 }
 type PublicApiGroup struct {
 	LoginRouter
-	CenterPublicRouter
+	SecKeyRouter
 }
 
 var ApiGroupApp = new(ApiGroup)

@@ -4,6 +4,8 @@ import (
 	"SamWaf/common/zlog"
 	"SamWaf/global"
 	"SamWaf/model"
+	"SamWaf/wafenginecore/clientip"
+	"SamWaf/wafenginecore/ipset"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -23,7 +25,9 @@ import (
 
 // isPublicIP 判断 IP 是否为可安全对外访问的公网地址（用于防 SSRF）。
 // 拒绝：环回、私网(RFC1918 / RFC4193 fc00::/7)、链路本地(含云元数据 169.254.169.254)、
-// 未指定(0.0.0.0 / ::)、多播、CGNAT(100.64.0.0/10)。
+// 未指定(0.0.0.0 / ::)、多播、CGNAT(100.64.0.0/10)、其余保留段，
+// 以及三种「把 IPv4 内网地址包在 IPv6 里」的写法：v4 兼容 ::a.b.c.d、NAT64 64:ff9b::/96、6to4 2002::/16。
+// v4 映射 ::ffff:a.b.c.d 由 Go 的 To4() 自动还原，走下面的 v4 判定。
 func isPublicIP(ip net.IP) bool {
 	if ip == nil {
 		return false
@@ -32,15 +36,73 @@ func isPublicIP(ip net.IP) bool {
 		ip.IsUnspecified() || ip.IsMulticast() {
 		return false
 	}
+	// 先把内嵌的 IPv4 还原出来再判：不然 http://[64:ff9b::7f00:1]/ 这种在 NAT64 网络里
+	// 直达 127.0.0.1，却因为「它是个 IPv6 地址」被当成公网放行。
+	if embedded := embeddedIPv4(ip); embedded != nil {
+		return isPublicIPv4(embedded)
+	}
 	if v4 := ip.To4(); v4 != nil {
-		// 云元数据地址显式兜底（169.254.0.0/16 已被链路本地覆盖，这里再拦一次）
-		if v4[0] == 169 && v4[1] == 254 {
-			return false
+		return isPublicIPv4(v4)
+	}
+	return true
+}
+
+// embeddedIPv4 取出 IPv6 地址里内嵌的 IPv4（v4 兼容 ::a.b.c.d / NAT64 64:ff9b::/96 / 6to4 2002::/16），
+// 不是这三种写法时返回 nil。
+func embeddedIPv4(ip net.IP) net.IP {
+	v6 := ip.To16()
+	if v6 == nil || ip.To4() != nil {
+		return nil
+	}
+	// 6to4 2002:V4ADDR::/16
+	if v6[0] == 0x20 && v6[1] == 0x02 {
+		return net.IPv4(v6[2], v6[3], v6[4], v6[5]).To4()
+	}
+	// NAT64 64:ff9b::/96
+	if v6[0] == 0x00 && v6[1] == 0x64 && v6[2] == 0xff && v6[3] == 0x9b {
+		allZero := true
+		for i := 4; i < 12; i++ {
+			if v6[i] != 0 {
+				allZero = false
+				break
+			}
 		}
-		// CGNAT 100.64.0.0/10 视为内网
-		if v4[0] == 100 && v4[1] >= 64 && v4[1] <= 127 {
-			return false
+		if allZero {
+			return net.IPv4(v6[12], v6[13], v6[14], v6[15]).To4()
 		}
+	}
+	// IPv4 兼容地址 ::a.b.c.d（前 96 位全 0，且不是 :: 与 ::1，那两个已被上面拦掉）
+	for i := 0; i < 12; i++ {
+		if v6[i] != 0 {
+			return nil
+		}
+	}
+	return net.IPv4(v6[12], v6[13], v6[14], v6[15]).To4()
+}
+
+// isPublicIPv4 IPv4 保留段判定。除内网/环回外，这些段也一律不是合法的对外访问目标。
+func isPublicIPv4(v4 net.IP) bool {
+	v4 = v4.To4()
+	if v4 == nil {
+		return false
+	}
+	if v4.IsLoopback() || v4.IsPrivate() || v4.IsLinkLocalUnicast() ||
+		v4.IsUnspecified() || v4.IsMulticast() {
+		return false
+	}
+	switch {
+	case v4[0] == 0: // 0.0.0.0/8 "本网络"
+		return false
+	case v4[0] == 169 && v4[1] == 254: // 云元数据显式兜底（链路本地已覆盖，这里再拦一次）
+		return false
+	case v4[0] == 100 && v4[1] >= 64 && v4[1] <= 127: // CGNAT 100.64.0.0/10
+		return false
+	case v4[0] == 192 && v4[1] == 0 && v4[2] == 0: // 192.0.0.0/24 IETF 协议分配
+		return false
+	case v4[0] == 198 && (v4[1] == 18 || v4[1] == 19): // 198.18.0.0/15 基准测试
+		return false
+	case v4[0] >= 240: // 240.0.0.0/4 保留 + 255.255.255.255 广播
+		return false
 	}
 	return true
 }
@@ -238,11 +300,67 @@ func GetPublicIP() string {
 }
 
 func GetCountry(ip string) []string {
+	region, _ := GetCountryEx(ip)
+	return region
+}
+
+// GetCountryEx 与 GetCountry 相同，但额外返回本次地区是否可判定。
+//
+// 第二个返回值为 false 表示"这次查不出来"（没有可用的地区库，或查询报错），
+// 而不是"查出来是未知"。两者必须区分：IPv6 地区库缺失时若只返回"未知"，
+// `MF.COUNTRY != "中国"` 这类规则会把 IPv6 访客整片误杀，所以调用方需要据此放行。
+func GetCountryEx(ip string) ([]string, bool) {
 	if global.GIPLOCATION_MANAGER != nil {
 		result := global.GIPLOCATION_MANAGER.Lookup(ip)
-		return result.ToSlice() // [国家, 区域, 省份, 城市, ISP]
+		return result.ToSlice(), !result.Unresolved // [国家, 区域, 省份, 城市, ISP]
 	}
-	return []string{"未知", "", "", "", ""}
+	return []string{"未知", "", "", "", ""}, false
+}
+
+// FormatIPLocation 把 IP 解析成一行可读的归属地文本（国家 省份 城市 运营商）
+//
+// GetCountry 返回 [国家, 区域, 省份, 城市, ISP]，这里丢掉"区域"（华东/华南这类太粗，
+// 和省份并排显示反而冗余），其余去空去重后拼成一行 —— 直接 strings.Join 会拼出
+// "中国,,,,"这种带空段的串，不能给人看。
+func FormatIPLocation(ip string) string {
+	parts := GetCountry(ip)
+	var seg []string
+	seen := map[string]bool{}
+	for i, p := range parts {
+		if i == 1 { // 跳过"区域"
+			continue
+		}
+		v := strings.TrimSpace(p)
+		if v == "" || v == "0" || seen[v] {
+			continue
+		}
+		seen[v] = true
+		seg = append(seg, v)
+	}
+	if len(seg) == 0 {
+		return "未知"
+	}
+	return strings.Join(seg, " ")
+}
+
+// TruncateString 按字符数截断字符串（按 rune 切，避免把中文/UA 里的多字节字符切成乱码）
+func TruncateString(s string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max])
+}
+
+// BoolToInt 布尔转 0/1，用于落库的标志位字段
+func BoolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // CloseIPDatabase 关闭IP数据库
@@ -307,7 +425,40 @@ func CheckIPInCIDR(ip string, ipRange string) bool {
 	}
 }
 
+// MatchIPPattern 判断 ip 是否命中一个「IP 模式」，统一支持
+// 单 IP / CIDR 网段 / 通配符(10.10.*.*、2001:db8:*:*:*:*:*:*) / 闭区间(1.2.3.4-1.2.3.99)。
+//
+// 与 CheckIPInCIDR 的区别：CheckIPInCIDR 只认单 IP 与 CIDR，且非 CIDR 时做的是
+// 纯字符串相等比较。二者不能互换——CheckIPInCIDR 还被「可信代理 IP 列表」
+// (wafenginecore/clientip.go) 使用，那里绝不能接受通配符：
+// 一旦允许 *.*.*.*，任何人都能伪造 XFF 头冒充任意来源 IP。
+//
+// 本函数只用于「用户配置的黑/白名单、IP 组、自定义规则」这类判定场景。
+func MatchIPPattern(ip string, pattern string) bool {
+	return ipset.MatchPatternStrCached(ip, pattern)
+}
+
+// IsValidIPPattern 校验一个「IP 模式」是否合法，返回 (是否合法, 不合法时的中文原因)。
+// 语法范围同 MatchIPPattern。用于黑/白名单与 IP 组条目的写入校验。
+//
+// 注意与 IsValidIPOrNetwork 的分工：后者只认单 IP 与 CIDR，是严格模式，
+// 供系统防火墙下发、威胁情报源解析等「不能出现通配语法」的场景使用，不要混用。
+func IsValidIPPattern(input string) (bool, string) {
+	return ipset.IsValidPattern(input)
+}
+
+// IsCatchAllIPPattern 判断是否为「全通配」写法(*.*.*.* 或 8 段全 * 的 IPv6)。
+//
+// 这类写法语法合法但极易误写：填进白名单等于全站不设防，填进黑名单等于封禁所有人。
+// 写入侧应当拒绝并提示用户改写成显式的 0.0.0.0/0，让意图无歧义。
+func IsCatchAllIPPattern(input string) bool {
+	return ipset.IsCatchAllWildcard(input)
+}
+
 // IsValidIPOrNetwork 检查给定的字符串是否为有效的 IP 地址或 IP 段（CIDR）
+//
+// 严格模式：不接受通配符与区间。系统防火墙(iptables/netsh)下发、
+// 威胁情报源解析等场景必须用本函数；用户可配的黑/白名单请用 IsValidIPPattern。
 func IsValidIPOrNetwork(input string) (bool, string) {
 	// 尝试解析为 IP 地址
 	if ip := net.ParseIP(input); ip != nil {
@@ -539,6 +690,11 @@ func GetManageClientIP(c *gin.Context) string {
 // GCONFIG_MANAGE_TRUSTED_PROXIES（CIDR 或单 IP，逗号分隔）内。
 // 留空 → 返回 false（不信任任何代理头，安全默认）。
 func isTrustedManageProxy(remoteIP string) bool {
+	// 管理端引用了某 CDN 厂商 → 直连对端属于该厂商中心库最新回源段即视为可信(自动跟随更新)
+	if global.GCONFIG_MANAGE_CDN_PROVIDER != "" &&
+		clientip.IsProviderIP(global.GCONFIG_MANAGE_CDN_PROVIDER, strings.TrimSpace(remoteIP)) {
+		return true
+	}
 	if global.GCONFIG_MANAGE_TRUSTED_PROXIES == "" {
 		return false
 	}

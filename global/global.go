@@ -63,6 +63,8 @@ var (
 	GWAF_RUNTIME_CURRENT_TUNNELPORT              string = "" //当前程序所占用隧道端口
 	GWAF_RUNTIME_CURRENT_EXPORT_DB_LOG_FILE_PATH string = "" //生成的日志导出文件路径
 
+	GWAF_RUNTIME_PROCESS_START_TIME time.Time = time.Now() //当前进程启动时间(包加载即赋值)
+
 	GWAF_RUNTIME_SSL_EXPIRE_CHECK bool = false //SSL过期检测是否正在运行
 	GWAF_RUNTIME_SSL_SYNC_HOST    bool = false //主机同步信息到过期检测是否正在运行
 	/**
@@ -130,6 +132,7 @@ var (
 	GWAF_CHAN_CLEAR_CC_IP                           = make(chan string, 10)              //清除cc缓存信息IP
 	GWAF_QUEUE_SHUTDOWN_SIGNAL        chan struct{} = make(chan struct{})                // 队列关闭信号
 	GWAF_CHAN_MANAGER_RESTART                       = make(chan int, 1)                  // 管理端重启信号
+	GWAF_CHAN_HTTP3                                 = make(chan int, 1)                  // HTTP/3 开关变更信号(配置热生效)
 
 	GWAF_SHUTDOWN_SIGNAL bool = false // 系统关闭信号
 	/*****CACHE相关*********/
@@ -153,10 +156,13 @@ var (
 	GCACHE_IPV6_SEARCHER       *geoip2.Reader // IPV6得查询器 (已废弃，由 GIPLOCATION_MANAGER 管理)
 
 	// IP 数据库配置
-	GCONFIG_IP_V4_SOURCE string = "ip2region" // IPv4 数据来源: ip2region / geolite2
-	GCONFIG_IP_V6_SOURCE string = "geolite2"  // IPv6 数据来源: ip2region / geolite2
-	GCONFIG_IP_V4_FORMAT string = "legacy"    // IPv4 xdb 字段格式
-	GCONFIG_IP_V6_FORMAT string = "legacy"    // IPv6 xdb 字段格式（仅 ip2region 时有效）
+	GCONFIG_IP_V4_SOURCE string = "ip2region" // IPv4 数据来源: ip2region / geolite2（ip2region.xdb 随程序内置）
+	GCONFIG_IP_V6_SOURCE string = "ip2region" // IPv6 数据来源: ip2region / geolite2
+	// 注：IPv6 默认自 1.3.24-beta.6 由 geolite2 改为 ip2region —— GeoLite2 受 MaxMind 再分发授权限制，
+	// 已不再随程序内置。ip2region_v6.xdb 需在【IP库管理】在线下载或自行放入 data/。
+	// 只影响新装；老用户 sys_config 里已有的值不动，由 ReloadFromConfig 做运行时降级。
+	GCONFIG_IP_V4_FORMAT string = "legacy"     // IPv4 xdb 字段格式
+	GCONFIG_IP_V6_FORMAT string = "opensource" // IPv6 xdb 字段格式（仅 ip2region 时有效）
 
 	// IP Location Manager 全局实例
 	GIPLOCATION_MANAGER *iplocation.Manager
@@ -187,6 +193,9 @@ var (
 	GDATA_SHARE_DB_FILE_SIZE int64 = 1024        //1024M 进行分库
 	GDATA_CURRENT_CHANGE     bool  = false       //当前是否正在切换
 	GDATA_IP_TAG_DB          int64 = 0           //IP Tag 存放位置 0 是主库  1是读取 stat库
+	// GCONFIG_ATTACK_TAG_EXCLUDE 风险日志里不算风险的标签（逗号分隔）。"正常"永远排除，不用写这里。
+	// 这些标签既不出现在规则筛选列表里，也不计入「阻止数量」，而是算作放行。
+	GCONFIG_ATTACK_TAG_EXCLUDE string = "ACME证书校验,静态文件访问成功"
 
 	GDATA_CURRENT_LOG_DB_MAP map[string]*gorm.DB //当前自定义的数据库连接 TODO 如果用户打开了多个 会不会影响内存
 	/******WebSocket*********/
@@ -257,17 +266,13 @@ var (
 	GWAF_BOT_IP_URL_MAIN string = "https://raw.githubusercontent.com/samwafgo/SamWafBotIPDatabase/main/allowlist/index.json"
 
 	/**
-	中心管控部分
+	授权注册信息部分
 	*/
-	GWAF_CENTER_ENABLE        string                 = "false"                    //中心管控激活状态
-	GWAF_CENTER_URL           string                 = "http://127.0.0.1:26666"   //中心管控默认URL
-	GWAF_REG_INFO             model.RegistrationInfo                              //当前注册信息
-	GWAF_REG_VERSION                                 = "v1"                       //注册信息版本
-	GWAF_REG_KEY                                     = []byte("5F!vion$k@a7QZ&)") //注册信息加密密钥
-	GWAF_REG_PUBLIC_KEY       string                 = ""                         //注册信息加密公钥
-	GWAF_REG_TMP_REG          []byte                                              //用户传来的信息
-	GWAF_REG_FREE_COUNT       int64                  = 99999                      //免费版授权用户数
-	GWAF_REG_CUR_CLIENT_COUNT int64                  = 3                          //当前客户端用户数
+	GWAF_REG_INFO       model.RegistrationInfo                              //当前注册信息
+	GWAF_REG_VERSION                           = "v1"                       //注册信息版本
+	GWAF_REG_KEY                               = []byte("5F!vion$k@a7QZ&)") //注册信息加密密钥
+	GWAF_REG_PUBLIC_KEY string                 = ""                         //注册信息加密公钥
+	GWAF_REG_TMP_REG    []byte                                              //用户传来的信息
 )
 
 func GetCurrentVersionInt() int {
@@ -303,6 +308,18 @@ func IncrementQPS() {
 // IncrementLogQPS 增加日志处理QPS计数 (只增加累积计数)
 func IncrementLogQPS() {
 	atomic.AddUint64(&GWAF_RUNTIME_LOG_PROCESS, 1)
+}
+
+// NotifyHTTP3ConfigChanged 投递一次 HTTP/3 配置变更信号，让引擎重新对齐 QUIC 监听。
+//
+// cap=1 + select/default：连续多次改动只留一次待处理信号(reconcile 本身幂等)；
+// 且在引擎/主循环尚未就绪时(启动期加载配置)也绝不会阻塞调用方 ——
+// 信号会留在缓冲里，等主循环起来后被消费。
+func NotifyHTTP3ConfigChanged() {
+	select {
+	case GWAF_CHAN_HTTP3 <- 1:
+	default:
+	}
 }
 
 // UpdateRealtimeQPS 更新实时QPS (基于差分计算，定时调用)
@@ -352,6 +369,8 @@ func UpdateRealtimeQPS() {
 
 			atomic.StoreUint64(&GWAF_CURRENT_REALTIME_QPS, realQPS)
 			atomic.StoreUint64(&GWAF_CURRENT_REALTIME_LOG_QPS, realLogQPS)
+			// 留一份采样历史，首页QPS卡片的趋势图直接读内存，不落库
+			AppendQPSSample(currentTime, realQPS)
 		}
 		// 如果时间差小于1秒，保持之前的QPS值不变
 	} else {

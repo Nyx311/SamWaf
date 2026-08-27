@@ -30,6 +30,7 @@ import (
 	"SamWaf/model/baseorm"
 	"SamWaf/wafdb"
 	"SamWaf/wafdb/dialect"
+	"SamWaf/wafsec"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -248,6 +249,12 @@ func TestCrossEngine(t *testing.T) {
 	global.GWAF_TENANT_ID = xtestTenant
 	global.GWAF_CUSTOM_SERVER_NAME = "xtest"
 
+	// 每实例数据密钥(DEK)：生产里在建库之前就绪，测试也必须先备好，
+	// 否则涉及密钥落库的 service 会走「加密失败」降级分支，测不到真实路径。
+	if err := wafsec.InitDataKey(t.TempDir(), ""); err != nil {
+		t.Fatalf("初始化数据密钥失败: %v", err)
+	}
+
 	for _, e := range xengines() {
 		e := e
 		t.Run(e.name, func(t *testing.T) {
@@ -275,8 +282,14 @@ func TestCrossEngine(t *testing.T) {
 			// —— stats 库用例（见 cross_engine_stats_test.go）——
 			t.Run("stats", func(t *testing.T) { runStatsCases(t, x.stats) })
 
+			// —— ip_tags 排除逻辑（见 cross_engine_iptag_test.go）——
+			t.Run("iptag", func(t *testing.T) { runIPTagCases(t, x.core) })
+
 			// —— 有副作用 service 的 DB-only 路径（见 cross_engine_side_test.go）——
 			t.Run("side", func(t *testing.T) { runSideCases(t, x) })
+
+			// —— 静态数据加密/迁移/回退（见 cross_engine_datakey_test.go）——
+			t.Run("datakey", func(t *testing.T) { runDataKeyCases(t, x.core) })
 
 			// —— 方言 SQL 在各引擎真实执行 ——
 			t.Run("DialectSQL", func(t *testing.T) {

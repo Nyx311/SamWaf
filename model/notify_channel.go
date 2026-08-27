@@ -18,4 +18,8 @@ type NotifyChannel struct {
 	ConfigJSON  string `gorm:"type:text" json:"config_json"` // 额外配置（JSON格式）
 	Status      int    `json:"status"`                       // 状态：1启用，0禁用
 	Remarks     string `gorm:"size:500" json:"remarks"`      // 备注
+
+	//瞬态字段(不落库)：列表/详情接口不回显 Secret/AccessToken 原文，用下面两个布尔告知前端“是否已配置”。
+	HasSecret      bool `gorm:"-" json:"has_secret"`
+	HasAccessToken bool `gorm:"-" json:"has_access_token"`
 }

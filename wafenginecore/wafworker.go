@@ -259,9 +259,13 @@ func (waf *WafEngine) LoadHost(inHost model.Hosts) []innerbean.ServerRunTime {
 		Host:                inHost,
 		PluginIpRateLimiter: pluginIpRateLimiter,
 		IPWhiteLists:        ipwhitelist,
+		IPWhiteIndex:        BuildIPAllowIndex(ipwhitelist),
+		IPWhiteGroupCodes:   ExtractAllowGroupCodes(ipwhitelist),
 		UrlWhiteLists:       urlwhitelist,
 		LdpUrlLists:         ldpurls,
 		IPBlockLists:        ipblocklist,
+		IPBlockIndex:        BuildIPBlockIndex(ipblocklist),
+		IPBlockGroupCodes:   ExtractBlockGroupCodes(ipblocklist),
 		UrlBlockLists:       urlblocklist,
 		AntiCCBean:          anticcBean,
 		HttpAuthBases:       httpAuthList,
@@ -379,6 +383,10 @@ func (waf *WafEngine) RemovePortServer() {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 
+			// 先停 HTTP/3：老代码只关了 Svr、从不碰 H3，删掉 map 条目后 UDP socket 就彻底泄漏了(issue #916)
+			if serverRuntime.H3 != nil {
+				waf.stopHTTP3(onlinePort, serverRuntime.H3)
+			}
 			if serverRuntime.Svr != nil {
 				err := serverRuntime.Svr.Shutdown(ctx)
 				if err != nil {

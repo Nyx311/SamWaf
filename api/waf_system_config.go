@@ -3,8 +3,10 @@ package api
 import (
 	"SamWaf/model/common/response"
 	"SamWaf/model/request"
+	"SamWaf/service/waf_service"
 	"SamWaf/waftask"
 	"errors"
+	"fmt"
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 )
@@ -40,6 +42,7 @@ func (w *WafSystemConfigApi) GetDetailApi(c *gin.Context) {
 	err := c.ShouldBind(&req)
 	if err == nil {
 		bean := wafSystemConfigService.GetDetailApi(req)
+		waf_service.MaskSensitiveConfig(&bean)
 		response.OkWithDetailed(bean, "获取成功", c)
 	} else {
 		response.FailWithMessage("解析失败", c)
@@ -61,6 +64,9 @@ func (w *WafSystemConfigApi) GetListApi(c *gin.Context) {
 	err := c.ShouldBindJSON(&req)
 	if err == nil {
 		beans, total, _ := wafSystemConfigService.GetListApi(req)
+		for i := range beans {
+			waf_service.MaskSensitiveConfig(&beans[i])
+		}
 		response.OkWithDetailed(response.PageResult{
 			List:      beans,
 			Total:     total,
@@ -103,6 +109,13 @@ func (w *WafSystemConfigApi) ModifyApi(c *gin.Context) {
 	var req request.WafSystemConfigEditReq
 	err := c.ShouldBindJSON(&req)
 	if err == nil {
+		// 密钥类配置：留空=保持原值(防止只改备注把密钥冲掉)，清空需提交哨兵值。
+		req.Value = resolveSensitiveConfigValue(req.Item, req.Value,
+			func() string { return wafSystemConfigService.GetDetailByIdApi(req.Id).Value })
+		if msg, ok := checkSystemConfigValue(req.Item, req.Value); !ok {
+			response.FailWithMessage(msg, c)
+			return
+		}
 		err = wafSystemConfigService.ModifyApi(req)
 		if err != nil {
 			response.FailWithMessage("编辑发生错误", c)
@@ -139,6 +152,15 @@ func (w *WafSystemConfigApi) ModifyByItemApi(c *gin.Context) {
 		return
 	}
 
+	// 密钥类配置：留空=保持原值，清空需提交哨兵值。
+	req.Value = resolveSensitiveConfigValue(req.Item, req.Value,
+		func() string { return wafSystemConfigService.GetDetailByItem(req.Item).Value })
+
+	if msg, ok := checkSystemConfigValue(req.Item, req.Value); !ok {
+		response.FailWithMessage(msg, c)
+		return
+	}
+
 	err = wafSystemConfigService.ModifyByItemApi(req)
 	if err != nil {
 		response.FailWithMessage("编辑发生错误: "+err.Error(), c)
@@ -153,8 +175,42 @@ func (w *WafSystemConfigApi) GetDetailByItemApi(c *gin.Context) {
 	err := c.ShouldBind(&req)
 	if err == nil {
 		bean := wafSystemConfigService.GetDetailByItemApi(req)
+		waf_service.MaskSensitiveConfig(&bean)
 		response.OkWithDetailed(bean, "获取成功", c)
 	} else {
 		response.FailWithMessage("解析失败", c)
 	}
+}
+
+// resolveSensitiveConfigValue 处理密钥类配置项的写入语义：
+//   - 非密钥项：原样返回，行为不变；
+//   - 密钥项 + 提交清空哨兵：返回空串（显式清空）；
+//   - 密钥项 + 留空：返回库中原值（保持不变，防止只改备注等操作把密钥冲掉）；
+//   - 密钥项 + 填了新值：返回新值。
+//
+// loadCurrent 惰性读取库中现值，仅在“密钥项且留空”时才调用。
+func resolveSensitiveConfigValue(item, submitted string, loadCurrent func() string) string {
+	if !waf_service.IsSensitiveConfigItem(item) {
+		return submitted
+	}
+	if submitted == waf_service.ConfigClearSentinel {
+		return ""
+	}
+	if submitted == "" {
+		return loadCurrent()
+	}
+	return submitted
+}
+
+// checkSystemConfigValue 针对特定配置项做写入前校验。
+// 配置值最终会进 SQL 的参数绑定，不存在拼接注入，但这些值来自管理端输入，
+// 该挡的（引号、注释符、控制字符、超长、超多）在写库前就挡掉，别等查询时静默丢弃。
+func checkSystemConfigValue(item string, value string) (string, bool) {
+	switch item {
+	case "attack_tag_exclude":
+		if bad, ok := waf_service.ValidateAttackTagExclude(value); !ok {
+			return fmt.Sprintf("排除标签不合法: %q（不能含引号/分号/反斜杠/注释符/控制字符，单项不超过 255 字符，最多 30 项）", bad), false
+		}
+	}
+	return "", true
 }

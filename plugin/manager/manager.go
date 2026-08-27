@@ -47,22 +47,34 @@ type PluginManager struct {
 	healthTicker *time.Ticker                     // 健康检查定时器
 }
 
+// PendingVerification 插件系统 总闸。
+const PendingVerification = true
+
+// PendingVerificationReason 拒绝加载时对外统一的说明
+const PendingVerificationReason = "插件系统处于待验证阶段：签名与准入控制未完成，已停止加载任何插件"
+
 // NewPluginManager 创建插件管理器
 func NewPluginManager(config *pluginconfig.PluginSystemConfig) *PluginManager {
 	if config == nil {
 		config = pluginconfig.DefaultPluginSystemConfig()
 	}
 
+	enabled := config.Enabled
+	if PendingVerification {
+		// 强制关闭：即便配置文件写了 enabled: true 也不生效
+		enabled = false
+	}
+
 	pm := &PluginManager{
-		enabled:  config.Enabled,
+		enabled:  enabled,
 		plugins:  make(map[string]*PluginInstance),
 		registry: registry.NewRegistry(),
 		config:   config,
 		stopChan: make(chan struct{}),
 	}
 
-	// 如果启用自动重启，启动健康检查
-	if config.AutoRestart && config.HealthCheckInterval > 0 {
+	// 如果启用自动重启，启动健康检查（待验证期间没有插件可检，直接不起协程）
+	if !PendingVerification && config.AutoRestart && config.HealthCheckInterval > 0 {
 		pm.startHealthCheck()
 	}
 
@@ -78,6 +90,10 @@ func (pm *PluginManager) IsEnabled() bool {
 
 // SetEnabled 设置插件系统启用状态
 func (pm *PluginManager) SetEnabled(enabled bool) {
+	// 待验证期间只允许关，不允许开
+	if PendingVerification && enabled {
+		return
+	}
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 	pm.enabled = enabled
@@ -85,6 +101,11 @@ func (pm *PluginManager) SetEnabled(enabled bool) {
 
 // LoadPlugin 加载插件
 func (pm *PluginManager) LoadPlugin(pluginConfig *pluginconfig.PluginConfig) error {
+	// 总闸：待验证期间拒绝一切加载请求（含配置文件、API、健康检查重启三条入口）
+	if PendingVerification {
+		return fmt.Errorf("%s (plugin_id=%s)", PendingVerificationReason, pluginConfig.ID)
+	}
+
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 

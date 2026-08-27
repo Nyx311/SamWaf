@@ -15,10 +15,16 @@ on:
 permissions:
   contents: read
 
+# 同一分支上新提交进来时，取消还在跑的旧 run，避免卡住的 run 长期占坑
+concurrency:
+  group: ci-test-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   # Linux 构建和测试
   build-and-test-linux:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -26,18 +32,38 @@ jobs:
           fetch-depth: 0
 
       - name: Set up Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v5
         with:
-          go-version: '1.21.4'
+          # 与 Win7 专用版同一版本，且不低于 go.mod 里的 toolchain，避免构建时再下载一次工具链
+          go-version: '1.25.11'
+          check-latest: false
 
       - name: Install dependencies
+        timeout-minutes: 15
+        run: bash .github/scripts/apt-install.sh build-essential musl-tools
+
+      - name: Resolve version (align with latest GitHub Release)
+        id: ver
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential musl-tools
+          # 版本号对齐 GitHub Releases 上的最新版本，避免测试者下载后被
+          # "先升正式版、再升测试版" 连续推着升级，导致测不到本次构建的代码。
+          # 注意：beta 也是以正式 release 发布的(goreleaser prerelease:false)，
+          # 所以 /releases/latest 拿到的就是 releases 页面顶部那个 tag。
+          LATEST=$(curl -sSL -H "Authorization: Bearer $GH_TOKEN" \
+            https://api.github.com/repos/samwafgo/SamWaf/releases/latest | jq -r '.tag_name // empty') || true
+          # 兜底1：本地 git tag（checkout 已 fetch-depth:0）
+          if [ -z "$LATEST" ]; then LATEST=$(git describe --tags --abbrev=0 2>/dev/null || true); fi
+          # 兜底2：拿不到就用默认值，不让构建挂掉
+          if [ -z "$LATEST" ]; then LATEST="v1.0.0"; fi
+          echo "base=$LATEST" >> $GITHUB_OUTPUT
+          # 版本名带 citest- 前缀作为"仅供单独测试"的标记（只用于展示，不参与版本比较）
+          echo "vname=citest-$(date +'%Y%m%d')-run${{ github.run_number }}-$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
 
       - name: Download SamWafWeb
         run: |
-          curl -L https://github.com/samwafgo/SamWafWeb/releases/latest/download/dist.tar.gz -o dist.tar.gz
+          curl -fSL --retry 3 --retry-all-errors --connect-timeout 15 --max-time 300 https://github.com/samwafgo/SamWafWeb/releases/latest/download/dist.tar.gz -o dist.tar.gz
           tar -zxvf dist.tar.gz
           rm -rf public/dist
           mv -f dist public
@@ -54,9 +80,8 @@ jobs:
           CGO_CFLAGS: -Wno-unused-variable -D_LARGEFILE64_SOURCE
           GOAMD64: v1
         run: |
-          BUILDTIME=$(date +'%Y%m%d')
           go build \
-            -ldflags="-X SamWaf/global.GWAF_RELEASE=true -X SamWaf/global.GWAF_RUNTIME_WIN7_VERSION=false -X SamWaf/global.GWAF_RELEASE_VERSION_NAME=${BUILDTIME} -X SamWaf/global.GWAF_RELEASE_VERSION=v1.0.0-beta.1 -s -w -extldflags '-static'" \
+            -ldflags="-X SamWaf/global.GWAF_RELEASE=true -X SamWaf/global.GWAF_RUNTIME_WIN7_VERSION=false -X SamWaf/global.GWAF_RELEASE_VERSION_NAME=${{ steps.ver.outputs.vname }} -X SamWaf/global.GWAF_RELEASE_VERSION=${{ steps.ver.outputs.base }} -s -w -extldflags '-static'" \
             -o ./SamWafLinux64 ./cmd/samwaf/main.go
 
       - name: Test Linux binary
@@ -103,16 +128,25 @@ jobs:
           wait $SERVICE_PID 2>/dev/null || true
           echo "Service stopped successfully"
 
+      - name: Write CI test build marker
+        env:
+          VERSION: ${{ steps.ver.outputs.base }}
+          VERSION_NAME: ${{ steps.ver.outputs.vname }}
+        run: bash .github/scripts/write-citest-marker.sh
+
       - name: Upload Linux binary
         uses: actions/upload-artifact@v4
         with:
-          name: SamWafLinux64-${{ github.sha }}
-          path: ./SamWafLinux64
+          name: SamWafLinux64-citest-run${{ github.run_number }}-${{ github.sha }}
+          path: |
+            ./SamWafLinux64
+            ./README-CITEST.txt
           retention-days: 3
 
   # Windows 构建和基本测试
   build-and-test-windows:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -120,18 +154,32 @@ jobs:
           fetch-depth: 0
 
       - name: Set up Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v5
         with:
-          go-version: '1.21.4'
+          # 与 Win7 专用版同一版本，且不低于 go.mod 里的 toolchain，避免构建时再下载一次工具链
+          go-version: '1.25.11'
+          check-latest: false
 
       - name: Install dependencies for Windows cross-compilation
+        timeout-minutes: 15
+        run: bash .github/scripts/apt-install.sh gcc-mingw-w64-x86-64 gcc-mingw-w64-i686
+
+      - name: Resolve version (align with latest GitHub Release)
+        id: ver
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-mingw-w64-x86-64 gcc-mingw-w64-i686
+          # 同 Linux 任务：版本号对齐 GitHub Releases 上的最新版本，避免连续升级
+          LATEST=$(curl -sSL -H "Authorization: Bearer $GH_TOKEN" \
+            https://api.github.com/repos/samwafgo/SamWaf/releases/latest | jq -r '.tag_name // empty') || true
+          if [ -z "$LATEST" ]; then LATEST=$(git describe --tags --abbrev=0 2>/dev/null || true); fi
+          if [ -z "$LATEST" ]; then LATEST="v1.0.0"; fi
+          echo "base=$LATEST" >> $GITHUB_OUTPUT
+          echo "vname=citest-$(date +'%Y%m%d')-run${{ github.run_number }}-$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
 
       - name: Download SamWafWeb
         run: |
-          curl -L https://github.com/samwafgo/SamWafWeb/releases/latest/download/dist.tar.gz -o dist.tar.gz
+          curl -fSL --retry 3 --retry-all-errors --connect-timeout 15 --max-time 300 https://github.com/samwafgo/SamWafWeb/releases/latest/download/dist.tar.gz -o dist.tar.gz
           tar -zxvf dist.tar.gz
           rm -rf public/dist
           mv -f dist public
@@ -149,9 +197,8 @@ jobs:
           CXX: x86_64-w64-mingw32-g++
           CGO_CFLAGS: -Wno-unused-variable
         run: |
-          BUILDTIME=$(date +'%Y%m%d')
           go build \
-            -ldflags="-X SamWaf/global.GWAF_RELEASE=true -X SamWaf/global.GWAF_RUNTIME_WIN7_VERSION=false -X SamWaf/global.GWAF_RELEASE_VERSION_NAME=${BUILDTIME} -X SamWaf/global.GWAF_RELEASE_VERSION=v1.0.0-beta.1 -s -w -extldflags '-static'" \
+            -ldflags="-X SamWaf/global.GWAF_RELEASE=true -X SamWaf/global.GWAF_RUNTIME_WIN7_VERSION=false -X SamWaf/global.GWAF_RELEASE_VERSION_NAME=${{ steps.ver.outputs.vname }} -X SamWaf/global.GWAF_RELEASE_VERSION=${{ steps.ver.outputs.base }} -s -w -extldflags '-static'" \
             -o ./SamWaf64.exe ./cmd/samwaf/main.go
 
       - name: Check Windows binary
@@ -160,11 +207,19 @@ jobs:
           ls -lh SamWaf64.exe
           file SamWaf64.exe
 
+      - name: Write CI test build marker
+        env:
+          VERSION: ${{ steps.ver.outputs.base }}
+          VERSION_NAME: ${{ steps.ver.outputs.vname }}
+        run: bash .github/scripts/write-citest-marker.sh
+
       - name: Upload Windows binary
         uses: actions/upload-artifact@v4
         with:
-          name: SamWaf64-${{ github.sha }}
-          path: ./SamWaf64.exe
+          name: SamWaf64-citest-run${{ github.run_number }}-${{ github.sha }}
+          path: |
+            ./SamWaf64.exe
+            ./README-CITEST.txt
           retention-days: 3
   # # 代码质量检查
   # code-quality:
@@ -174,9 +229,9 @@ jobs:
   #       uses: actions/checkout@v4
 
   #     - name: Set up Go
-  #       uses: actions/setup-go@v4
+  #       uses: actions/setup-go@v5
   #       with:
-  #         go-version: '1.21.4'
+  #         go-version: '1.25.11'
 
   #     - name: Go mod verify
   #       run: go mod verify

@@ -125,10 +125,10 @@ func (web *WafWebManager) initRouter(r *gin.Engine) {
 	PublicRouterGroup := r.Group("")
 	PublicRouterGroup.Use(middleware.SecApi(), middleware.IPWhitelist(), middleware.DomainWhitelist(), middleware.ReplayProtect())
 	router.PublicApiGroupApp.InitLoginRouter(PublicRouterGroup)
-	router.PublicApiGroupApp.InitCenterRouter(PublicRouterGroup) //注册中心接收接口
+	router.PublicApiGroupApp.InitSecKeyRouter(PublicRouterGroup)
 
 	RouterGroup := r.Group("")
-	RouterGroup.Use(middleware.Auth(), middleware.ReplayProtect(), middleware.OpenApiLogMiddleware(), middleware.CenterApi(), middleware.SecApi(), middleware.GinGlobalExceptionMiddleWare(), middleware.IPWhitelist(), middleware.DomainWhitelist()) //TODO 中心管控 特定
+	RouterGroup.Use(middleware.Auth(), middleware.ReplayProtect(), middleware.OpenApiLogMiddleware(), middleware.IPWhitelist(), middleware.DomainWhitelist(), middleware.SecApi(), middleware.GinGlobalExceptionMiddleWare())
 	{
 		// 共享/运维类接口：任意已登录角色可访问
 		router.ApiGroupApp.InitHostRouter(RouterGroup)
@@ -140,7 +140,6 @@ func (web *WafWebManager) initRouter(r *gin.Engine) {
 		router.ApiGroupApp.InitSysInfoRouter(RouterGroup)
 		router.ApiGroupApp.InitWafCommonRouter(RouterGroup)
 		router.ApiGroupApp.InitOneKeyModRouter(RouterGroup)
-		router.ApiGroupApp.InitCenterRouter(RouterGroup)
 		router.ApiGroupApp.InitLicenseRouter(RouterGroup)
 		router.ApiGroupApp.InitLoadBalanceRouter(RouterGroup)
 		router.ApiGroupApp.InitSslConfigRouter(RouterGroup)
@@ -165,12 +164,20 @@ func (web *WafWebManager) initRouter(r *gin.Engine) {
 		router.ApiGroupApp.InitNotifySubscriptionRouter(RouterGroup)
 		router.ApiGroupApp.InitNotifyLogRouter(RouterGroup)
 		router.ApiGroupApp.InitFirewallIPBlockRouter(RouterGroup)
+		router.ApiGroupApp.InitHostGuardRouter(RouterGroup)
+		router.ApiGroupApp.InitHostConnRouter(RouterGroup)
+		router.ApiGroupApp.InitThreatIPRouter(RouterGroup)
+		router.ApiGroupApp.InitCDNIPRouter(RouterGroup)
+		router.ApiGroupApp.InitIPLookupRouter(RouterGroup)
 		router.ApiGroupApp.InitLogFileWriteRouter(RouterGroup)
 		router.ApiGroupApp.InitIPLocationRouter(RouterGroup)
 		router.ApiGroupApp.InitWafDataRetentionRouter(RouterGroup)
 		router.ApiGroupApp.InitWafHostPathRuleRouter(RouterGroup)
 		// 界面偏好：按登录账号隔离（账号归属即授权边界），任意已登录角色均可存取本人的界面偏好
 		router.ApiGroupApp.InitWafUIPreferenceRouter(RouterGroup)
+
+		// 升级须知：只读查询 + 本机处理状态标记，首页提示条对所有角色都要可见
+		router.ApiGroupApp.InitUpgradeNoticeRouter(RouterGroup)
 
 		// 自助改密：任意已登录角色均可修改本人密码（含首次登录/到期强制改密场景），不受角色域限制
 		RouterGroup.POST("/api/v1/account/changemypwd", api.APIGroupAPP.WafAccountApi.ChangeMyPasswordApi)
@@ -186,9 +193,17 @@ func (web *WafWebManager) initRouter(r *gin.Engine) {
 			router.ApiGroupApp.InitAntiCCRouter(securityAdminGroup)
 			router.ApiGroupApp.InitIPFailureRouter(securityAdminGroup)
 			router.ApiGroupApp.InitBlockIpRouter(securityAdminGroup)
+			// IP组是黑/白名单与自定义规则共用的防护策略资源，与它们同属安全管理员域
+			router.ApiGroupApp.InitIPGroupRouter(securityAdminGroup)
+			router.ApiGroupApp.InitIPGroupItemRouter(securityAdminGroup)
 			router.ApiGroupApp.InitBlockUrlRouter(securityAdminGroup)
 			router.ApiGroupApp.InitSensitiveRouter(securityAdminGroup)
 			router.ApiGroupApp.InitWafOwaspRouter(securityAdminGroup)
+			// 统一访问认证：账号、策略配置、在线会话都是访问控制决策，属安全管理员域
+			// （它的审计日志归审计管理员，见下方 auditAdminGroup）
+			router.ApiGroupApp.InitAccessAccountRouter(securityAdminGroup)
+			router.ApiGroupApp.InitAccessConfigRouter(securityAdminGroup)
+			router.ApiGroupApp.InitAccessSessionRouter(securityAdminGroup)
 		}
 
 		// === 审计管理员域：操作/账号审计日志（只读，独立审计其余两员）===
@@ -197,6 +212,11 @@ func (web *WafWebManager) initRouter(r *gin.Engine) {
 		{
 			router.ApiGroupApp.InitSysLogRouter(auditAdminGroup)
 			router.ApiGroupApp.InitAccountLogRouter(auditAdminGroup)
+			// 管理端登录历史：谁在什么时间从哪个IP登录了管理端，与账号审计同域
+			router.ApiGroupApp.InitLoginHistoryRouter(auditAdminGroup)
+			// 统一访问认证的审计日志：谁在什么时间从哪个IP登录了哪个站点。
+			// 放审计域而不是安全域，正是为了让安全管理员的动作也能被独立审计。
+			router.ApiGroupApp.InitAccessAuditRouter(auditAdminGroup)
 		}
 
 		// === 系统管理员域：系统配置 ===
@@ -211,7 +231,7 @@ func (web *WafWebManager) initRouter(r *gin.Engine) {
 	// 整组归属「系统管理员域」：账户管理/OTP/开放平台Key/SQL查询/应用管理/AI模型均为系统级敏感操作
 	// superAdmin 兜底放行；空角色(历史账号)经 NormalizeRole 视为 superAdmin，向后兼容
 	TokenOnlyRouterGroup := r.Group("")
-	TokenOnlyRouterGroup.Use(middleware.TokenOnlyAuth(), middleware.RequireRole(enums.ROLE_SYSTEM_ADMIN), middleware.ReplayProtect(), middleware.CenterApi(), middleware.SecApi(), middleware.GinGlobalExceptionMiddleWare(), middleware.IPWhitelist())
+	TokenOnlyRouterGroup.Use(middleware.TokenOnlyAuth(), middleware.RequireRole(enums.ROLE_SYSTEM_ADMIN), middleware.ReplayProtect(), middleware.IPWhitelist(), middleware.DomainWhitelist(), middleware.SecApi(), middleware.GinGlobalExceptionMiddleWare())
 	{
 		// 开放平台管理接口
 		router.ApiGroupApp.InitOPlatformKeyRouter(TokenOnlyRouterGroup)
@@ -227,6 +247,8 @@ func (web *WafWebManager) initRouter(r *gin.Engine) {
 		router.ApiGroupApp.InitWafAppRouter(TokenOnlyRouterGroup)
 		// AI模型管理与训练数据导出：模型会被引擎加载、数据出库，拒绝 API Key
 		router.ApiGroupApp.InitWafAIRouter(TokenOnlyRouterGroup)
+		// 运行诊断：进程内部状态与性能采样数据导出，拒绝 API Key
+		router.ApiGroupApp.InitWafDiagnosticRouter(TokenOnlyRouterGroup)
 	}
 
 	// 保存 gin.Engine 引用供 API 文档生成使用
@@ -284,7 +306,7 @@ func (web *WafWebManager) cors() gin.HandlerFunc {
 		if origin != "" && isCorsOriginAllowed(origin) {
 			c.Header("Access-Control-Allow-Origin", origin)
 			c.Header("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE, UPDATE")
-			c.Header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept, Authorization,X-Token,Remote-Waf-User-Id,OPEN-X-Token,X-Login-Type,X-Mobile-Token,X-API-Key,X-Request-Time,X-Request-Id,X-APP-OP-PASSWORD")
+			c.Header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept, Authorization,X-Token,Remote-Waf-User-Id,OPEN-X-Token,X-Login-Type,X-Mobile-Token,X-API-Key,X-Request-Time,X-Request-Id,X-APP-OP-PASSWORD,X-Sec-Ver,X-Key-Id")
 			c.Header("Access-Control-Expose-Headers", "Content-Length, Access-Control-Allow-Origin, Access-Control-Allow-Headers, Cache-Control, Content-Language, Content-Type")
 			//允许客户端传递校验信息比如 cookie
 			c.Header("Access-Control-Allow-Credentials", "true")
@@ -372,9 +394,13 @@ func (web *WafWebManager) StartLocalServer() error {
 		},
 	}
 
-	// 开启了仅HTTPS但未启用SSL/无证书时，提示该开关不会生效（不强制，避免锁死）
+	// 「仅允许HTTPS」开着却没启用 SSL 属矛盾配置：既然根本不打算提供 HTTPS，
+	// 这个开关就无从谈起。这里只告警不拒绝——拒绝会把"曾经开过 force_https、后来关掉 SSL"
+	// 的存量部署直接挡在门外，而这种组合多半是遗留值而非真实意图。
+	// 真正需要 fail-closed 的是"打算走 HTTPS 却拿不到证书"，那条在 serveHTTPFallback 里处理。
 	if global.GWAF_SSL_FORCE_HTTPS && !global.GWAF_SSL_ENABLE {
-		zlog.Warn(web.LogName, "已开启「仅允许HTTPS」但未启用SSL，将照常以HTTP提供服务（开关不生效）")
+		zlog.Warn(web.LogName, "已开启「仅允许HTTPS」但未启用SSL，该开关不生效，仍以HTTP提供服务；"+
+			"如需强制HTTPS请先启用SSL并配置证书")
 	}
 	err := waf_service.WafTokenInfoServiceApp.ReloadAllValidTokensToCache()
 	if err != nil {
@@ -396,40 +422,19 @@ func (web *WafWebManager) StartLocalServer() error {
 		// 检查证书文件是否存在
 		if _, err := os.Stat(certPath); err != nil {
 			zlog.Warn(web.LogName, "SSL证书文件不存在，降级使用 HTTP: ", certPath)
-			// 降级到 HTTP
-			zlog.Info(web.LogName, "启动 HTTP 管理端（降级模式）, port:", global.GWAF_LOCAL_SERVER_PORT)
-			if err := web.listenAndServeHTTPReuse(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				errMsg := fmt.Sprintf("启动管理界面失败: %s", err.Error())
-				zlog.Error(web.LogName, errMsg)
-				return err
-			}
-			return nil
+			return web.serveHTTPFallback("管理端证书文件不存在")
 		}
 
 		if _, err := os.Stat(keyPath); err != nil {
 			zlog.Warn(web.LogName, "SSL私钥文件不存在，降级使用 HTTP: ", keyPath)
-			// 降级到 HTTP
-			zlog.Info(web.LogName, "启动 HTTP 管理端（降级模式）, port:", global.GWAF_LOCAL_SERVER_PORT)
-			if err := web.listenAndServeHTTPReuse(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				errMsg := fmt.Sprintf("启动管理界面失败: %s", err.Error())
-				zlog.Error(web.LogName, errMsg)
-				return err
-			}
-			return nil
+			return web.serveHTTPFallback("管理端私钥文件不存在")
 		}
 
 		// 尝试加载证书
 		cert, err := tls.LoadX509KeyPair(certPath, keyPath)
 		if err != nil {
 			zlog.Warn(web.LogName, "SSL证书加载失败，降级使用 HTTP: ", err.Error())
-			// 降级到 HTTP
-			zlog.Info(web.LogName, "启动 HTTP 管理端（降级模式）, port:", global.GWAF_LOCAL_SERVER_PORT)
-			if err := web.listenAndServeHTTPReuse(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				errMsg := fmt.Sprintf("启动管理界面失败: %s", err.Error())
-				zlog.Error(web.LogName, errMsg)
-				return err
-			}
-			return nil
+			return web.serveHTTPFallback("管理端证书加载失败：" + err.Error())
 		}
 
 		// 使用混合监听器，同时支持 HTTPS 和 HTTP（降级方案）
@@ -449,6 +454,68 @@ func (web *WafWebManager) StartLocalServer() error {
 		}
 	}
 
+	return nil
+}
+
+// httpsRequiredNotice 是 fail-closed 时回给访问者的全部内容。
+// 单独成函数是为了能被单测直接断言——这段文案是运维在管理端打不开时唯一的线索，
+// 少一条恢复路径就意味着有人得去翻源码。
+func httpsRequiredNotice(reason string) string {
+	return "管理端已开启「仅允许HTTPS」，但当前无法提供 HTTPS 服务。\n" +
+		"原因：" + reason + "\n\n" +
+		"为避免管理端以明文提供服务，已拒绝全部 HTTP 请求。\n" +
+		"恢复方式（任选其一，改完需重启 SamWaf）：\n" +
+		"  1. 修复管理端证书（data/ssl/manager/domain.crt 与 domain.key）\n" +
+		"  2. conf/config.yml 设 security.ssl_force_https: false —— 保留 HTTPS，同时允许 HTTP 访问\n" +
+		"  3. conf/config.yml 设 security.ssl_enable: false —— 关闭 HTTPS，回到纯 HTTP\n"
+}
+
+// httpsRequiredHandler 占住端口但不挂管理端路由：任何请求都只回 503 与修复指引。
+func httpsRequiredHandler(reason string) http.Handler {
+	notice := httpsRequiredNotice(reason)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(notice))
+	})
+}
+
+// serveHTTPFallback 处理"启用了 SSL 但拿不到可用证书"的情形。
+//
+// 分两种走向，取决于「仅允许HTTPS」：
+//   - 关闭（默认）：降级为纯 HTTP，保证管理端还能进——可用性优先，与历史行为一致。
+//   - 开启：**拒绝以明文提供管理端服务**。运维显式声明过"只走 HTTPS"，而证书过期/损坏
+//     恰恰是最常见的失败；此时若静默降级，管理端会在运维毫不知情的情况下以明文接受登录，
+//     口令明文过网。这里改为 fail-closed。
+//
+// fail-closed 不等于把端口一关了事——那样运维只看到"连接被拒绝"，无从判断原因。
+// 端口照常监听，但**不挂管理端路由**，任何请求只回 503 与修复指引：既不可能泄露任何东西，
+// 也不会让人误以为进程挂了。
+func (web *WafWebManager) serveHTTPFallback(reason string) error {
+	if !global.GWAF_SSL_FORCE_HTTPS {
+		zlog.Info(web.LogName, "启动 HTTP 管理端（降级模式）, port:", global.GWAF_LOCAL_SERVER_PORT)
+		if err := web.listenAndServeHTTPReuse(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errMsg := fmt.Sprintf("启动管理界面失败: %s", err.Error())
+			zlog.Error(web.LogName, errMsg)
+			return err
+		}
+		return nil
+	}
+
+	zlog.Error(web.LogName, "「仅允许HTTPS」已开启但无法提供 HTTPS（"+reason+"），已拒绝明文服务；"+
+		"请修复证书，或在 conf/config.yml 关闭 security.ssl_force_https / security.ssl_enable 后重启")
+
+	// 换掉 Handler：管理端路由不再挂载，明文端口上不会出现登录框或任何接口。
+	// 复用同一个 HttpServer 是为了让既有的优雅关闭/重启链路照常生效。
+	web.HttpServer.Handler = httpsRequiredHandler(reason)
+
+	zlog.Info(web.LogName, "启动 HTTP 管理端（仅回 503 提示，不提供管理功能）, port:", global.GWAF_LOCAL_SERVER_PORT)
+	if err := web.listenAndServeHTTPReuse(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		errMsg := fmt.Sprintf("启动管理界面失败: %s", err.Error())
+		zlog.Error(web.LogName, errMsg)
+		return err
+	}
 	return nil
 }
 

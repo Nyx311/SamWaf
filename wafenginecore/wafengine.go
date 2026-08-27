@@ -40,8 +40,6 @@ import (
 	"time"
 
 	"github.com/pires/go-proxyproto"
-	"github.com/quic-go/quic-go"
-	"github.com/quic-go/quic-go/http3"
 	goahocorasick "github.com/samwafgo/ahocorasick"
 	"go.uber.org/zap"
 	"golang.org/x/time/rate"
@@ -278,6 +276,13 @@ func (waf *WafEngine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		incrementMonitor(hostCode)
 		defer decrementMonitor(hostCode)
+
+		// 站点流量计量：直接量真实进出字节，静态资源/大文件/chunked/流式/被拦截响应全都算得到。
+		// 必须在这里（host 已解析、任何响应写出之前）包一次，之后所有出口都用包装后的 w。
+		// 分桶时间取「此刻」，不是落库时刻，否则跨天/跨整点的账会记到错误的桶里。（issue #930）
+		meteredWriter, settleTraffic := attachTrafficMeter(w, r, hostCode, r.Host)
+		w = meteredWriter
+		defer settleTraffic()
 		//检测网站是否已关闭
 		if hostTarget.Host.START_STATUS == 1 {
 			resBytes := []byte("<html><head><title>网站已关闭</title></head><body><center><h1>当前访问网站已关闭</h1> <br><h3></h3></center></body> </html>")
@@ -290,12 +295,14 @@ func (waf *WafEngine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 			return
 		}
-		// 取出客户IP
-		ipErr, clientIP, clientPort := waf.getClientIP(r, strings.Split(global.GCONFIG_RECORD_PROXY_HEADER, ",")...)
+		// 取出客户IP（按 host 的真实IP来源模式加固；IPSourceMode 为空时保持旧行为——取配置头最左第一个）
+		ipErr, clientIP, clientPort := waf.getBizClientIP(r, hostTarget.Host)
 		if ipErr != nil {
 			zlog.Error("get client error", ipErr.Error())
 			return
 		}
+		// 记录一份"真实IP来源"诊断采样(每站每秒最多一条)，供管理端配置页直接查看实际到达的请求头
+		recordIPProbe(hostTarget.Host, r, clientIP)
 		_, ok := waf.ServerOnline.Get(hostTarget.Host.Remote_port)
 		//检测如果访问IP和远程IP是同一个IP，且远程端口在本地Server已存在则显示配置错误
 		if clientIP == hostTarget.Host.Remote_ip && ok == true {
@@ -416,8 +423,8 @@ func (waf *WafEngine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			zlog.Debug("解析cache json失败")
 		}
 
-		// 获取请求报文的内容长度
-		contentLength := r.ContentLength
+		// 获取请求报文的内容长度（chunked 时 Go 给 -1，先归一，避免统计出现负数）
+		contentLength := sanitizeContentLength(r.ContentLength)
 		var bodyByte []byte
 
 		// 拷贝一份request的Body ,控制不记录大文件的情况
@@ -446,7 +453,7 @@ func (waf *WafEngine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		header := joinHeader(r.Header)
 
-		region := utils.GetCountry(clientIP)
+		region, geoResolved := utils.GetCountryEx(clientIP)
 
 		currentDay, _ := strconv.Atoi(time.Now().Format("20060102"))
 
@@ -484,6 +491,7 @@ func (waf *WafEngine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			GUEST_IDENTIFICATION: "正常访客", //访客身份识别
 			TimeSpent:            0,
 			NetSrcIp:             utils.GetSourceClientIP(r.RemoteAddr),
+			GeoUnresolved:        !geoResolved,
 			SrcByteBody:          bodyByte,
 			WebLogVersion:        global.GWEBLOG_VERSION,
 			Scheme:               r.Proto,
@@ -501,6 +509,12 @@ func (waf *WafEngine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		} else {
 			weblogbean.HOST = "http://" + weblogbean.HOST
 		}
+
+		// ── ACME(HTTP-01) 证书校验快速通道 ──
+		if waf.tryServeACMEChallenge(w, r, &weblogbean) {
+			return
+		}
+
 		formValues := url.Values{}
 		if strings.Contains(r.Header.Get("Content-Type"), "application/x-www-form-urlencoded") {
 			// 解码 x-www-form-urlencoded 数据
@@ -510,6 +524,19 @@ func (waf *WafEngine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			} else {
 				fmt.Println("解码失败:", err)
 				fmt.Println("解码失败:", weblogbean.BODY)
+			}
+		}
+
+		// S1 归一化：为检测生成解码副本（原文保留用于落库/展示），覆盖 body、cookie
+		// 及多层编码的表单值绕过面；各 check 改吃这些解码副本。
+		weblogbean.BodyDecoded = wafhttpcore.NormalizeForDetection(weblogbean.BODY)
+		weblogbean.CookiesDecoded = wafhttpcore.NormalizeForDetection(weblogbean.COOKIES)
+		// JSON 体逐值提取（json 解析天然解 \uXXXX）+ 直接父键名，供 XSS/SQLi 逐值检测(避免整块喂
+		// libinjection 造成误报)与“按字段排除”(E)
+		weblogbean.BodyFields, weblogbean.BodyValues = wafhttpcore.ExtractJSONFieldValues(weblogbean.BODY)
+		for k, vals := range formValues {
+			for i, v := range vals {
+				formValues[k][i] = wafhttpcore.NormalizeForDetection(v)
 			}
 		}
 
@@ -834,6 +861,18 @@ func (waf *WafEngine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		}
 
+		// ── 统一访问认证(Access 模式) ──
+		// 位置是被四个约束同时钉死的，挪动前请确认都还成立：
+		//   1. 必须早于下面的 web 缓存与静态站点服务，否则未认证的人能直接拿到缓存正文/本地文件
+		//   2. 必须在 GUARD_STATUS 判定块之外——"关闭防御"关的是攻击检测，不该把访问控制一起关掉
+		//   3. 必须晚于自动跳 HTTPS(上方)，先跳到 https 再种 Cookie，Secure 属性才有意义
+		//   4. 必须晚于 CC 封禁与环路检测，别把登录页发给已被封禁的 IP
+		// 同理它显式不看 LogOnlyMode：仅记录模式是给攻击检测用的，
+		// 把访问控制静默降级成"只记录不拦截"会让用户以为站点受保护、实际却是敞开的。
+		if waf.DoAccessGate(w, r, hostTarget, &weblogbean, clientIP) == accessHandled {
+			return
+		}
+
 		if cacheConfig.IsEnableCache == 1 && !strings.HasPrefix(weblogbean.URL, global.GSSL_HTTP_CHANGLE_PATH) {
 			cacheResp := wafwebcache.LoadWebDataFormCache(w, r, hostTarget, cacheConfig, &weblogbean)
 			if cacheResp != nil {
@@ -865,51 +904,21 @@ func (waf *WafEngine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if staticSiteConfig.IsEnableStaticSite == 1 {
 
 			if strings.HasPrefix(weblogbean.URL, global.GSSL_HTTP_CHANGLE_PATH) {
-				//Challenge /.well-known/acme-challenge/2NKiiETgQdPmmjlM88mH5uo6jM98PrgWwsDslaN8
-				urls := strings.Split(weblogbean.URL, "/")
-				if len(urls) == 4 {
-					challengeFile := urls[3]
-					//检测challengeFile是否合法
-					if !utils.IsValidChallengeFile(challengeFile) {
-						return
-					}
-					//当前路径 data/vhost/domain code 变量下
-					// 需要读取的文件路径
-					filePath := utils.GetCurrentDir() + "/data/vhost/" + weblogbean.HOST_CODE + "/.well-known/acme-challenge/" + challengeFile
-
-					// 调用读取文件的函数
-					content, err := utils.ReadFile(filePath)
-					if err != nil {
-						zlog.Error("Error reading file: %v", err.Error())
-						return
-					}
-					if content != "" {
-						// 创建新的Response对象
-						r.Response = &http.Response{
-							StatusCode:    http.StatusOK,
-							Status:        http.StatusText(http.StatusOK),
-							Body:          io.NopCloser(bytes.NewBuffer([]byte(content))),
-							ContentLength: int64(len(content)),
-							Header:        make(http.Header),
-							Proto:         "HTTP/1.1",
-							ProtoMajor:    1,
-							ProtoMinor:    1,
-						}
-						r.Response.Header.Set("Content-Length", strconv.FormatInt(int64(len(content)), 10))
-
-						// 直接写入响应到客户端
-						w.Header().Set("Content-Length", strconv.FormatInt(int64(len(content)), 10))
-						w.WriteHeader(http.StatusOK)
-						w.Write([]byte(content))
-
-						weblogbean.ACTION = "放行"
-						weblogbean.STATUS = r.Response.Status
-						weblogbean.STATUS_CODE = r.Response.StatusCode
-						weblogbean.TASK_FLAG = 1
-						global.GQEQUE_LOG_DB.Enqueue(&weblogbean)
-						return
-					}
-				}
+				// ACME 校验：命中的情况已经由前面的快速通道处理并返回了，
+				// 走到这里说明本地没有这个挑战文件。静态站点没有后端可回源，明确回 404：
+				//   - 不能交给 serveStaticFile，否则 CA 拿到的是站点自己的 404 页面
+				//   - 更不能像老实现那样什么都不写就 return（等于空 body 的 200），
+				//     CA 会报 "key authorization mismatch"，比 404 更难查
+				http.Error(w, "404 page not found", http.StatusNotFound)
+				weblogbean.ACTION = "放行"
+				weblogbean.STATUS = http.StatusText(http.StatusNotFound)
+				weblogbean.STATUS_CODE = http.StatusNotFound
+				weblogbean.TASK_FLAG = 1
+				global.GQEQUE_LOG_DB.Enqueue(&weblogbean)
+				warnACMEChallenge(weblogbean.HOST, weblogbean.HOST_CODE, weblogbean.URL, "", "", 0,
+					"静态站点模式下本地无对应的校验文件",
+					"核对证书是否就在本站点(站点编码)发起；确认申请时该目录下已生成文件")
+				return
 			} else {
 				waf.serveStaticFile(w, r, staticSiteConfig, &weblogbean, hostTarget)
 				return
@@ -983,8 +992,8 @@ func (waf *WafEngine) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			zlog.Debug("write fail:", zap.Any("", err))
 			return
 		}
-		// 获取请求报文的内容长度
-		contentLength := r.ContentLength
+		// 获取请求报文的内容长度（chunked 时 Go 给 -1，先归一，避免统计出现负数）
+		contentLength := sanitizeContentLength(r.ContentLength)
 
 		//server_online[8081].Svr.Close()
 		var bodyByte []byte
@@ -1267,23 +1276,7 @@ func (waf *WafEngine) modifyResponse() func(*http.Response) error {
 				weblogfrist.TASK_FLAG = 1
 
 				// 记录日志
-				if global.GWAF_RUNTIME_RECORD_LOG_TYPE == "all" {
-					if waf.rt().HostTarget[host].Host.EXCLUDE_URL_LOG == "" {
-						global.GQEQUE_LOG_DB.Enqueue(weblogfrist)
-					} else {
-						lines := strings.Split(waf.rt().HostTarget[host].Host.EXCLUDE_URL_LOG, "\n")
-						isRecordLog := true
-						// 检查每一行
-						for _, line := range lines {
-							if strings.HasPrefix(weblogfrist.URL, line) {
-								isRecordLog = false
-							}
-						}
-						if isRecordLog {
-							global.GQEQUE_LOG_DB.Enqueue(weblogfrist)
-						}
-					}
-				} else if global.GWAF_RUNTIME_RECORD_LOG_TYPE == "abnormal" && weblogfrist.ACTION != "放行" {
+				if shouldRecordWebLog(weblogfrist, waf.rt().HostTarget[host].Host.EXCLUDE_URL_LOG) {
 					global.GQEQUE_LOG_DB.Enqueue(weblogfrist)
 				}
 			}
@@ -1307,6 +1300,24 @@ func (waf *WafEngine) modifyResponse() func(*http.Response) error {
 			weblogfrist.STATUS_CODE = resp.StatusCode
 			// 上游 chunked 传输时 resp.ContentLength 为 -1，先按 0 计；非静态资源后续会用真实落盘字节数回填
 			weblogfrist.RES_CONTENT_LENGTH = sanitizeContentLength(resp.ContentLength)
+
+			// 响应缓冲关闭（IsEnableResponseBuffering==0，类似 nginx proxy_buffering off）：不读响应体，避免整包缓冲，配合 FlushInterval=-1 边收边推。
+			// 因此关闭缓冲时，依赖读体的能力（敏感词/响应压缩/防篡改/响应缓存等）对本请求不生效。
+			// ACME 证书校验路径除外，避免签发/续期被短路干扰（与缓存等逻辑一致）。
+			if hostTarget, exists := waf.rt().HostTarget[host]; exists &&
+				hostTarget.Host.IsEnableResponseBuffering == 0 &&
+				!strings.HasPrefix(weblogfrist.URL, global.GSSL_HTTP_CHANGLE_PATH) {
+				weblogfrist.TASK_FLAG = 1
+				resHeader := joinHeader(resp.Header)
+				weblogfrist.ResHeader = resHeader
+				datetimeNow := time.Now()
+				weblogfrist.TimeSpent = datetimeNow.UnixNano()/1e6 - weblogfrist.UNIX_ADD_TIME
+				weblogfrist.BackendCheckCost = datetimeNow.UnixNano()/1e6 - backendCheckStart
+				if shouldRecordWebLog(weblogfrist, hostTarget.Host.EXCLUDE_URL_LOG) {
+					global.GQEQUE_LOG_DB.Enqueue(weblogfrist)
+				}
+				return nil
+			}
 
 			// 网页防篡改：反代响应基线比对（命中且 replace 动作则回吐正确副本并短路）
 			if waf.checkAndHandleTamper(resp, r, host, weblogfrist) {
@@ -1340,34 +1351,13 @@ func (waf *WafEngine) modifyResponse() func(*http.Response) error {
 						weblogfrist.STATUS_CODE = resp.StatusCode
 						weblogfrist.TASK_FLAG = 1
 
-						resHeader := ""
-						for key, values := range resp.Header {
-							for _, value := range values {
-								resHeader += key + ": " + value + "\r\n"
-							}
-						}
-						weblogfrist.ResHeader = resHeader
+						weblogfrist.ResHeader = joinHeader(resp.Header)
 
 						datetimeNow := time.Now()
 						weblogfrist.TimeSpent = datetimeNow.UnixNano()/1e6 - weblogfrist.UNIX_ADD_TIME
-						weblogfrist.BackendCheckCost = time.Now().UnixNano()/1e6 - backendCheckStart
+						weblogfrist.BackendCheckCost = datetimeNow.UnixNano()/1e6 - backendCheckStart
 
-						if global.GWAF_RUNTIME_RECORD_LOG_TYPE == "all" {
-							if waf.rt().HostTarget[host].Host.EXCLUDE_URL_LOG == "" {
-								global.GQEQUE_LOG_DB.Enqueue(weblogfrist)
-							} else {
-								lines := strings.Split(waf.rt().HostTarget[host].Host.EXCLUDE_URL_LOG, "\n")
-								isRecordLog := true
-								for _, line := range lines {
-									if strings.HasPrefix(weblogfrist.URL, line) {
-										isRecordLog = false
-									}
-								}
-								if isRecordLog {
-									global.GQEQUE_LOG_DB.Enqueue(weblogfrist)
-								}
-							}
-						} else if global.GWAF_RUNTIME_RECORD_LOG_TYPE == "abnormal" && weblogfrist.ACTION != "放行" {
+						if shouldRecordWebLog(weblogfrist, waf.rt().HostTarget[host].Host.EXCLUDE_URL_LOG) {
 							global.GQEQUE_LOG_DB.Enqueue(weblogfrist)
 						}
 
@@ -1375,8 +1365,7 @@ func (waf *WafEngine) modifyResponse() func(*http.Response) error {
 					}
 
 					// 防护开启，创建流式处理器包装原始响应体
-					streamProcessor := waf.createStreamProcessor(resp.Body, wafHttpContext, host)
-					resp.Body = io.NopCloser(streamProcessor)
+					resp.Body = waf.createStreamProcessor(resp.Body, wafHttpContext, host)
 
 					// 对于流式内容，跳过后续的常规处理逻辑
 					// 但仍然记录基本的访问日志
@@ -1394,22 +1383,7 @@ func (waf *WafEngine) modifyResponse() func(*http.Response) error {
 					weblogfrist.BackendCheckCost = time.Now().UnixNano()/1e6 - backendCheckStart //响应数据处理时间
 
 					// 记录流式访问日志
-					if global.GWAF_RUNTIME_RECORD_LOG_TYPE == "all" {
-						if waf.rt().HostTarget[host].Host.EXCLUDE_URL_LOG == "" {
-							global.GQEQUE_LOG_DB.Enqueue(weblogfrist)
-						} else {
-							lines := strings.Split(waf.rt().HostTarget[host].Host.EXCLUDE_URL_LOG, "\n")
-							isRecordLog := true
-							for _, line := range lines {
-								if strings.HasPrefix(weblogfrist.URL, line) {
-									isRecordLog = false
-								}
-							}
-							if isRecordLog {
-								global.GQEQUE_LOG_DB.Enqueue(weblogfrist)
-							}
-						}
-					} else if global.GWAF_RUNTIME_RECORD_LOG_TYPE == "abnormal" && weblogfrist.ACTION != "放行" {
+					if shouldRecordWebLog(weblogfrist, waf.rt().HostTarget[host].Host.EXCLUDE_URL_LOG) {
 						global.GQEQUE_LOG_DB.Enqueue(weblogfrist)
 					}
 
@@ -1541,124 +1515,29 @@ func (waf *WafEngine) modifyResponse() func(*http.Response) error {
 				wafwebcache.StoreWebDataCache(resp, waf.rt().HostTarget[host], cacheConfig, weblogfrist)
 			}
 
-			if !isStaticAssist {
+			// ACME 证书校验必须与 isStaticAssist 判定并列，不能嵌套在它内部：
+			// "是不是静态资源"和"是不是证书校验路径"毫不相干，而后端只要回一个带
+			// Accept-Ranges: bytes 的响应（IIS、Apache 指向静态文件的 ErrorDocument 都会带），
+			// isStaticAssist 就为真，整段兜底连同日志会被一起吞掉，
+			// 表现为"证书签不下来而且日志里什么都没有"——这是线上真实工单的成因。
+			if handleACMEChallengeResponse(resp, weblogfrist, backendCheckStart) {
+				// 已按证书校验的规则处理完毕，不再走下面的常规响应处理
+			} else if !isStaticAssist {
 				datetimeNow := time.Now()
 				weblogfrist.TimeSpent = datetimeNow.UnixNano()/1e6 - weblogfrist.UNIX_ADD_TIME
 
-				// 根据配置决定是否检查HTTP响应代码并重定向到本地
-				if strings.HasPrefix(weblogfrist.URL, global.GSSL_HTTP_CHANGLE_PATH) {
-					zlog.Info("acme-challenge", weblogfrist.HOST, weblogfrist.URL)
-					if global.GCONFIG_RECORD_SSLHTTP_CHECK == 0 || resp.StatusCode == 404 || resp.StatusCode == 301 || resp.StatusCode == 302 {
-						//如果远端HTTP01不存在挑战验证文件，那么我们映射到走本地再试一下
-						//或者配置为不检查HTTP响应代码，直接走本地
+				// 检查是否需要应用自定义错误页面（非 ACME Challenge 请求）
+				// 注意：这里只针对"后端真实返回的状态码"；WAF 自身的拦截走 EchoErrorInfo，是另一条独立路径。
+				customBlockingPage := resolveCustomErrorPage(
+					waf.rt().HostTarget[host],
+					waf.rt().HostTarget[waf.rt().HostCode[global.GWAF_GLOBAL_HOST_CODE]],
+					backendStatusCode,
+				)
 
-						//Challenge /.well-known/acme-challenge/2NKiiETgQdPmmjlM88mH5uo6jM98PrgWwsDslaN8
-						urls := strings.Split(weblogfrist.URL, "/")
-						if len(urls) == 4 {
-							challengeFile := urls[3]
-							//检测challengeFile是否合法
-							if !utils.IsValidChallengeFile(challengeFile) {
-								zlog.Error("challengeFile is invalid", challengeFile)
-								return nil
-							}
-							//当前路径 data/vhost/domain code 变量下
-							// 需要读取的文件路径
-							filePath := utils.GetCurrentDir() + "/data/vhost/" + weblogfrist.HOST_CODE + "/.well-known/acme-challenge/" + challengeFile
+				if customBlockingPage != nil {
+					pageResult := applyCustomErrorPage(resp, customBlockingPage, backendStatusCode, backendStatus, weblogfrist.REQ_UUID)
 
-							// 调用读取文件的函数
-							content, err := utils.ReadFile(filePath)
-							if err != nil {
-								zlog.Error("Error reading file: %v", err.Error())
-							}
-							if content != "" {
-								resp.StatusCode = http.StatusOK
-								resp.Status = http.StatusText(http.StatusOK)
-								resp.Body = io.NopCloser(bytes.NewBuffer([]byte(content)))
-								resp.ContentLength = int64(len(content))
-								resp.Header.Set("Content-Length", strconv.FormatInt(int64(len(content)), 10))
-								resp.Header.Del("Content-Encoding")
-								weblogfrist.ACTION = "放行"
-								weblogfrist.STATUS = resp.Status
-								weblogfrist.STATUS_CODE = resp.StatusCode
-								weblogfrist.TASK_FLAG = 1
-								weblogfrist.BackendCheckCost = time.Now().UnixNano()/1e6 - backendCheckStart //响应数据处理时间
-								global.GQEQUE_LOG_DB.Enqueue(weblogfrist)
-							}
-						}
-					} else if global.GCONFIG_RECORD_SSLHTTP_CHECK == 1 {
-						// 当配置为检查HTTP响应码且响应不是404/301/302时，记录警告信息
-						zlog.Warn(fmt.Sprintf("ACME Challenge检测：域名 %s 的 URL %s 返回了非预期的状态码 %d，影响证书验证，可在系统配置里面将sslhttp_check设置成0",
-							weblogfrist.HOST, weblogfrist.URL, resp.StatusCode))
-					}
-				} else {
-					// 检查是否需要应用自定义错误页面（非 ACME Challenge 请求）
-					statusCodeKey := strconv.Itoa(backendStatusCode)
-					var customBlockingPage *model.BlockingPage
-					var useCustomPage bool
-
-					// 优先检查网站级别的自定义错误页面配置
-					if blockingPage, ok := waf.rt().HostTarget[host].BlockingPage[statusCodeKey]; ok {
-						customBlockingPage = &blockingPage
-						useCustomPage = true
-					} else if globalBlockingPage, ok := waf.rt().HostTarget[waf.rt().HostCode[global.GWAF_GLOBAL_HOST_CODE]].BlockingPage[statusCodeKey]; ok {
-						// 检查全局级别的自定义错误页面配置
-						customBlockingPage = &globalBlockingPage
-						useCustomPage = true
-					}
-
-					// 如果找到自定义错误页面配置，则应用
-					if useCustomPage && customBlockingPage != nil {
-						// 先读取后端原始响应内容，用于日志记录
-						var backendOriginalBody []byte
-						if resp.Body != nil && resp.Body != http.NoBody {
-							backendOriginalBody, _ = io.ReadAll(resp.Body)
-							resp.Body.Close()
-						}
-
-						renderData := map[string]interface{}{
-							"SAMWAF_REQ_UUID":       weblogfrist.REQ_UUID,
-							"SAMWAF_BACKEND_STATUS": backendStatus,
-							"SAMWAF_BACKEND_CODE":   backendStatusCode,
-							"SAMWAF_BACKEND_BODY":   string(backendOriginalBody),
-						}
-
-						// 渲染自定义模板
-						renderedBytes, err := renderTemplate(customBlockingPage.ResponseContent, renderData)
-						var resBytes []byte
-						if err == nil {
-							resBytes = renderedBytes
-						} else {
-							resBytes = []byte(customBlockingPage.ResponseContent)
-							zlog.Warn(fmt.Sprintf("模板渲染失败: %v, 使用原始内容", err))
-						}
-
-						// 设置自定义响应码（如果配置了）
-						var customResponseCode int = backendStatusCode
-						if customBlockingPage.ResponseCode != "" {
-							if code, err := strconv.Atoi(customBlockingPage.ResponseCode); err == nil {
-								customResponseCode = code
-							}
-						}
-
-						// 清空现有的响应头并设置自定义响应头
-						var headers []map[string]string
-						if err := json.Unmarshal([]byte(customBlockingPage.ResponseHeader), &headers); err == nil {
-							for _, header := range headers {
-								if name, ok := header["name"]; ok {
-									if value, ok := header["value"]; ok && value != "" {
-										resp.Header.Set(name, value)
-									}
-								}
-							}
-						}
-
-						// 更新响应
-						resp.StatusCode = customResponseCode
-						resp.Status = http.StatusText(customResponseCode)
-						resp.Body = io.NopCloser(bytes.NewBuffer(resBytes))
-						resp.ContentLength = int64(len(resBytes))
-						resp.Header.Set("Content-Length", strconv.FormatInt(int64(len(resBytes)), 10))
-
+					if pageResult.TemplateApplied {
 						// 记录响应Header信息
 						resHeader := joinHeader(resp.Header)
 						weblogfrist.ResHeader = resHeader
@@ -1667,63 +1546,32 @@ func (waf *WafEngine) modifyResponse() func(*http.Response) error {
 						weblogfrist.ACTION = "放行"
 						weblogfrist.STATUS = resp.Status
 						weblogfrist.STATUS_CODE = resp.StatusCode
-						weblogfrist.RES_BODY = string(backendOriginalBody)
+						weblogfrist.RES_BODY = string(pageResult.BackendBody)
 
 						weblogfrist.TASK_FLAG = 1
 						weblogfrist.BackendCheckCost = time.Now().UnixNano()/1e6 - backendCheckStart
 
 						// 记录日志 - 根据配置决定是否记录
-						if global.GWAF_RUNTIME_RECORD_LOG_TYPE == "all" {
-							if waf.rt().HostTarget[host].Host.EXCLUDE_URL_LOG == "" {
-								global.GQEQUE_LOG_DB.Enqueue(weblogfrist)
-							} else {
-								lines := strings.Split(waf.rt().HostTarget[host].Host.EXCLUDE_URL_LOG, "\n")
-								isRecordLog := true
-								for _, line := range lines {
-									if strings.HasPrefix(weblogfrist.URL, line) {
-										isRecordLog = false
-									}
-								}
-								if isRecordLog {
-									global.GQEQUE_LOG_DB.Enqueue(weblogfrist)
-								}
-							}
-						} else if global.GWAF_RUNTIME_RECORD_LOG_TYPE == "abnormal" && weblogfrist.ACTION != "放行" {
-							// 自定义错误页也属于"异常"情况，需要记录
+						if shouldRecordWebLog(weblogfrist, waf.rt().HostTarget[host].Host.EXCLUDE_URL_LOG) {
 							global.GQEQUE_LOG_DB.Enqueue(weblogfrist)
 						}
 
 						// 应用自定义错误页后直接返回
 						return nil
 					}
+					// 「优先后端响应」已把后端内容原样还原，落到下面的常规响应处理
+				}
 
-					//记录响应Header信息
-					resHeader := joinHeader(resp.Header)
-					weblogfrist.ResHeader = resHeader
-					weblogfrist.ACTION = "放行"
-					weblogfrist.STATUS = resp.Status
-					weblogfrist.STATUS_CODE = resp.StatusCode
-					weblogfrist.TASK_FLAG = 1
-					weblogfrist.BackendCheckCost = time.Now().UnixNano()/1e6 - backendCheckStart //响应数据处理时间
-					if global.GWAF_RUNTIME_RECORD_LOG_TYPE == "all" {
-						if waf.rt().HostTarget[host].Host.EXCLUDE_URL_LOG == "" {
-							global.GQEQUE_LOG_DB.Enqueue(weblogfrist)
-						} else {
-							lines := strings.Split(waf.rt().HostTarget[host].Host.EXCLUDE_URL_LOG, "\n")
-							isRecordLog := true
-							// 检查每一行
-							for _, line := range lines {
-								if strings.HasPrefix(weblogfrist.URL, line) {
-									isRecordLog = false
-								}
-							}
-							if isRecordLog {
-								global.GQEQUE_LOG_DB.Enqueue(weblogfrist)
-							}
-						}
-					} else if global.GWAF_RUNTIME_RECORD_LOG_TYPE == "abnormal" && weblogfrist.ACTION != "放行" {
-						global.GQEQUE_LOG_DB.Enqueue(weblogfrist)
-					}
+				//记录响应Header信息
+				resHeader := joinHeader(resp.Header)
+				weblogfrist.ResHeader = resHeader
+				weblogfrist.ACTION = "放行"
+				weblogfrist.STATUS = resp.Status
+				weblogfrist.STATUS_CODE = resp.StatusCode
+				weblogfrist.TASK_FLAG = 1
+				weblogfrist.BackendCheckCost = time.Now().UnixNano()/1e6 - backendCheckStart //响应数据处理时间
+				if shouldRecordWebLog(weblogfrist, waf.rt().HostTarget[host].Host.EXCLUDE_URL_LOG) {
+					global.GQEQUE_LOG_DB.Enqueue(weblogfrist)
 				}
 
 			}
@@ -1948,6 +1796,10 @@ func (waf *WafEngine) StartAllProxyServer() {
 	})
 	waf.EnumAllPortProxyServer()
 
+	// 已在监听的端口 Status==0，StartProxyServer 会直接跳过，所以 http3 开关的变化必须在这里
+	// 单独对齐一次；否则「重启引擎」(ReloadAllHostZeroGap) 也起不来 QUIC(issue #916)。
+	waf.ReconcileHTTP3()
+
 	waf.ReLoadSensitive()
 }
 
@@ -1980,14 +1832,22 @@ func (waf *WafEngine) StartProxyServer(innruntime innerbean.ServerRunTime) {
 					zlog.Warn("https recover ", e)
 				}
 			}()
+
+			portStr := strconv.Itoa(innruntime.Port)
+			// h3Holder 必须在两个分支之前创建：HTTPS 重定向模式与普通模式都要支持 HTTP/3。
+			// 老代码把 h3 整块放在 else 里，开了 HTTPS 重定向就静默没有 HTTP/3(issue #916)。
+			// 重定向服务器只是个 TCP listener 包装(把 443 上的明文 HTTP 请求 301 走)，与 QUIC 无关，可以共存。
+			h3Holder := &innerbean.H3Holder{}
+
 			var svr *http.Server
+			var redirectServer *wafhttpserver.RedirectingHTTPSServer
 			// 检查是否启用HTTPS重定向服务器
 			if global.GCONFIG_ENABLE_HTTPS_REDIRECT == 1 {
 				// 使用新的重定向服务器
-				redirectServer := &wafhttpserver.RedirectingHTTPSServer{
+				redirectServer = &wafhttpserver.RedirectingHTTPSServer{
 					Server: &http.Server{
-						Addr:    ":" + strconv.Itoa(innruntime.Port),
-						Handler: waf,
+						Addr:    ":" + portStr,
+						Handler: waf.altSvcHandler(h3Holder, portStr),
 						TLSConfig: &tls.Config{
 							GetCertificate: waf.GetCertificateFunc,
 							MinVersion:     utils.ParseTLSVersion(global.GCONFIG_RECORD_SSLMinVerson),
@@ -1996,13 +1856,39 @@ func (waf *WafEngine) StartProxyServer(innruntime innerbean.ServerRunTime) {
 					},
 				}
 				svr = redirectServer.Server
+			} else {
+				svr = &http.Server{
+					Addr: ":" + portStr,
+					// 固定安装 Alt-Svc 包装处理器：内部按 h3Holder 是否活跃决定要不要加 Alt-Svc，
+					// 这样 http3 开关热生效时无需在运行期改写 Handler(会与在途请求竞态)。
+					Handler: waf.altSvcHandler(h3Holder, portStr),
+					TLSConfig: &tls.Config{
+						GetCertificate: waf.GetCertificateFunc,
+						// 按 SNI 逐连接定制 ALPN，实现 per-host 的对外 HTTP/2 开关：
+						// 命中 DisableHTTP2==1 的站点只广告 http/1.1，兼容原生 WebSocket 客户端。
+						GetConfigForClient: waf.GetTLSConfigForClient,
+						MinVersion:         utils.ParseTLSVersion(global.GCONFIG_RECORD_SSLMinVerson),
+						MaxVersion:         utils.ParseTLSVersion(global.GCONFIG_RECORD_SSLMaxVerson),
+					},
+				}
+			}
 
-				serclone, _ := waf.ServerOnline.Get(innruntime.Port)
-				serclone.Svr = svr
-				serclone.Conns = attachConnCounter(svr)
-				serclone.Status = 0
-				waf.ServerOnline.Set(innruntime.Port, serclone)
-				zlog.Info("启动HTTPS重定向服务器" + strconv.Itoa(innruntime.Port))
+			// 只在这里 Set 一次：老代码在 h3 协程里回写 serclone，与外层流程存在竞态、
+			// 可能把 H3 字段覆盖丢失(issue #916)。
+			serclone, _ := waf.ServerOnline.Get(innruntime.Port)
+			serclone.Svr = svr
+			serclone.Conns = attachConnCounter(svr)
+			serclone.H3 = h3Holder
+			serclone.Status = 0
+			waf.ServerOnline.Set(innruntime.Port, serclone)
+
+			// HTTP/3 与 TCP 监听彼此独立：QUIC 起不来也绝不能影响 HTTPS(TCP)
+			if global.GCONFIG_ENABLE_HTTP3 == 1 {
+				waf.startHTTP3(innruntime.Port, h3Holder)
+			}
+
+			if redirectServer != nil {
+				zlog.Info("启动HTTPS重定向服务器" + portStr)
 				// 端口复用监听，使升级重叠期新旧 Worker 同端口并存
 				rln, rerr := wafnet.ReusePortTCPListen(svr.Addr)
 				if rerr != nil {
@@ -2014,89 +1900,7 @@ func (waf *WafEngine) StartProxyServer(innruntime innerbean.ServerRunTime) {
 					zlog.Error("[HTTPServer] https redirect server has been close, cause:[%v]", err)
 				}
 			} else {
-				svr = &http.Server{
-					Addr:    ":" + strconv.Itoa(innruntime.Port),
-					Handler: waf,
-					TLSConfig: &tls.Config{
-						GetCertificate: waf.GetCertificateFunc,
-						// 按 SNI 逐连接定制 ALPN，实现 per-host 的对外 HTTP/2 开关：
-						// 命中 DisableHTTP2==1 的站点只广告 http/1.1，兼容原生 WebSocket 客户端。
-						GetConfigForClient: waf.GetTLSConfigForClient,
-						MinVersion:         utils.ParseTLSVersion(global.GCONFIG_RECORD_SSLMinVerson),
-						MaxVersion:         utils.ParseTLSVersion(global.GCONFIG_RECORD_SSLMaxVerson),
-					},
-				}
-				serclone, _ := waf.ServerOnline.Get(innruntime.Port)
-				serclone.Svr = svr
-				serclone.Conns = attachConnCounter(svr)
-				serclone.Status = 0
-				waf.ServerOnline.Set(innruntime.Port, serclone)
-				zlog.Info("启动HTTPS 服务器" + strconv.Itoa(innruntime.Port))
-
-				if global.GCONFIG_ENABLE_HTTP3 == 1 {
-					// h3 用独立 TLSConfig：不挂 h2 的 GetConfigForClient，否则会把 "h3" 从
-					// NextProtos 里剔掉、打断整个 HTTP/3（h3 与 h2 是独立 ALPN，互不影响）。
-					h3TLS := &tls.Config{
-						GetCertificate: waf.GetCertificateFunc,
-						MinVersion:     utils.ParseTLSVersion(global.GCONFIG_RECORD_SSLMinVerson),
-						MaxVersion:     utils.ParseTLSVersion(global.GCONFIG_RECORD_SSLMaxVerson),
-					}
-					h3 := &http3.Server{
-						Addr:      ":" + strconv.Itoa(innruntime.Port),
-						Handler:   waf,
-						TLSConfig: h3TLS,
-					}
-					if global.GCONFIG_ENABLE_HTTP3_BBR == 1 {
-						h3.QUICConfig.Congestion = func() quic.SendAlgorithmWithDebugInfos { return quic.NewBBRv1(nil) }
-					}
-					h3Port := strconv.Itoa(innruntime.Port)
-					svr.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-						// 关了 h2 的站点不广告 h3(Alt-Svc)：原生 WebSocket 客户端同样不能走 h3，
-						// 避免其被诱导升级到 h3 后再次握手失败，让该站点彻底只走 http/1.1。
-						reqDomain := r.Host
-						if idx := strings.IndexByte(reqDomain, ':'); idx >= 0 {
-							reqDomain = reqDomain[:idx]
-						}
-						if !waf.isHTTP2DisabledForServerName(reqDomain, h3Port) {
-							h3.SetQUICHeaders(w.Header())
-						}
-						waf.ServeHTTP(w, r)
-					})
-					go func() {
-						defer func() {
-							e := recover()
-							if e != nil { // 捕获该协程的panic
-								zlog.Warn("https recover ", e)
-							}
-						}()
-						zlog.Info("启动HTTPS 3 服务器" + strconv.Itoa(innruntime.Port))
-						serclone.H3 = h3
-						waf.ServerOnline.Set(innruntime.Port, serclone)
-						// 用端口复用的 UDP PacketConn 启动 HTTP/3，使升级重叠期新旧 Worker 同端口并存
-						pconn, perr := wafnet.ReusePortPacketConn(h3.Addr)
-						if perr != nil {
-							zlog.Error("http3 listen packet fail", perr.Error())
-							return
-						}
-						err := h3.Serve(pconn)
-						if err == http.ErrServerClosed {
-							zlog.Error("[HTTP3Server] https server has been close, cause:[%v]", err)
-						} else {
-							wafSysLog := model.WafSysLog{
-								BaseOrm: baseorm.BaseOrm{
-									Id:          uuid.GenUUID(),
-									USER_CODE:   global.GWAF_USER_CODE,
-									Tenant_ID:   global.GWAF_TENANT_ID,
-									CREATE_TIME: customtype.JsonTime(time.Now()),
-									UPDATE_TIME: customtype.JsonTime(time.Now()),
-								},
-								OpType:    "系统运行错误",
-								OpContent: "HTTPS3端口被占用: " + strconv.Itoa(innruntime.Port) + ",请检查",
-							}
-							global.GQEQUE_LOG_DB.Enqueue(&wafSysLog)
-						}
-					}()
-				}
+				zlog.Info("启动HTTPS 服务器" + portStr)
 
 				ln, err := wafnet.ReusePortTCPListen(svr.Addr)
 				if err != nil {
@@ -2212,6 +2016,11 @@ func (waf *WafEngine) StopProxyServer(v innerbean.ServerRunTime) {
 // gracefulStopServer 优雅关闭单个端口的 HTTP/HTTPS/HTTP3 服务：
 // 先停止接收新连接并等待在途请求处理完(Shutdown)，超时仍未排空则强制 Close。
 func (waf *WafEngine) gracefulStopServer(v innerbean.ServerRunTime, timeout time.Duration) {
+	// 先停 HTTP/3：摘掉 Alt-Svc 后新响应不再把客户端引导到即将关闭的 UDP 端口，
+	// 同时释放 UDP socket(quic-go 不会替我们关它)。
+	if v.H3 != nil {
+		waf.stopHTTP3(v.Port, v.H3)
+	}
 	if v.Svr != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		remain := int64(0)
@@ -2229,13 +2038,6 @@ func (waf *WafEngine) gracefulStopServer(v innerbean.ServerRunTime, timeout time
 			zlog.Info("[GracefulStop] 端口 " + strconv.Itoa(v.Port) + " 已优雅排空 (起始连接数=" + strconv.FormatInt(remain, 10) + ")")
 		}
 		cancel()
-	}
-	if v.H3 != nil {
-		hctx, hcancel := context.WithTimeout(context.Background(), timeout)
-		if err := v.H3.Shutdown(hctx); err != nil {
-			_ = v.H3.Close()
-		}
-		hcancel()
 	}
 }
 

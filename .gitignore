@@ -3,6 +3,7 @@
 /vue/dist/
 /conf/*
 /data/*
+/wafenginecore/data/
 /data/local_log.db
 /data/local_stats.db
 /data/local.db
@@ -26,3 +27,9 @@ dist/
 /docs/openapi/
 /.data/
 .gocache/
+
+# go test ./wafsec/ 的产物：wafsec/rsa.go 的 GenRsaKey 按相对路径写在包目录下，
+# 跑完测试就会多出这两个文件。私钥绝不能进仓库，这里直接挡掉。
+# 只挡 wafsec/ 下这两个固定文件名，不影响内嵌资源 cmd/samwaf/exedata/public_key.pem。
+/wafsec/private_key.pem
+/wafsec/public_key.pem

@@ -10,12 +10,11 @@ version: 2
 
 before:
   hooks:
-    # You may remove this if you don't use go modules.
-    - go mod tidy
-    # you may remove this if you don't need go generate
-    - go generate ./...
+    # 只下载依赖，不用 go mod tidy：发版途中改写 go.mod/go.sum 会让产物不可复现
+    - go mod download
+    # 注意：本仓库没有任何 go:generate 指令，故不跑 go generate（跑了也只是空转一遍全模块加载）
     # pull samwaf web
-    - curl -L https://github.com/samwafgo/SamWafWeb/releases/latest/download/dist.tar.gz -o dist.tar.gz
+    - curl -fSL --retry 3 --retry-all-errors --connect-timeout 15 --max-time 300 https://github.com/samwafgo/SamWafWeb/releases/latest/download/dist.tar.gz -o dist.tar.gz
     - tar -zxvf dist.tar.gz
     - rm -rf public/dist
     - mv -f dist public
@@ -80,63 +79,6 @@ builds:
       - -X SamWaf/global.GWAF_RELEASE_VERSION={{.Tag}}
       - -s -w
       - -extldflags "-static"
-  
-  # Debug版本 (Debug builds for troubleshooting only)
-  - id: "samwaf_linux_debug"
-    binary: "SamWafLinux64-DEBUG-SYMBOLS"
-    main: ./cmd/samwaf
-    env:
-      - CGO_ENABLED=1
-      - CC=x86_64-linux-musl-gcc
-      - CXX=x86_64-linux-musl-g++
-      - CGO_CFLAGS=-Wno-unused-variable -D_LARGEFILE64_SOURCE
-      - GOAMD64=v1
-    goos:
-      - linux
-    goarch:
-      - amd64
-    ldflags:
-      - -X SamWaf/global.GWAF_RELEASE=true
-      - -X SamWaf/global.GWAF_RUNTIME_WIN7_VERSION=false
-      - -X SamWaf/global.GWAF_RELEASE_VERSION_NAME={{ time "20060102" }}
-      - -X SamWaf/global.GWAF_RELEASE_VERSION={{.Tag}}-debug
-      - -extldflags "-static"
-  - id: "samwaf_win_debug"
-    binary: "SamWaf64-DEBUG-SYMBOLS"
-    main: ./cmd/samwaf
-    env:
-      - CGO_ENABLED=1
-      - CC=x86_64-w64-mingw32-gcc
-      - CXX=x86_64-w64-mingw32-g++
-      - CGO_CFLAGS=-Wno-unused-variable
-    goos:
-      - windows
-    goarch:
-      - amd64
-    ldflags:
-      - -X SamWaf/global.GWAF_RELEASE=true
-      - -X SamWaf/global.GWAF_RUNTIME_WIN7_VERSION=false
-      - -X SamWaf/global.GWAF_RELEASE_VERSION_NAME={{ time "20060102" }}
-      - -X SamWaf/global.GWAF_RELEASE_VERSION={{.Tag}}-debug
-      - -extldflags "-static"
-  - id: "samwaf_linux_arm64_debug"
-    binary: "SamWafLinuxArm64-DEBUG-SYMBOLS"
-    main: ./cmd/samwaf
-    env:
-      - CGO_ENABLED=1
-      - CC=aarch64-linux-gnu-gcc
-      - CXX=aarch64-linux-gnu-g++
-      - CGO_CFLAGS=-Wno-unused-variable
-    goos:
-      - linux
-    goarch:
-      - arm64
-    ldflags:
-      - -X SamWaf/global.GWAF_RELEASE=true
-      - -X SamWaf/global.GWAF_RUNTIME_WIN7_VERSION=false
-      - -X SamWaf/global.GWAF_RELEASE_VERSION_NAME={{ time "20060102" }}
-      - -X SamWaf/global.GWAF_RELEASE_VERSION={{.Tag}}-debug
-      - -extldflags "-static"
 upx:
   - # Whether to enable it or not.
     #
@@ -163,22 +105,6 @@ archives:
       {{- else }}{{ .Arch }}{{ end }}
       {{- if .Arm }}v{{ .Arm }}{{ end }}
       {{.Tag}}
-    # use zip for windows archives
-    format_overrides:
-      - goos: windows
-        format: zip
-  - id: "debug_archives"
-    builds: ["samwaf_linux_debug", "samwaf_win_debug", "samwaf_linux_arm64_debug"]
-    format: tar.gz
-    # Debug版本使用特殊命名，以DEBUG开头便于用户识别和分组
-    name_template: >-
-      DEBUG_{{ .ProjectName }}_
-      {{- title .Os }}_
-      {{- if eq .Arch "amd64" }}x86_64
-      {{- else if eq .Arch "386" }}i386
-      {{- else }}{{ .Arch }}{{ end }}
-      {{- if .Arm }}v{{ .Arm }}{{ end }}
-      {{.Tag}}_SYMBOLS
     # use zip for windows archives
     format_overrides:
       - goos: windows
@@ -242,10 +168,12 @@ release:
     ### 📋 版本说明
     - **正式版本**：推荐用户生产环境使用，经过优化，文件较小
     - **测试版本（Beta）**：功能尝鲜,修正部分bug等 
-    - **调试版本（Debug）**：仅供技术支持和问题排查使用，包含调试符号，文件较大(包含Debug字样)
     
     ### 🆘 技术支持
     如遇到问题需要技术支持，请：
     1. 优先使用正式版本，测试版本
-    2. 如需问题排查，可下载对应的调试版本
-    3. 提供详细的错误信息和日志 
+    2. 提供详细的错误信息和日志
+
+    ### 📮 联系方式
+    - **微信公众号**：SamWaf开源防火墙
+    - **邮箱**：samwafgo@gmail.com

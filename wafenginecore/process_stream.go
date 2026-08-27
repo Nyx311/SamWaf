@@ -11,15 +11,24 @@ import (
 	"time"
 )
 
+// maxStreamLineBytes 单行(单条 SSE 事件)在内存里最多攒多少字节。
+// 超过就把已攒的原始字节原样放行，不再等换行 —— 只是这段内容躲过按行的敏感词/脱敏扫描，
+// 字节仍然是无损的。目的是防止上游发一条没有换行的超长内容把内存吃干。
+const maxStreamLineBytes = 1 << 20 // 1MB
+
 // StreamProcessor 流式内容处理器
 type StreamProcessor struct {
 	originalReader io.ReadCloser
 	wafEngine      *WafEngine
 	wafContext     innerbean.WafHttpContextData
 	hostCode       string
-	buffer         []byte // 原始流中尚未按\n分割完毕的数据
-	resultBuffer   []byte // 已处理完毕、等待填入Read()调用方p[]的数据
-	eofReceived    bool   // 标记originalReader是否已返回EOF
+	buffer         []byte // 上游读来但还没凑成完整行的原始字节
+	pending        []byte // 已处理完、等着交给调用方的字节
+	readBuf        []byte // 复用的上游读缓冲，避免每次 Read 都分配
+	eofSeen        bool   // 上游是否已结束
+	eofErr         error  // 上游结束时带回来的错误(通常是 io.EOF)
+	lineBuffer     strings.Builder
+	isInEvent      bool
 }
 
 // 创建流式处理器
@@ -30,80 +39,65 @@ func (waf *WafEngine) createStreamProcessor(originalBody io.ReadCloser, wafConte
 		wafContext:     wafContext,
 		hostCode:       hostCode,
 		buffer:         make([]byte, 0, 4096),
-		resultBuffer:   make([]byte, 0, 4096),
-		eofReceived:    false,
 	}
 }
 
 // Read 实现io.Reader接口
-func (sp *StreamProcessor) Read(p []byte) (n int, err error) {
-	// Step 1: resultBuffer有数据时优先从中填满p，不读原始流
-	if len(sp.resultBuffer) > 0 {
-		copyLen := len(sp.resultBuffer)
-		if copyLen > len(p) {
-			copyLen = len(p)
-		}
-		copy(p, sp.resultBuffer[:copyLen])
-		sp.resultBuffer = sp.resultBuffer[copyLen:]
-
-		// resultBuffer耗尽后重新分配，避免底层数组无限增长
-		if len(sp.resultBuffer) == 0 {
-			sp.resultBuffer = make([]byte, 0, 4096)
-		}
-
-		// EOF仅在resultBuffer完全耗尽且原始流已EOF时才返回
-		if len(sp.resultBuffer) == 0 && sp.eofReceived {
-			return copyLen, io.EOF
-		}
-		return copyLen, nil
+//
+// 分两级缓冲：buffer 存还没凑成完整行的原始字节，pending 存已处理好待交付的字节。
+// 两者必须分开 —— 早期实现把"处理完但一次没塞下"的数据又塞回 buffer，既会被二次处理，
+// 又在上游返回 (0, io.EOF) 时连同未交付的部分一起丢掉：表现为单条 SSE 事件只要超过
+// 调用方的读缓冲(net/http 反代默认 32KB)就被截断、流提前结束。
+// 对应 issue #949 / #954：Codex 报 "stream closed before response.completed" 后反复重试。
+func (sp *StreamProcessor) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
 	}
 
-	// Step 2: resultBuffer空，从原始流读取数据到buffer
-	tempBuf := make([]byte, len(p)+4096)
-	readN, readErr := sp.originalReader.Read(tempBuf)
-	if readN > 0 {
-		sp.buffer = append(sp.buffer, tempBuf[:readN]...)
-	}
-	if readErr == io.EOF {
-		sp.eofReceived = true
-		readErr = nil // 不立即传播EOF，可能还有数据需要处理
-	} else if readErr != nil {
-		// 非EOF错误：先处理已积累的数据，再传播错误
-		sp.processAndFillResultBuffer()
-		if len(sp.resultBuffer) > 0 {
-			copyLen := len(sp.resultBuffer)
-			if copyLen > len(p) {
-				copyLen = len(p)
+	for {
+		// 1) 先把处理好的数据交出去；一次装不下的留到下次，绝不丢弃
+		if len(sp.pending) > 0 {
+			n := copy(p, sp.pending)
+			sp.pending = sp.pending[n:]
+			if len(sp.pending) == 0 {
+				sp.pending = nil
 			}
-			copy(p, sp.resultBuffer[:copyLen])
-			sp.resultBuffer = sp.resultBuffer[copyLen:]
-			return copyLen, readErr
+			return n, nil
 		}
-		return 0, readErr
-	}
 
-	// Step 3: 处理buffer中的原始数据，结果存入resultBuffer
-	sp.processAndFillResultBuffer()
-
-	// Step 4: 从resultBuffer填满p
-	if len(sp.resultBuffer) > 0 {
-		copyLen := len(sp.resultBuffer)
-		if copyLen > len(p) {
-			copyLen = len(p)
+		// 2) 上游已结束：先把残留的不完整行冲刷出去，再向调用方报结束
+		if sp.eofSeen {
+			if len(sp.buffer) > 0 {
+				tail := string(sp.buffer)
+				sp.buffer = sp.buffer[:0]
+				sp.pending = append(sp.pending, sp.processLine(tail)...)
+				continue
+			}
+			return 0, sp.eofErr
 		}
-		copy(p, sp.resultBuffer[:copyLen])
-		sp.resultBuffer = sp.resultBuffer[copyLen:]
-		if len(sp.resultBuffer) == 0 {
-			sp.resultBuffer = make([]byte, 0, 4096)
-		}
-		return copyLen, nil
-	}
 
-	// Step 5: resultBuffer空且原始流已EOF
-	if sp.eofReceived {
-		return 0, io.EOF
+		// 3) 向上游取数据。读到的还不足一行就继续读，不返回 (0, nil) 让调用方空转
+		if cap(sp.readBuf) < len(p) {
+			sp.readBuf = make([]byte, len(p))
+		}
+		tempBuf := sp.readBuf[:len(p)]
+		n, err := sp.originalReader.Read(tempBuf)
+		if n > 0 {
+			sp.buffer = append(sp.buffer, tempBuf[:n]...)
+			if processed := sp.processStreamData(); len(processed) > 0 {
+				sp.pending = append(sp.pending, processed...)
+			}
+			// 上游一直不发换行时，攒到上限就原样放行，避免内存无限增长
+			if len(sp.pending) == 0 && len(sp.buffer) >= maxStreamLineBytes {
+				sp.pending = append(sp.pending, sp.buffer...)
+				sp.buffer = sp.buffer[:0]
+			}
+		}
+		if err != nil {
+			sp.eofSeen = true
+			sp.eofErr = err
+		}
 	}
-	return 0, nil
 }
 
 // Close 实现io.Closer接口
@@ -114,60 +108,33 @@ func (sp *StreamProcessor) Close() error {
 	return nil
 }
 
-// 处理buffer中的原始流数据，结果存入resultBuffer
-func (sp *StreamProcessor) processAndFillResultBuffer() {
-	if len(sp.buffer) == 0 {
-		return
-	}
-
+// 处理流式数据
+func (sp *StreamProcessor) processStreamData() []byte {
 	data := string(sp.buffer)
-
-	// 判断buffer是否以\n结尾，区分完整空行（SSE事件边界）和不完整行
-	endsWithNewline := len(data) > 0 && data[len(data)-1] == '\n'
-
 	lines := strings.Split(data, "\n")
-
 	var processedLines []string
 
-	if endsWithNewline {
-		// 所有分割片段都是完整行（含空行事件边界）
-		// Split("data: hello\n\n", "\n") => ["data: hello", "", ""]
-		// 最后一个""是\n末尾的artifact，倒数第二个""是事件边界空行
-		// 处理 lines[0..len-2] 作为完整行，最后的空串artifact跳过
-		completeLineCount := len(lines) - 1
-		for i := 0; i < completeLineCount; i++ {
-			processedLine := sp.processLine(lines[i])
-			processedLines = append(processedLines, processedLine)
-		}
-		// buffer完全消耗，重新分配
-		sp.buffer = make([]byte, 0, 4096)
-	} else {
-		// 不以\n结尾：最后一片段是不完整行，保留在buffer
-		if len(lines) <= 1 {
-			// 没有任何\n，整段都不完整，不处理
-			return
-		}
-		for i := 0; i < len(lines)-1; i++ {
-			processedLine := sp.processLine(lines[i])
-			processedLines = append(processedLines, processedLine)
-		}
-		sp.buffer = []byte(lines[len(lines)-1])
+	// 处理除最后一行外的所有完整行（最后一行可能不完整）
+	for i := 0; i < len(lines)-1; i++ {
+		processedLines = append(processedLines, sp.processLine(lines[i]))
 	}
 
-	// 拼接已处理的完整行，每行末尾恢复\n（因为它们原本是\n终止的）
-	if len(processedLines) > 0 {
-		result := strings.Join(processedLines, "\n") + "\n"
-		sp.resultBuffer = append(sp.resultBuffer, []byte(result)...)
+	// 保留最后一行未完整的数据
+	if len(lines) > 0 {
+		sp.buffer = []byte(lines[len(lines)-1])
+	} else {
+		sp.buffer = sp.buffer[:0]
 	}
+
+	result := strings.Join(processedLines, "\n")
+	if len(processedLines) > 0 {
+		result += "\n"
+	}
+	return []byte(result)
 }
 
 // 处理单行数据
 func (sp *StreamProcessor) processLine(line string) string {
-	// SSE空行（事件边界）原样透传
-	if line == "" {
-		return line
-	}
-
 	// data: 行：提取内容做隐私保护+敏感词处理
 	if strings.HasPrefix(line, "data:") {
 		// SSE规范：data:后如果有单个空格则剥离，否则保留
@@ -176,13 +143,15 @@ func (sp *StreamProcessor) processLine(line string) string {
 			eventData = eventData[1:]
 		}
 
-		// 隐私保护处理
-		eventData = sp.processPrivacyProtection(eventData)
+		processedData := sp.processPrivacyProtection(eventData)
+		processedData = sp.processSensitiveWords(processedData)
 
-		// 敏感词检测和替换（返回纯内容，不带data:前缀和\n）
-		eventData = sp.processSensitiveWords(eventData)
+		// 未发生脱敏或替换时逐字节透传，保留 CRLF 和 data: 后有意义的空格。
+		if processedData == eventData {
+			return line
+		}
 
-		return "data: " + eventData
+		return "data: " + processedData
 	}
 
 	// event: / id: / retry: 行原样透传，不修改协议字段

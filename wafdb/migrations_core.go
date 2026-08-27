@@ -48,7 +48,6 @@ func RunCoreDBMigrations(db *gorm.DB) error {
 						&model.SystemConfig{},
 						&model.DelayMsg{},
 						&model.ShareDb{},
-						&model.Center{},
 						&model.Sensitive{},
 						&model.LoadBalance{},
 						&model.SslConfig{},
@@ -87,7 +86,6 @@ func RunCoreDBMigrations(db *gorm.DB) error {
 						&model.SystemConfig{},
 						&model.DelayMsg{},
 						&model.ShareDb{},
-						&model.Center{},
 						&model.Sensitive{},
 						&model.LoadBalance{},
 						&model.SslConfig{},
@@ -134,7 +132,6 @@ func RunCoreDBMigrations(db *gorm.DB) error {
 					&model.SystemConfig{},
 					&model.DelayMsg{},
 					&model.ShareDb{},
-					&model.Center{},
 					&model.Sensitive{},
 					&model.LoadBalance{},
 					&model.SslConfig{},
@@ -1290,6 +1287,70 @@ func RunCoreDBMigrations(db *gorm.DB) error {
 				return nil
 			},
 		},
+		// 迁移: 创建威胁情报 IP 订阅渠道表与紧凑快照表
+		{
+			ID: "202607160001_add_threat_ip_subscription_tables",
+			Migrate: func(tx *gorm.DB) error {
+				zlog.Info("迁移 202607160001: 创建 threat_ip_channel / threat_ip_snapshot 表")
+				if err := tx.AutoMigrate(
+					&model.ThreatIPChannel{},
+					&model.ThreatIPSnapshot{},
+				); err != nil {
+					return fmt.Errorf("创建威胁情报订阅表失败: %w", err)
+				}
+				if err := safeCreateIndex(tx, "threat_ip_channel", "idx_threat_ip_channel_code",
+					"CREATE INDEX IF NOT EXISTS idx_threat_ip_channel_code ON threat_ip_channel(code)"); err != nil {
+					zlog.Warn("创建索引 idx_threat_ip_channel_code 失败", "error", err.Error())
+				}
+				if err := safeCreateIndex(tx, "threat_ip_snapshot", "idx_threat_ip_snapshot_channel",
+					"CREATE INDEX IF NOT EXISTS idx_threat_ip_snapshot_channel ON threat_ip_snapshot(channel_code)"); err != nil {
+					zlog.Warn("创建索引 idx_threat_ip_snapshot_channel 失败", "error", err.Error())
+				}
+				zlog.Info("威胁情报订阅表创建成功")
+				return nil
+			},
+			Rollback: func(tx *gorm.DB) error {
+				zlog.Info("回滚 202607160001: 删除威胁情报订阅表")
+				return tx.Migrator().DropTable(
+					&model.ThreatIPChannel{},
+					&model.ThreatIPSnapshot{},
+				)
+			},
+		},
+		// 迁移: 为 hosts 表添加真实客户端 IP 提取加固字段(默认空=与旧版行为完全一致)
+		{
+			ID: "202607160003_add_hosts_ip_source_hardening",
+			Migrate: func(tx *gorm.DB) error {
+				zlog.Info("迁移 202607160003: 为 hosts 表添加真实IP来源加固字段")
+				cols := []string{"ip_source_mode", "ip_trust_depth", "ip_real_header", "ip_trust_proxies", "cdn_provider"}
+				fields := map[string]string{
+					"ip_source_mode":   "IPSourceMode",
+					"ip_trust_depth":   "IPTrustDepth",
+					"ip_real_header":   "IPRealHeader",
+					"ip_trust_proxies": "IPTrustProxies",
+					"cdn_provider":     "CDNProvider",
+				}
+				for _, col := range cols {
+					if tx.Migrator().HasColumn(&model.Hosts{}, col) {
+						continue
+					}
+					if err := tx.Migrator().AddColumn(&model.Hosts{}, fields[col]); err != nil {
+						return fmt.Errorf("添加 hosts.%s 字段失败: %w", col, err)
+					}
+				}
+				zlog.Info("hosts 真实IP来源加固字段添加成功")
+				return nil
+			},
+			Rollback: func(tx *gorm.DB) error {
+				zlog.Info("回滚 202607160003: 删除 hosts 真实IP来源加固字段")
+				for _, field := range []string{"IPSourceMode", "IPTrustDepth", "IPRealHeader", "IPTrustProxies", "CDNProvider"} {
+					if tx.Migrator().HasColumn(&model.Hosts{}, field) {
+						_ = tx.Migrator().DropColumn(&model.Hosts{}, field)
+					}
+				}
+				return nil
+			},
+		},
 		// 迁移: 创建界面偏好表（按登录账号保存管理端界面偏好，如访问日志列配置）
 		{
 			ID: "202607280001_add_ui_preferences_table",
@@ -1311,6 +1372,610 @@ func RunCoreDBMigrations(db *gorm.DB) error {
 				if tx.Migrator().HasTable(&model.UIPreference{}) {
 					return tx.Migrator().DropTable(&model.UIPreference{})
 				}
+				return nil
+			},
+		},
+		// 迁移: 为 firewall_ip_block 加 (status, expire_time) 复合索引
+		// 过期清理任务查询 `status='active' AND expire_time 范围`，原单列索引各只覆盖一半谓词，
+		// 表变大后可能退化为全表扫描(加密 SQLite 全扫更慢，出现秒级 SLOW SQL)。复合索引精确命中该查询。
+		{
+			ID: "202607160004_add_firewall_ip_block_status_expire_index",
+			Migrate: func(tx *gorm.DB) error {
+				zlog.Info("迁移 202607160004: 创建 firewall_ip_block (status, expire_time) 复合索引")
+				if err := safeCreateIndex(tx, "firewall_ip_block", "idx_firewall_ip_block_status_expire",
+					"CREATE INDEX IF NOT EXISTS idx_firewall_ip_block_status_expire ON firewall_ip_block(status, expire_time)"); err != nil {
+					zlog.Warn("创建复合索引 idx_firewall_ip_block_status_expire 失败", "error", err.Error())
+				}
+				return nil
+			},
+			Rollback: func(tx *gorm.DB) error {
+				zlog.Info("回滚 202607160004: 删除 firewall_ip_block 复合索引")
+				return tx.Exec("DROP INDEX IF EXISTS idx_firewall_ip_block_status_expire").Error
+			},
+		},
+		// 迁移: 创建 CDN 厂商回源段中心库(每厂商一行，含加密凭证与最新回源段快照)
+		{
+			ID: "202607170001_add_cdn_provider_table",
+			Migrate: func(tx *gorm.DB) error {
+				zlog.Info("迁移 202607170001: 创建 cdn_provider 表")
+				if err := tx.AutoMigrate(&model.CDNProvider{}); err != nil {
+					return fmt.Errorf("创建 cdn_provider 表失败: %w", err)
+				}
+				if err := safeCreateIndex(tx, "cdn_provider", "idx_cdn_provider_code",
+					"CREATE INDEX IF NOT EXISTS idx_cdn_provider_code ON cdn_provider(provider)"); err != nil {
+					zlog.Warn("创建索引 idx_cdn_provider_code 失败", "error", err.Error())
+				}
+				zlog.Info("cdn_provider 表创建成功")
+				return nil
+			},
+			Rollback: func(tx *gorm.DB) error {
+				zlog.Info("回滚 202607170001: 删除 cdn_provider 表")
+				return tx.Migrator().DropTable(&model.CDNProvider{})
+			},
+		},
+		// 迁移: 创建 IP 组与组内条目表
+		// IP 组是可跨站点复用的 IP 集合（不带 host_code），黑/白名单条目与自定义规则都能引用；
+		// 组内容变更走 ipset 全局原子快照实时生效，不需要给每个引用站点单独下发。
+		{
+			ID: "202608030001_add_ip_group_tables",
+			Migrate: func(tx *gorm.DB) error {
+				zlog.Info("迁移 202608030001: 创建 ip_group / ip_group_item 表")
+				if err := tx.AutoMigrate(&model.IPGroup{}, &model.IPGroupItem{}); err != nil {
+					return fmt.Errorf("创建IP组表失败: %w", err)
+				}
+				// 组短码在租户内唯一（组是租户级资源，不带 host_code）
+				if err := safeCreateIndex(tx, "ip_group", "uni_ip_group_code",
+					"CREATE UNIQUE INDEX IF NOT EXISTS uni_ip_group_code ON ip_group (user_code, tenant_id, group_code)"); err != nil {
+					zlog.Warn("创建索引 uni_ip_group_code 失败", "error", err.Error())
+				}
+				// 重建组匹配集时按 group_code 聚合读取
+				if err := safeCreateIndex(tx, "ip_group_item", "idx_ip_group_item_group",
+					"CREATE INDEX IF NOT EXISTS idx_ip_group_item_group ON ip_group_item (group_code)"); err != nil {
+					zlog.Warn("创建索引 idx_ip_group_item_group 失败", "error", err.Error())
+				}
+				// 同组内同一条目只允许一行（新表无存量重复，不需要先清洗）
+				if err := safeCreateIndex(tx, "ip_group_item", "uni_ip_group_item",
+					"CREATE UNIQUE INDEX IF NOT EXISTS uni_ip_group_item ON ip_group_item (user_code, tenant_id, group_code, ip)"); err != nil {
+					zlog.Warn("创建索引 uni_ip_group_item 失败", "error", err.Error())
+				}
+				zlog.Info("IP组表创建成功")
+				return nil
+			},
+			Rollback: func(tx *gorm.DB) error {
+				zlog.Info("回滚 202608030001: 删除 IP 组表")
+				return tx.Migrator().DropTable(&model.IPGroupItem{}, &model.IPGroup{})
+			},
+		},
+		// 迁移: 黑/白名单表加「条目类型 + 引用组短码」两列，并把 ip 列扩容到 128
+		// 扩容原因：ip 现在还能写通配符与区间，IPv6 区间最长 79 字符，原 size:64 会被截断
+		// （SQLite 静默截断、MySQL 严格模式直接报错）。
+		{
+			ID: "202608030002_add_ip_list_group_ref_columns",
+			Migrate: func(tx *gorm.DB) error {
+				zlog.Info("迁移 202608030002: 为 IP 黑/白名单表添加 ip_type / group_code 字段并扩容 ip 列")
+				targets := []struct {
+					model interface{}
+					name  string
+				}{
+					{&model.IPBlockList{}, "IP黑名单"},
+					{&model.IPAllowList{}, "IP白名单"},
+				}
+				// 列名 -> 结构体字段名（AddColumn 用字段名更稳，HasColumn 用列名）
+				cols := []struct{ column, field string }{
+					{"ip_type", "IpType"},
+					{"group_code", "GroupCode"},
+				}
+				for _, t := range targets {
+					for _, c := range cols {
+						if tx.Migrator().HasColumn(t.model, c.column) {
+							continue
+						}
+						if err := tx.Migrator().AddColumn(t.model, c.field); err != nil {
+							return fmt.Errorf("添加 %s.%s 字段失败: %w", t.name, c.column, err)
+						}
+					}
+					// AlterColumn 走的是扩容（64 → 128），不会丢数据；失败不阻断迁移，
+					// 因为 SQLite 本身不限制 varchar 长度，只有 MySQL/PG 需要真正扩容。
+					if err := tx.Migrator().AlterColumn(t.model, "Ip"); err != nil {
+						zlog.Warn("扩容 "+t.name+" 的 ip 列失败(不影响 SQLite，MySQL/PG 请关注)", "error", err.Error())
+					}
+				}
+				// 不回填 ip_type：留空即代表「单条IP」，判定处一律只判 == "group"。
+				// 回填会在大表上产生一次全表 UPDATE，收益为零。
+				zlog.Info("IP黑/白名单组引用字段添加成功")
+				return nil
+			},
+			Rollback: func(tx *gorm.DB) error {
+				zlog.Info("回滚 202608030002: 删除 IP 黑/白名单组引用字段")
+				for _, m := range []interface{}{&model.IPBlockList{}, &model.IPAllowList{}} {
+					for _, f := range []string{"IpType", "GroupCode"} {
+						if tx.Migrator().HasColumn(m, f) {
+							if err := tx.Migrator().DropColumn(m, f); err != nil {
+								zlog.Warn("删除字段失败", "error", err.Error())
+							}
+						}
+					}
+				}
+				return nil
+			},
+		},
+		// 迁移: 统一访问认证(Access 模式) —— 账号/会话/子令牌/票据/全局配置 五张表
+		// 对标 Cloudflare Access：开启后访问任何被代理的站点都要先登录，登录一次可放行多个站点。
+		// 会话与子令牌落库而不是只放缓存，是为了「重启不掉线」和「管理端能看到谁在线并踢下线」。
+		{
+			ID: "202608040001_add_access_tables",
+			Migrate: func(tx *gorm.DB) error {
+				zlog.Info("迁移 202608040001: 创建统一访问认证相关表")
+				if err := tx.AutoMigrate(&model.AccessAccount{}, &model.AccessSession{},
+					&model.AccessToken{}, &model.AccessTicket{}, &model.AccessConfig{}); err != nil {
+					return fmt.Errorf("创建统一访问认证表失败: %w", err)
+				}
+				// 登录名在租户内唯一
+				if err := safeCreateIndex(tx, "access_account", "uni_access_account_name",
+					"CREATE UNIQUE INDEX IF NOT EXISTS uni_access_account_name ON access_account (user_code, tenant_id, account_name)"); err != nil {
+					zlog.Warn("创建索引 uni_access_account_name 失败", "error", err.Error())
+				}
+				// session_code / token_code / ticket_code 都是 sha256hex，全局唯一即可，
+				// 不带 user_code：它们是引擎热路径的查询键，多一列比较就多一分出错空间。
+				if err := safeCreateIndex(tx, "access_session", "uni_access_session_code",
+					"CREATE UNIQUE INDEX IF NOT EXISTS uni_access_session_code ON access_session (session_code)"); err != nil {
+					zlog.Warn("创建索引 uni_access_session_code 失败", "error", err.Error())
+				}
+				if err := safeCreateIndex(tx, "access_session", "idx_access_session_account",
+					"CREATE INDEX IF NOT EXISTS idx_access_session_account ON access_session (account_code, status)"); err != nil {
+					zlog.Warn("创建索引 idx_access_session_account 失败", "error", err.Error())
+				}
+				if err := safeCreateIndex(tx, "access_token", "uni_access_token_code",
+					"CREATE UNIQUE INDEX IF NOT EXISTS uni_access_token_code ON access_token (token_code)"); err != nil {
+					zlog.Warn("创建索引 uni_access_token_code 失败", "error", err.Error())
+				}
+				// 踢下线要按会话批量摘子令牌
+				if err := safeCreateIndex(tx, "access_token", "idx_access_token_session",
+					"CREATE INDEX IF NOT EXISTS idx_access_token_session ON access_token (session_code)"); err != nil {
+					zlog.Warn("创建索引 idx_access_token_session 失败", "error", err.Error())
+				}
+				// 清理任务按 status+expire_time 扫
+				if err := safeCreateIndex(tx, "access_token", "idx_access_token_expire",
+					"CREATE INDEX IF NOT EXISTS idx_access_token_expire ON access_token (status, expire_time)"); err != nil {
+					zlog.Warn("创建索引 idx_access_token_expire 失败", "error", err.Error())
+				}
+				if err := safeCreateIndex(tx, "access_ticket", "uni_access_ticket_code",
+					"CREATE UNIQUE INDEX IF NOT EXISTS uni_access_ticket_code ON access_ticket (ticket_code)"); err != nil {
+					zlog.Warn("创建索引 uni_access_ticket_code 失败", "error", err.Error())
+				}
+				if err := safeCreateIndex(tx, "access_ticket", "idx_access_ticket_expire",
+					"CREATE INDEX IF NOT EXISTS idx_access_ticket_expire ON access_ticket (expire_time)"); err != nil {
+					zlog.Warn("创建索引 idx_access_ticket_expire 失败", "error", err.Error())
+				}
+				zlog.Info("统一访问认证表创建成功")
+				return nil
+			},
+			Rollback: func(tx *gorm.DB) error {
+				zlog.Info("回滚 202608040001: 删除统一访问认证表")
+				return tx.Migrator().DropTable(&model.AccessTicket{}, &model.AccessToken{},
+					&model.AccessSession{}, &model.AccessConfig{}, &model.AccessAccount{})
+			},
+		},
+		// 迁移: 站点表增加 access_json 列（站点级三态 + 路径白名单）
+		// 只改结构体不写迁移的话，存量 MySQL 库会直接报 1054 Unknown column。
+		{
+			ID: "202608040004_add_hosts_access_json",
+			Migrate: func(tx *gorm.DB) error {
+				zlog.Info("迁移 202608040004: 为 hosts 表添加 access_json 字段")
+				if tx.Migrator().HasColumn(&model.Hosts{}, "access_json") {
+					zlog.Info("access_json 字段已存在，跳过")
+					return nil
+				}
+				if err := tx.Migrator().AddColumn(&model.Hosts{}, "AccessJSON"); err != nil {
+					return fmt.Errorf("添加 hosts.access_json 字段失败: %w", err)
+				}
+				// 不回填任何值：空字符串经 model.ParseAccessConfig 解析即为 Mode=0(继承全局)，
+				// 而全局总开关默认关闭，所以存量站点升级后行为完全不变。
+				zlog.Info("hosts.access_json 字段添加成功")
+				return nil
+			},
+			Rollback: func(tx *gorm.DB) error {
+				zlog.Info("回滚 202608040004: 删除 hosts.access_json 字段")
+				if tx.Migrator().HasColumn(&model.Hosts{}, "AccessJSON") {
+					if err := tx.Migrator().DropColumn(&model.Hosts{}, "AccessJSON"); err != nil {
+						zlog.Warn("删除字段失败", "error", err.Error())
+					}
+				}
+				return nil
+			},
+		},
+		// 迁移: 通知订阅表增加频控与模板列（issue #822 通知精细化配置）
+		// 全部留空 => 继承全局默认 => 与升级前行为一致，所以不需要任何数据回填。
+		{
+			ID: "202608050001_add_notify_subscription_throttle",
+			Migrate: func(tx *gorm.DB) error {
+				zlog.Info("迁移 202608050001: 为 notify_subscription 表添加频控与模板字段")
+				cols := []struct{ column, field string }{
+					{"throttle_mode", "ThrottleMode"},
+					{"throttle_json", "ThrottleJSON"},
+					{"title_template", "TitleTemplate"},
+					{"content_template", "ContentTemplate"},
+				}
+				for _, c := range cols {
+					if tx.Migrator().HasColumn(&model.NotifySubscription{}, c.column) {
+						zlog.Info("字段已存在，跳过", "column", c.column)
+						continue
+					}
+					if err := tx.Migrator().AddColumn(&model.NotifySubscription{}, c.field); err != nil {
+						return fmt.Errorf("添加 notify_subscription.%s 字段失败: %w", c.column, err)
+					}
+				}
+				zlog.Info("notify_subscription 频控与模板字段添加成功")
+				return nil
+			},
+			Rollback: func(tx *gorm.DB) error {
+				zlog.Info("回滚 202608050001: 删除 notify_subscription 频控与模板字段")
+				for _, field := range []string{"ThrottleMode", "ThrottleJSON", "TitleTemplate", "ContentTemplate"} {
+					if tx.Migrator().HasColumn(&model.NotifySubscription{}, field) {
+						if err := tx.Migrator().DropColumn(&model.NotifySubscription{}, field); err != nil {
+							zlog.Warn("删除字段失败", "field", field, "error", err.Error())
+						}
+					}
+				}
+				return nil
+			},
+		},
+		// 迁移: 账号表增加上次登录信息列（登录后提示「本次IP/归属地，与上次是否一致」）
+		// 三列都留空 => 首次登录判定 => 只提示本次信息不报"不一致"，存量账号升级后不会被误报异地登录。
+		{
+			ID: "202608060001_add_account_last_login",
+			Migrate: func(tx *gorm.DB) error {
+				zlog.Info("迁移 202608060001: 为 account 表添加上次登录信息字段")
+				cols := []struct{ column, field string }{
+					{"last_login_ip", "LastLoginIp"},
+					{"last_login_area", "LastLoginArea"},
+					{"last_login_time", "LastLoginTime"},
+				}
+				for _, c := range cols {
+					if tx.Migrator().HasColumn(&model.Account{}, c.column) {
+						zlog.Info("字段已存在，跳过", "column", c.column)
+						continue
+					}
+					if err := tx.Migrator().AddColumn(&model.Account{}, c.field); err != nil {
+						return fmt.Errorf("添加 account.%s 字段失败: %w", c.column, err)
+					}
+				}
+				zlog.Info("account 上次登录信息字段添加成功")
+				return nil
+			},
+			Rollback: func(tx *gorm.DB) error {
+				zlog.Info("回滚 202608060001: 删除 account 上次登录信息字段")
+				for _, field := range []string{"LastLoginIp", "LastLoginArea", "LastLoginTime"} {
+					if tx.Migrator().HasColumn(&model.Account{}, field) {
+						if err := tx.Migrator().DropColumn(&model.Account{}, field); err != nil {
+							zlog.Warn("删除字段失败", "field", field, "error", err.Error())
+						}
+					}
+				}
+				return nil
+			},
+		},
+		// 迁移: 主机防爆破(SSH/RDP)三张表 —— 封禁账本 / 攻击者档案 / 阶梯配置
+		// 阶梯默认播种 5 级(5分→15分→60分→1天→永久)，用户可在页面上增删改。
+		{
+			ID: "202608070002_add_host_guard_tables",
+			Migrate: func(tx *gorm.DB) error {
+				zlog.Info("迁移 202608070002: 创建主机防爆破相关表")
+				if err := tx.AutoMigrate(
+					&model.HostGuardBan{},
+					&model.HostGuardOffender{},
+					&model.HostGuardBanLadder{},
+				); err != nil {
+					return fmt.Errorf("创建主机防爆破表失败: %w", err)
+				}
+
+				// (status, expire_time)：解封任务每分钟按这两列查，单列索引各只覆盖一半谓词
+				if err := safeCreateIndex(tx, "host_guard_ban", "idx_hgb_status_expire",
+					"CREATE INDEX IF NOT EXISTS idx_hgb_status_expire ON host_guard_ban(status, expire_time)"); err != nil {
+					zlog.Warn("创建索引 idx_hgb_status_expire 失败", "error", err.Error())
+				}
+				// (ip, status)：判断某IP当前是否已被封
+				if err := safeCreateIndex(tx, "host_guard_ban", "idx_hgb_ip_status",
+					"CREATE INDEX IF NOT EXISTS idx_hgb_ip_status ON host_guard_ban(ip, status)"); err != nil {
+					zlog.Warn("创建索引 idx_hgb_ip_status 失败", "error", err.Error())
+				}
+				// (start_time)：封禁列表按时间倒序分页
+				if err := safeCreateIndex(tx, "host_guard_ban", "idx_hgb_start_time",
+					"CREATE INDEX IF NOT EXISTS idx_hgb_start_time ON host_guard_ban(start_time)"); err != nil {
+					zlog.Warn("创建索引 idx_hgb_start_time 失败", "error", err.Error())
+				}
+				// 档案按 IP 查(阶梯决策每次封禁都要查一次，必须走索引)
+				if err := safeCreateIndex(tx, "host_guard_offender", "idx_hgo_ip",
+					"CREATE INDEX IF NOT EXISTS idx_hgo_ip ON host_guard_offender(ip)"); err != nil {
+					zlog.Warn("创建索引 idx_hgo_ip 失败", "error", err.Error())
+				}
+
+				// 播种默认阶梯：先计数，避免重复执行(老库回滚重跑时)把阶梯播成两份
+				var count int64
+				tx.Model(&model.HostGuardBanLadder{}).Count(&count)
+				if count > 0 {
+					zlog.Info("封禁阶梯已存在，跳过播种", "count", count)
+					return nil
+				}
+				for _, ladder := range model.DefaultBanLadders() {
+					ladder.BaseOrm = baseorm.BaseOrm{
+						Id:          uuid.GenUUID(),
+						USER_CODE:   global.GWAF_USER_CODE,
+						Tenant_ID:   global.GWAF_TENANT_ID,
+						CREATE_TIME: customtype.JsonTime(time.Now()),
+						UPDATE_TIME: customtype.JsonTime(time.Now()),
+					}
+					if err := tx.Create(&ladder).Error; err != nil {
+						return fmt.Errorf("播种封禁阶梯(第%d级)失败: %w", ladder.Level, err)
+					}
+				}
+				zlog.Info("主机防爆破表创建成功，默认阶梯已播种")
+				return nil
+			},
+			Rollback: func(tx *gorm.DB) error {
+				zlog.Info("回滚 202608070002: 删除主机防爆破相关表")
+				return tx.Migrator().DropTable(
+					&model.HostGuardBan{},
+					&model.HostGuardOffender{},
+					&model.HostGuardBanLadder{},
+				)
+			},
+		},
+		// 迁移: 修正 http3 / http3_bbr 两个配置项的展示元数据(item_type/options/remarks)。
+		// updateConfigIntItem 只在【行不存在】时插入，永远不会更新已存在行的备注，
+		// 老用户看到的还是「是否启用http3（1启用 0关闭）」，看不出还需要 SSL + 放行 UDP 端口(issue #916)。
+		{
+			ID: "202608080001_update_http3_config_meta",
+			Migrate: func(tx *gorm.DB) error {
+				zlog.Info("迁移 202608080001: 更新 http3/http3_bbr 配置项说明")
+				fixes := []struct {
+					item       string
+					oldRemarks string
+					newRemarks string
+					options    string
+				}{
+					{
+						item:       "http3",
+						oldRemarks: "是否启用http3（1启用 0关闭）",
+						newRemarks: "是否启用HTTP/3(QUIC)。生效前提：①站点必须开启SSL（HTTP/3 只跑在 TLS 上，非HTTPS端口不会监听UDP）；②必须在防火墙/安全组放行对应的【UDP】端口（如 443/udp）。开启后立即生效、无需重启；浏览器通过响应头 Alt-Svc 升级到 h3",
+						options:    "0|关闭,1|开启",
+					},
+					{
+						item:       "http3_bbr",
+						oldRemarks: "配置http3是否用BBR(默认NewReno)",
+						newRemarks: "HTTP/3 拥塞控制算法：0=NewReno(默认) 1=BBR。仅在已启用 HTTP/3 时有意义，修改后会自动重建 QUIC 监听",
+						options:    "0|NewReno,1|BBR",
+					},
+				}
+				for _, f := range fixes {
+					// 只覆盖仍是出厂默认备注(或为空)的行，避免把用户自己改过的备注冲掉；value 一律不动。
+					// 用裸 Exec 绕开租户 query callback(同 patch_sql.go)；item 是固定字面量，无注入面。
+					if err := tx.Exec(
+						"UPDATE system_configs SET item_type = ?, options = ?, remarks = ? WHERE item = ? AND (remarks = ? OR remarks IS NULL OR remarks = '')",
+						"options", f.options, f.newRemarks, f.item, f.oldRemarks).Error; err != nil {
+						zlog.Warn("更新配置项说明失败", "item", f.item, "error", err.Error())
+					}
+				}
+				zlog.Info("http3 配置项说明更新完成")
+				return nil
+			},
+			Rollback: func(tx *gorm.DB) error {
+				// 纯展示元数据，不影响功能，无需回滚
+				return nil
+			},
+		},
+		// 迁移: 威胁情报渠道表增加"已落地快照"列（落地态与内容态分离）
+		//
+		// 背景：原先只有内容 sha（threat_ip_snapshot.Sha256），它同时承担了"内容变没变"和
+		// "落地成功没有"两个语义。Windows 上一次全量重建是几十次独立 netsh 调用，中途失败会
+		// 留下半截规则，而快照 sha 已经先落库了 —— 下次同步按"内容无变化"早退，永远不再落地，
+		// 页面却显示 ok。分出 landed_sha 后，判据变成"内容没变且落地态==内容态"才跳过。
+		//
+		// 两列留空 => 存量渠道首次同步/对账时会被判定为"落地态未知"，从而做一次覆盖式重建，
+		// 正好把升级前可能残留的半截/重复规则一次性修正，不需要额外的数据回填。
+		{
+			ID: "202608100001_add_threat_ip_channel_landed",
+			Migrate: func(tx *gorm.DB) error {
+				zlog.Info("迁移 202608100001: 为 threat_ip_channel 表添加已落地快照字段")
+				cols := []struct{ column, field string }{
+					{"landed_sha", "LandedSha"},
+					{"landed_count", "LandedCount"},
+				}
+				for _, c := range cols {
+					if tx.Migrator().HasColumn(&model.ThreatIPChannel{}, c.column) {
+						zlog.Info("字段已存在，跳过", "column", c.column)
+						continue
+					}
+					if err := tx.Migrator().AddColumn(&model.ThreatIPChannel{}, c.field); err != nil {
+						return fmt.Errorf("添加 threat_ip_channel.%s 字段失败: %w", c.column, err)
+					}
+				}
+				zlog.Info("threat_ip_channel 已落地快照字段添加成功")
+				return nil
+			},
+			Rollback: func(tx *gorm.DB) error {
+				zlog.Info("回滚 202608100001: 删除 threat_ip_channel 已落地快照字段")
+				for _, field := range []string{"LandedSha", "LandedCount"} {
+					if tx.Migrator().HasColumn(&model.ThreatIPChannel{}, field) {
+						if err := tx.Migrator().DropColumn(&model.ThreatIPChannel{}, field); err != nil {
+							zlog.Warn("删除字段失败", "field", field, "error", err.Error())
+						}
+					}
+				}
+				return nil
+			},
+		},
+		// 迁移: 创建威胁情报误报排除名单表
+		//
+		// 订阅源是全量快照且每周期整份覆盖，用户手工从防火墙删掉的条目下次同步就回来；
+		// 系统层又是内核丢包，WAF 白名单救不了。所以误报需要一份"每次同步/对账都重新应用"
+		// 的本地排除声明，见 SamWafTechDoc/威胁IP库同步/SamWaf-威胁情报IP误报排除-设计文档.md
+		{
+			ID: "202608110001_add_threat_ip_exclude_table",
+			Migrate: func(tx *gorm.DB) error {
+				zlog.Info("迁移 202608110001: 创建威胁情报误报排除名单表")
+				if err := tx.AutoMigrate(&model.ThreatIPExclude{}); err != nil {
+					return fmt.Errorf("创建威胁情报排除名单表失败: %w", err)
+				}
+				zlog.Info("威胁情报误报排除名单表创建成功")
+				return nil
+			},
+			Rollback: func(tx *gorm.DB) error {
+				zlog.Info("回滚 202608110001: 删除威胁情报误报排除名单表")
+				return tx.Migrator().DropTable(&model.ThreatIPExclude{})
+			},
+		},
+		// 迁移: 为 blocking_page 表添加 content_priority 字段（模版/后端内容优先级）
+		//
+		// 背景：后端真实返回的 4xx/5xx 会被自定义模版整个覆盖，接口的 JSON 错误详情丢失（gitee issue IK8KA7）。
+		// 新增该字段让用户按页面选择"优先自定义模版"（默认，等同历史行为）或"优先后端响应"。
+		// 空值即默认值，老数据无需回填。
+		{
+			ID: "202608140001_add_blocking_page_content_priority",
+			Migrate: func(tx *gorm.DB) error {
+				zlog.Info("迁移 202608140001: 为 blocking_page 表添加 content_priority 字段")
+				if tx.Migrator().HasColumn(&model.BlockingPage{}, "content_priority") {
+					zlog.Info("content_priority 字段已存在，跳过添加")
+					return nil
+				}
+				if err := tx.Migrator().AddColumn(&model.BlockingPage{}, "content_priority"); err != nil {
+					return fmt.Errorf("添加 content_priority 字段失败: %w", err)
+				}
+				zlog.Info("content_priority 字段添加成功")
+				return nil
+			},
+			Rollback: func(tx *gorm.DB) error {
+				zlog.Info("回滚 202608140001: 删除 blocking_page 表的 content_priority 字段")
+				if tx.Migrator().HasColumn(&model.BlockingPage{}, "content_priority") {
+					return tx.Migrator().DropColumn(&model.BlockingPage{}, "content_priority")
+				}
+				return nil
+			},
+		},
+		// 迁移: 为 ssl_config 表添加证书导出(落盘)三列
+		//
+		// 背景：issue #929，SamWaf 申请/续期成功后把证书同步成实体文件，供 nginx 等
+		// 外部程序使用。原有的 cert_path/key_path 是「读入」方向，不能复用（复用会把用户的
+		// 源文件反向覆盖掉），所以新增独立的导出路径列。留空即不导出，老数据无需回填。
+		{
+			ID: "202608150001_add_ssl_config_export_columns",
+			Migrate: func(tx *gorm.DB) error {
+				zlog.Info("迁移 202608150001: 为 ssl_config 表添加证书导出字段")
+				// 列名 -> 结构体字段名（AddColumn 用字段名更稳，HasColumn 用列名）
+				cols := []struct{ column, field string }{
+					{"export_cert_path", "ExportCertPath"},
+					{"export_key_path", "ExportKeyPath"},
+					{"export_status", "ExportStatus"},
+				}
+				for _, c := range cols {
+					if tx.Migrator().HasColumn(&model.SslConfig{}, c.column) {
+						continue
+					}
+					if err := tx.Migrator().AddColumn(&model.SslConfig{}, c.field); err != nil {
+						return fmt.Errorf("添加 ssl_config.%s 字段失败: %w", c.column, err)
+					}
+				}
+				zlog.Info("ssl_config 证书导出字段添加成功")
+				return nil
+			},
+			Rollback: func(tx *gorm.DB) error {
+				zlog.Info("回滚 202608150001: 删除 ssl_config 表的证书导出字段")
+				for _, f := range []string{"ExportCertPath", "ExportKeyPath", "ExportStatus"} {
+					if tx.Migrator().HasColumn(&model.SslConfig{}, f) {
+						if err := tx.Migrator().DropColumn(&model.SslConfig{}, f); err != nil {
+							zlog.Warn("删除字段失败", "error", err.Error())
+						}
+					}
+				}
+				return nil
+			},
+		},
+		// 迁移: 为 hosts 表添加 is_enable_response_buffering 字段（响应缓冲，1开启/0关闭，默认1）
+		{
+			ID: "202608170001_add_hosts_is_enable_response_buffering",
+			Migrate: func(tx *gorm.DB) error {
+				zlog.Info("迁移 202608170001: 为 hosts 表添加 is_enable_response_buffering 字段")
+				if tx.Migrator().HasColumn(&model.Hosts{}, "is_enable_response_buffering") {
+					zlog.Info("is_enable_response_buffering 字段已存在，跳过添加")
+					return nil
+				}
+				if err := tx.Migrator().AddColumn(&model.Hosts{}, "IsEnableResponseBuffering"); err != nil {
+					return fmt.Errorf("添加 is_enable_response_buffering 字段失败: %w", err)
+				}
+				// 存量站点回填 1（=开启响应缓冲，保持现状；AddColumn 后常见默认 0，需一并纠正）
+				if err := tx.Exec("UPDATE hosts SET is_enable_response_buffering = 1 WHERE is_enable_response_buffering IS NULL OR is_enable_response_buffering = 0").Error; err != nil {
+					zlog.Warn("回填 is_enable_response_buffering 默认值失败", "error", err.Error())
+				}
+				zlog.Info("is_enable_response_buffering 字段添加成功")
+				return nil
+			},
+			Rollback: func(tx *gorm.DB) error {
+				zlog.Info("回滚 202608170001: 删除 hosts 表的 is_enable_response_buffering 字段")
+				if tx.Migrator().HasColumn(&model.Hosts{}, "is_enable_response_buffering") {
+					return tx.Migrator().DropColumn(&model.Hosts{}, "is_enable_response_buffering")
+				}
+				return nil
+			},
+		},
+		// 迁移: 创建升级须知记录表（升级后在产品内提示本次变更与建议操作）
+		{
+			ID: "202608220001_add_upgrade_notice_record_table",
+			Migrate: func(tx *gorm.DB) error {
+				zlog.Info("迁移 202608220001: 创建升级须知记录表")
+				if err := tx.AutoMigrate(&model.UpgradeNoticeRecord{}); err != nil {
+					return fmt.Errorf("创建升级须知记录表失败: %w", err)
+				}
+				// notice_id 唯一：同一条须知跨多次重启只生成一次，用户处理过的状态不会被覆盖
+				if err := safeCreateIndex(tx, "upgrade_notice_record", "uni_upgrade_notice_id",
+					"CREATE UNIQUE INDEX IF NOT EXISTS uni_upgrade_notice_id ON upgrade_notice_record(notice_id, user_code, tenant_id)"); err != nil {
+					zlog.Warn("创建索引 uni_upgrade_notice_id 失败", "error", err.Error())
+				}
+				return nil
+			},
+			Rollback: func(tx *gorm.DB) error {
+				zlog.Info("回滚 202608220001: 删除升级须知记录表")
+				return tx.Migrator().DropTable(&model.UpgradeNoticeRecord{})
+			},
+		},
+		// 迁移: 删除中心管控客户端表。
+		// 中心管控功能已整体下架（该链路从未接通，正常部署下此表始终为空），
+		// 相关路由/中间件/服务已删除，表随之删除，不留无人读取的残留数据。
+		{
+			ID: "202608240002_drop_centers_table",
+			Migrate: func(tx *gorm.DB) error {
+				if !tx.Migrator().HasTable("centers") {
+					return nil
+				}
+				// 正常部署下这张表应当是空的（客户端自注册从未接通）。
+				// 非空则记一条，让运维知道曾有过写入，数据随功能一并清除。
+				var cnt int64
+				if err := tx.Table("centers").Count(&cnt).Error; err == nil && cnt > 0 {
+					zlog.Warn(fmt.Sprintf("迁移 202608240002: centers 表存在 %d 条记录，随中心管控功能一并清除", cnt))
+				}
+				zlog.Info("迁移 202608240002: 删除中心管控客户端表")
+				return tx.Migrator().DropTable("centers")
+			},
+			Rollback: func(tx *gorm.DB) error {
+				// 功能已下架，模型也已删除，无法重建，回滚为空操作
+				return nil
+			},
+		},
+		// 迁移: 清掉中心管控留在系统配置表里的两项。
+		// gwaf_center_enable / gwaf_center_url 随功能下架已无任何读取方，留着只会在
+		// 「系统配置」里显示成一对改了也不起作用的开关，将来重做多节点管控时也不该
+		// 沿用这两个键（设计完全不同），直接删干净避免歧义。
+		{
+			ID: "202608240003_remove_center_system_configs",
+			Migrate: func(tx *gorm.DB) error {
+				if !tx.Migrator().HasTable(&model.SystemConfig{}) {
+					return nil
+				}
+				zlog.Info("迁移 202608240003: 删除中心管控遗留系统配置项")
+				return tx.Where("item IN ?", []string{"gwaf_center_enable", "gwaf_center_url"}).
+					Delete(&model.SystemConfig{}).Error
+			},
+			Rollback: func(tx *gorm.DB) error {
+				// 功能已下架，不重建这两个配置项
 				return nil
 			},
 		},

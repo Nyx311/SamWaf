@@ -48,10 +48,24 @@ var sensitiveTableSubstrings = []string{
 	"notifychannel",
 	"http_auth", // http_auth_base_configs（访问密码）
 	"httpauth",
-	"token",  // 任何令牌表
-	"secret", // 任何以 secret 命名的表
-	"config", // system_configs / *config* 键值配置表（可能明文存密钥）
-	"plugin", // waf_plugin_* 插件配置/日志（参数/值/IO 可能含凭证）
+	"token",        // 任何令牌表
+	"secret",       // 任何以 secret 命名的表
+	"config",       // system_configs / *config* 键值配置表（可能明文存密钥）
+	"plugin",       // waf_plugin_* 插件配置/日志（参数/值/IO 可能含凭证）
+	"cdn_provider", // cdn_provider（CDN 厂商认证凭证 SecretId/SecretKey 加密落库，整表不可查）
+	"center",       // centers（中心管控已下架、表随迁移删除；规则保留作兜底，防迁移失败时残表被查）
+	// 统一访问认证：access_account 已被 "account" 覆盖、access_token 被 "token" 覆盖、
+	// access_config 被 "config" 覆盖，但仍显式列出，免得日后有人改了上面那几个子串就悄悄放开了。
+	"access_account",
+	"access_session", // 在线会话：登录IP/设备指纹/归属地，属访客隐私
+	"access_token",
+	"access_ticket", // 跨域票据：含回跳地址与会话关联
+	"access_config",
+	"access_audit", // 审计日志有专门的只读接口，不需要也不应该从裸查询通道导出
+	// 威胁情报误报排除：排除名单是"哪些地址被主动放行了"的清单，泄露等于告诉攻击者
+	// 从哪个地址来不会被情报拦；审计流水同理，且它是只增不改的合规证据，
+	// 有专门的只读接口，不该从裸查询通道导出。
+	"threat_ip_exclude",
 }
 
 // allowedSqlOps 结构化条件允许的运算符白名单。

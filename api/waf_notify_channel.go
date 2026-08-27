@@ -23,10 +23,32 @@ var wafNotifyChannelService = waf_service.WafNotifyChannelServiceApp
 // @Success      200   {object}  response.Response  "添加成功"
 // @Security     ApiKeyAuth
 // @Router       /notify/channel/add [post]
+// resolveMaskedSecret 处理不回显的密钥字段编辑语义：提交清空哨兵=清空；留空=保持原值；否则用新值。
+func resolveMaskedSecret(submitted, current string) string {
+	if submitted == waf_service.ConfigClearSentinel {
+		return ""
+	}
+	if submitted == "" {
+		return current
+	}
+	return submitted
+}
+
 func (w *WafNotifyChannelApi) AddApi(c *gin.Context) {
 	var req request.WafNotifyChannelAddReq
 	err := c.ShouldBindJSON(&req)
 	if err == nil {
+		if cfgErr := waf_service.ValidateChannelConfig(req.Type, req.ConfigJSON); cfgErr != nil {
+			response.FailWithMessage(cfgErr.Error(), c)
+			return
+		}
+		// 新建没有"原值"可保留，哨兵值在这里等同于留空；防止它被当成密钥本身存进去。
+		if req.Secret == waf_service.ConfigClearSentinel {
+			req.Secret = ""
+		}
+		if req.AccessToken == waf_service.ConfigClearSentinel {
+			req.AccessToken = ""
+		}
 		err = wafNotifyChannelService.CheckIsExistApi(req)
 		if err != nil && errors.Is(err, gorm.ErrRecordNotFound) {
 			err = wafNotifyChannelService.AddApi(req)
@@ -60,6 +82,7 @@ func (w *WafNotifyChannelApi) GetDetailApi(c *gin.Context) {
 	err := c.ShouldBind(&req)
 	if err == nil {
 		bean := wafNotifyChannelService.GetDetailApi(req)
+		waf_service.MaskNotifyChannelSecret(&bean)
 		response.OkWithDetailed(bean, "获取成功", c)
 	} else {
 		response.FailWithMessage("解析失败", c)
@@ -81,6 +104,9 @@ func (w *WafNotifyChannelApi) GetListApi(c *gin.Context) {
 	err := c.ShouldBindJSON(&req)
 	if err == nil {
 		beans, total, _ := wafNotifyChannelService.GetListApi(req)
+		for i := range beans {
+			waf_service.MaskNotifyChannelSecret(&beans[i])
+		}
 		response.OkWithDetailed(response.PageResult{
 			List:      beans,
 			Total:     total,
@@ -133,6 +159,14 @@ func (w *WafNotifyChannelApi) ModifyApi(c *gin.Context) {
 	var req request.WafNotifyChannelEditReq
 	err := c.ShouldBindJSON(&req)
 	if err == nil {
+		if cfgErr := waf_service.ValidateChannelConfig(req.Type, req.ConfigJSON); cfgErr != nil {
+			response.FailWithMessage(cfgErr.Error(), c)
+			return
+		}
+		// Secret/AccessToken：留空=保持原值(不回显导致的空提交不该冲掉)，清空需提交哨兵值。
+		existing := wafNotifyChannelService.GetDetailApi(request.WafNotifyChannelDetailReq{Id: req.Id})
+		req.Secret = resolveMaskedSecret(req.Secret, existing.Secret)
+		req.AccessToken = resolveMaskedSecret(req.AccessToken, existing.AccessToken)
 		err = wafNotifyChannelService.ModifyApi(req)
 		if err != nil {
 			response.FailWithMessage("编辑发生错误", c)

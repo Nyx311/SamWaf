@@ -9,6 +9,7 @@ import (
 	"SamWaf/model/request"
 	"SamWaf/model/spec"
 	"SamWaf/service/waf_service"
+	"SamWaf/utils"
 	"errors"
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -30,9 +31,10 @@ func (s *WafSslConfigApi) AddSslConfigApi(c *gin.Context) {
 	var req request.SslConfigAddReq
 	err := c.ShouldBindJSON(&req)
 	if err == nil {
-		err = wafSslConfigService.AddApi(req)
+		sslId, err := wafSslConfigService.AddApi(req)
 		if err == nil {
-			response.OkWithMessage("添加成功", c)
+			//证书已保存成功，导出只是附加动作：失败只提示，不改变保存结果
+			response.OkWithMessage("添加成功"+s.exportTip(c, sslId), c)
 		} else {
 			response.FailWithMessage("添加失败:"+err.Error(), c)
 		}
@@ -139,11 +141,50 @@ func (s *WafSslConfigApi) ModifySslConfigApi(c *gin.Context) {
 			if oldSslBean.SerialNo != newSslBean.SerialNo {
 				s.NotifySslUpdate(oldSslBean, newSslBean)
 			}
-			response.OkWithMessage("编辑成功", c)
+			//证书已保存成功，导出只是附加动作：失败只提示，不改变保存结果
+			response.OkWithMessage("编辑成功"+s.exportTip(c, req.Id), c)
 		}
 	} else {
 		response.FailWithMessage("解析失败", c)
 	}
+}
+
+// exportTip 保存成功后触发证书导出(落盘)，把结果拼成一句可展示的提示，
+// 并把这次「向宿主机落盘」的敏感操作记入统一安全审计(security_audit_log, config 类)。
+// 未配置导出返回空串、也不记审计（不是敏感操作）；导出失败/被拒只提示，不影响证书本身已保存。
+func (s *WafSslConfigApi) exportTip(c *gin.Context, sslId string) string {
+	if sslId == "" {
+		return ""
+	}
+	msg, err := wafSslConfigService.ExportById(sslId)
+	// 未配置导出：msg 与 err 都空 —— 不是敏感操作，不记审计
+	if msg == "" && err == nil {
+		return ""
+	}
+	s.auditExport(c, msg, err)
+	if err != nil {
+		return "，但证书导出失败：" + err.Error()
+	}
+	return "，" + msg
+}
+
+// auditExport 把一次证书导出(成功/被拒)记入统一安全审计。Message 只含目标路径/原因，绝不含证书或私钥内容。
+func (s *WafSslConfigApi) auditExport(c *gin.Context, msg string, exportErr error) {
+	account, _ := c.Get("loginAccount")
+	role, _ := c.Get("userRole")
+	accountStr, _ := account.(string)
+	roleStr, _ := role.(string)
+	result, detail := model.AccessAuditOK, msg
+	if exportErr != nil {
+		result, detail = model.AccessAuditFail, "导出失败/被拒: "+exportErr.Error()
+	}
+	wafAccessAuditService.Write(waf_service.AuditEntry{
+		Event:       model.AuditEventConfigSSLExportWrite,
+		AccountName: accountStr,
+		ClientIP:    utils.GetManageClientIP(c),
+		Result:      result,
+		Message:     "[" + roleStr + "] " + detail,
+	})
 }
 
 // NotifySslUpdate 通知到SSL引擎使其配置实时生效

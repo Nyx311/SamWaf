@@ -1,13 +1,16 @@
 package api
 
 import (
+	"SamWaf/common/zlog"
 	"SamWaf/global"
 	"SamWaf/model/common/response"
 	"SamWaf/model/request"
 	response2 "SamWaf/model/response"
 	"SamWaf/service/waf_service"
 	"SamWaf/utils"
+	"SamWaf/utils/localca"
 	"SamWaf/wafconfig"
+	"SamWaf/wafenginecore/clientip"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
@@ -158,6 +161,54 @@ func (w *WafVpConfigApi) UpdateManageTrustedProxiesApi(c *gin.Context) {
 	} else {
 		response.OkWithMessage("更新管理端可信代理网段成功", c)
 	}
+}
+
+// GetManageCDNProviderApi 获取管理端引用的 CDN 厂商码
+func (w *WafVpConfigApi) GetManageCDNProviderApi(c *gin.Context) {
+	response.OkWithDetailed(gin.H{"provider": global.GCONFIG_MANAGE_CDN_PROVIDER}, "获取成功", c)
+}
+
+// UpdateManageCDNProviderApi 更新管理端引用的 CDN 厂商码(设置后自动信任该厂商中心库最新回源段)
+func (w *WafVpConfigApi) UpdateManageCDNProviderApi(c *gin.Context) {
+	var req request.WafVpConfigManageCDNProviderUpdateReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.FailWithMessage("解析请求失败", c)
+		return
+	}
+	provider := strings.TrimSpace(req.Provider)
+	// 留空=清除引用；非空需为已知厂商
+	if provider != "" {
+		if _, ok := clientip.Providers[provider]; !ok {
+			response.FailWithMessage("未知 CDN 厂商: "+provider, c)
+			return
+		}
+	}
+	if err := wafconfig.UpdateManageCDNProvider(provider); err != nil {
+		response.FailWithMessage("更新失败: "+err.Error(), c)
+		return
+	}
+	response.OkWithMessage("更新成功", c)
+}
+
+// GetCDNProviderRangesApi 管理端"CDN厂商快捷填充"：返回某厂商官方回源段 CIDR 列表，
+// 供前端一键填入管理端可信代理网段。Tier B 厂商无公开列表，返回空并提示手填。
+func (w *WafVpConfigApi) GetCDNProviderRangesApi(c *gin.Context) {
+	provider := strings.TrimSpace(c.Query("provider"))
+	if provider == "" {
+		response.FailWithMessage("缺少 provider 参数", c)
+		return
+	}
+	ips, err := waf_service.WafCDNIPServiceApp.GetProviderCIDRs(provider)
+	if err != nil {
+		response.FailWithMessage("获取CDN回源段失败: "+err.Error(), c)
+		return
+	}
+	response.OkWithDetailed(gin.H{
+		"provider": provider,
+		"count":    len(ips),
+		"ranges":   ips,
+		"text":     strings.Join(ips, ","),
+	}, "获取成功", c)
 }
 
 // GetCorsAllowOriginsApi 获取 CORS 跨域来源白名单
@@ -602,6 +653,31 @@ func (w *WafVpConfigApi) UpdateDomainWhitelistApi(c *gin.Context) {
 // @Security     ApiKeyAuth
 // @Router       /vipconfig/restartManager [post]
 func (w *WafVpConfigApi) RestartManagerApi(c *gin.Context) {
+	// 重启前先确认这次重启不会把人关在门外。
+	//
+	// 启用了 SSL 却拿着一张不可用的证书重启：HTTPS 起不来；若同时开着"仅允许HTTPS"，
+	// 管理端只会回 503，此后只能上服务器改 conf/config.yml 才能进来。重启是这个链路上
+	// 唯一还能拦住的地方——保存开关时证书可能还没配，等重启完就来不及了。
+	//
+	// 不做成死拦：Force 留一个显式的出口，供确实要重启（比如正准备去改配置文件）的场景。
+	var req struct {
+		Force bool `json:"force"`
+	}
+	_ = c.ShouldBindJSON(&req) // 老前端不带请求体，绑定失败按 Force=false 处理
+
+	if global.GWAF_SSL_ENABLE && !req.Force {
+		if err := localca.CheckServerCert(localca.DefaultPaths(utils.GetCurrentDir())); err != nil {
+			msg := "已启用SSL，但管理端证书当前不可用：" + err.Error() + "。现在重启会导致管理端以HTTPS启动失败"
+			if global.GWAF_SSL_FORCE_HTTPS {
+				msg += "，且「仅允许HTTPS」已开启，届时管理端只会返回503"
+			}
+			msg += "。请先配置好管理端证书再重启。"
+			zlog.Error("拒绝重启管理端", msg)
+			response.FailWithMessage(msg, c)
+			return
+		}
+	}
+
 	response.OkWithMessage("管理端将在1秒后重启，请稍候5-10秒后重新访问", c)
 
 	// 延迟后重启，给时间返回响应
