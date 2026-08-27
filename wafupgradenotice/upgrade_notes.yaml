@@ -206,3 +206,18 @@ notes:
     en:
       title: With Force HTTPS enabled, an unusable certificate no longer falls back to HTTP
       detail: Previously the console fell back to plain HTTP whenever its certificate was missing or failed to load, even with Force HTTPS enabled. From this version on, that switch means the console refuses to be served in the clear - the port keeps listening but no console functionality is mounted, and every request returns a 503 notice explaining how to recover. The reason is that an expired or broken certificate is the most common failure, and silently switching to HTTP would let the console accept logins in the clear without anyone noticing. Deployments that do not enable the switch are unaffected and still fall back automatically. If the console does not open after upgrading and shows that 503 notice, follow one of the three options it lists - fix the certificate, set security.ssl_force_https to false in conf/config.yml, or set security.ssl_enable to false - then restart.
+
+  - id: v1_3_24_run_diagnostic
+    version: v1.3.24
+    kind: notice
+    level: low
+    page: '/sys/RunDiagnostic'
+    doc: https://doc.samwaf.com/quickstart/Update.html
+    apply:
+      type: none
+    zh:
+      title: 新增「运行诊断」：排查 CPU/内存占用偏高
+      detail: 「系统管理 - 运行诊断」可从 SamWaf 进程视角查看资源占用构成：进程 CPU/内存、Go 运行时、内部队列与组件计量，以及最近 1 小时的占用趋势（每 10 秒采样一次，仅存内存，重启即清空，对性能无感知）。遇到占用偏高时，可一键生成诊断包发给开发者协助定位；诊断包只含运行指标与调用栈信息，不含密码、Token、证书私钥及任何业务请求数据。可选的 30 秒 CPU 采样仅在手工点击后执行，采样期间有轻微开销。该页面仅系统管理员可见。
+    en:
+      title: New Run Diagnostic page for troubleshooting high CPU or memory usage
+      detail: System - Run Diagnostic shows resource usage from the SamWaf process perspective - process CPU and memory, the Go runtime, internal queues and component gauges, plus a 1-hour usage trend (sampled every 10 seconds, kept in memory only, cleared on restart, with no noticeable overhead). When usage looks high you can generate a diagnostic package in one click and send it to the developers; it contains only runtime metrics and call-stack information - no passwords, tokens, certificate keys or any business request data. The optional 30-second CPU profiling runs only when triggered manually and adds slight overhead while sampling. The page is visible to system administrators only.

@@ -53,6 +53,7 @@ type APIGroup struct {
 	WafVpConfigApi
 	WafFileApi
 	WafSystemMonitorApi
+	WafDiagnosticApi
 	WafCaServerInfoApi
 	WafSqlQueryApi
 	WafNotifyChannelApi

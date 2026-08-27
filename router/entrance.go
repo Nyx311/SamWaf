@@ -50,6 +50,7 @@ type ApiGroup struct {
 	WafVpConfigRouter
 	WafFileRouter
 	WafSystemMonitorRouter
+	WafDiagnosticRouter
 	WafCaServerInfoRouter
 	SqlQueryRouter
 	NotifyChannelRouter

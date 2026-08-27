@@ -247,6 +247,8 @@ func (web *WafWebManager) initRouter(r *gin.Engine) {
 		router.ApiGroupApp.InitWafAppRouter(TokenOnlyRouterGroup)
 		// AI模型管理与训练数据导出：模型会被引擎加载、数据出库，拒绝 API Key
 		router.ApiGroupApp.InitWafAIRouter(TokenOnlyRouterGroup)
+		// 运行诊断：进程内部状态与性能采样数据导出，拒绝 API Key
+		router.ApiGroupApp.InitWafDiagnosticRouter(TokenOnlyRouterGroup)
 	}
 
 	// 保存 gin.Engine 引用供 API 文档生成使用

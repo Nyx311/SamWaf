@@ -31,12 +31,14 @@ const (
 	// config 类：敏感配置变更（config_ 前缀，为将来敏感操作预留命名空间）
 	AuditEventConfigSSLExportWrite = "config_ssl_export_write" //SSL 证书/私钥导出落盘（result 1成功 0失败/被拒）
 	AuditEventConfigBatchTaskRun   = "config_batch_task_run"   //批量任务执行：读宿主机文件/拉远端地址并批量写防护策略（result 1成功 0失败/被拒）
+	AuditEventConfigDiagPackage    = "config_diag_package"     //运行诊断包生成下载（result 1成功 0失败）
 )
 
 // auditEventCategory 事件 → 分类映射。未登记的事件默认归 access（历史事件全是 access 类）。
 var auditEventCategory = map[string]string{
 	AuditEventConfigSSLExportWrite: AuditCategoryConfig,
 	AuditEventConfigBatchTaskRun:   AuditCategoryConfig,
+	AuditEventConfigDiagPackage:    AuditCategoryConfig,
 }
 
 // AuditEventCategory 取事件所属分类，未知事件回退 access。
@@ -71,6 +73,7 @@ var AccessEventNames = map[string]string{
 	AccessEventBypassToken:         "命中服务令牌放行",
 	AuditEventConfigSSLExportWrite: "SSL证书导出落盘",
 	AuditEventConfigBatchTaskRun:   "批量任务执行",
+	AuditEventConfigDiagPackage:    "运行诊断包下载",
 }
 
 // AccessEventName 取事件中文名，未知事件回退成原始事件码而不是空串。

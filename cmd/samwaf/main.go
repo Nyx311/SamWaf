@@ -21,6 +21,7 @@ import (
 	"SamWaf/wafappengine"
 	"SamWaf/wafconfig"
 	"SamWaf/wafdb"
+	"SamWaf/wafdiag"
 	"SamWaf/wafenginecore"
 	"SamWaf/wafenginecore/wafcaptcha"
 	"SamWaf/wafhostguard"
@@ -396,6 +397,10 @@ func (m *wafSystenService) run() {
 	go NeverExit("ProcessStatDequeEngine", wafqueue.ProcessStatDequeEngine)
 	go NeverExit("ProcessLogDequeEngine", wafqueue.ProcessLogDequeEngine)
 
+	//运行诊断：注册队列/缓存/WebSocket 计量器并启动 10s 趋势采样（内存环形缓冲，不落盘）
+	wafdiag.RegisterBuiltins()
+	wafdiag.StartSampler()
+
 	//初始化一次系统参数信息
 	waftask.TaskLoadSetting(true)
 
@@ -450,6 +455,8 @@ func (m *wafSystenService) run() {
 	}
 	//初始化路由快照(RCU 空表)，之后 StartWaf→LoadAllHost 通过 copy-on-write 填充
 	globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.InitRouting()
+	//注册引擎侧运行诊断计量器（主机/端口/证书/Transport池等对象数）
+	globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.RegisterDiagProvider()
 	//IP组匹配集必须在引擎接管流量之前发布完成：LoadHost 只预抽出组短码，
 	//真正的IP集合来自 ipset 全局快照。这里必须同步调用(不能像威胁情报那样 go 出去)——
 	//威胁情报晚生效只是少拦一点，IP组承载的是用户显式配置的白名单，晚生效就是误拦合法用户。
