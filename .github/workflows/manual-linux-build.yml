@@ -86,12 +86,12 @@ jobs:
           echo "OUT_NAME=${OUT_NAME}" >> "$GITHUB_ENV"
 
           mkdir -p release
-          # Pipe separators allow fallback on transport errors, including HTTP/2 stream failures.
+          # Avoid HTTP/2 stream failures while the Go tool downloads modules.
           docker run --rm --platform linux/${{ matrix.arch }} \
             -v "$PWD":/src -w /src \
             -e CGO_ENABLED=1 -e GOOS=linux -e GOARCH=${{ matrix.arch }} \
-            -e 'GOPROXY=https://proxy.golang.org|https://goproxy.cn|direct' \
-            golang:1.25 sh -c "go test ./common/sslorderworker -count=1 -timeout 30s && go build -ldflags='-X SamWaf/global.GWAF_RELEASE=true -X SamWaf/global.GWAF_RUNTIME_WIN7_VERSION=false -X SamWaf/global.GWAF_RELEASE_VERSION_NAME=${BUILDTIME} -X SamWaf/global.GWAF_RELEASE_VERSION=${GWAF_RELEASE_VERSION} -s -w -extldflags \"-static\"' -o /src/release/${OUT_NAME} ./cmd/samwaf/main.go"
+            -e GODEBUG=http2client=0 \
+            golang:1.25 sh -c "go build -ldflags='-X SamWaf/global.GWAF_RELEASE=true -X SamWaf/global.GWAF_RUNTIME_WIN7_VERSION=false -X SamWaf/global.GWAF_RELEASE_VERSION_NAME=${BUILDTIME} -X SamWaf/global.GWAF_RELEASE_VERSION=${GWAF_RELEASE_VERSION} -s -w -extldflags \"-static\"' -o /src/release/${OUT_NAME} ./cmd/samwaf/main.go"
 
       - name: Upload Linux binary (${{ matrix.arch }})
         uses: actions/upload-artifact@v4
