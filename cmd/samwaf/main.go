@@ -3,6 +3,7 @@ package main
 import (
 	"SamWaf/cache"
 	"SamWaf/common/gwebsocket"
+	"SamWaf/common/sslorderworker"
 	"SamWaf/common/tasklog"
 	"SamWaf/common/wafexec"
 	"SamWaf/common/zlog"
@@ -12,6 +13,7 @@ import (
 	"SamWaf/innerbean"
 	"SamWaf/iplocation"
 	"SamWaf/model"
+	"SamWaf/model/spec"
 	"SamWaf/model/wafenginmodel"
 	"SamWaf/plugin"
 	"SamWaf/service/waf_service"
@@ -614,6 +616,12 @@ func (m *wafSystenService) run() {
 			zlog.Info("[Fresh Install] A random initial admin password has been generated, please see file: data/initial_password.txt and change it right after first login")
 		}
 	}
+	// SSL申请会发送多条主机刷新消息，必须由独立串行协程处理，避免在本循环内写满自身消费的队列。
+	sslorderworker.Start(global.GWAF_CHAN_SSLOrder, func(msg spec.ChanSslOrder) {
+		order := msg.Content.(model.SslOrder)
+		zlog.Debug(fmt.Sprintf("ssl证书申请 type=%d order_id=%s domain=%s", msg.Type, order.Id, order.ApplyDomain))
+		globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.ApplySSLOrder(msg.Type, order)
+	})
 	for {
 		select {
 		case msg := <-global.GWAF_CHAN_MSG:
@@ -911,10 +919,6 @@ func (m *wafSystenService) run() {
 		case sensitive := <-global.GWAF_CHAN_SENSITIVE:
 			zlog.Debug("远程配置", sensitive)
 			globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.ReLoadSensitive()
-			break
-		case sslOrderChan := <-global.GWAF_CHAN_SSLOrder:
-			zlog.Debug("ssl证书申请", sslOrderChan)
-			globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.ApplySSLOrder(sslOrderChan.Type, sslOrderChan.Content.(model.SslOrder))
 			break
 		case sslExpireCheck := <-global.GWAF_CHAN_SSL_EXPIRE_CHECK:
 			zlog.Debug("ssl证书到期检测", sslExpireCheck)

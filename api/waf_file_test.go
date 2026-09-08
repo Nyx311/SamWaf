@@ -1,6 +1,9 @@
 package api
 
 import (
+	"SamWaf/cache"
+	"SamWaf/enums"
+	"SamWaf/global"
 	"encoding/json"
 	"fmt"
 	"github.com/gin-gonic/gin"
@@ -10,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // 响应结构体定义
@@ -107,6 +111,61 @@ func TestFormatFileSize(t *testing.T) {
 				t.Errorf("%s: 期望 '%s'，实际 '%s'", tc.desc, tc.expected, result)
 			}
 		})
+	}
+}
+
+// TestDeleteFileByIdApi_JSONCacheData 回归 Redis 缓存反序列化后
+// files 为 []interface{} 时，删除接口不应因类型断言而 panic。
+func TestDeleteFileByIdApi_JSONCacheData(t *testing.T) {
+	oldCache := global.GCACHE_WAFCACHE
+	global.GCACHE_WAFCACHE = cache.InitWafCache()
+	defer func() {
+		global.GCACHE_WAFCACHE = oldCache
+	}()
+
+	tempDir := t.TempDir()
+	filePath := filepath.Join(tempDir, "local_log_backup.db")
+	if err := os.WriteFile(filePath, []byte("test log database content"), 0644); err != nil {
+		t.Fatalf("创建测试文件失败：%v", err)
+	}
+
+	fileID := "test-file-id"
+	global.GCACHE_WAFCACHE.SetWithTTl(enums.CACHE_FILE_INFO, map[string]interface{}{
+		"files": []interface{}{
+			map[string]interface{}{
+				"id":         fileID,
+				"name":       filepath.Base(filePath),
+				"path":       filepath.Base(filePath),
+				"full_path":  filePath,
+				"can_delete": true,
+			},
+		},
+		"total": 1,
+	}, time.Minute)
+
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.GET("/api/v1/file/delete_by_id", func(c *gin.Context) {
+		c.Set("is_openapi", true)
+		new(WafFileApi).DeleteFileByIdApi(c)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/file/delete_by_id?id="+fileID, nil)
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, req)
+
+	var result WafFileResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &result); err != nil {
+		t.Fatalf("解析响应失败：%v，响应：%s", err, recorder.Body.String())
+	}
+	if result.Code != 0 {
+		t.Fatalf("删除失败：%s", result.Msg)
+	}
+	if _, err := os.Stat(filePath); !os.IsNotExist(err) {
+		t.Fatalf("文件仍然存在或状态异常：%v", err)
+	}
+	if global.GCACHE_WAFCACHE.IsKeyExist(enums.CACHE_FILE_INFO) {
+		t.Fatal("删除成功后文件列表缓存未清除")
 	}
 }
 

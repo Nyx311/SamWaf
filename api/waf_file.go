@@ -108,10 +108,6 @@ func (w *WafFileApi) GetDataFilesApi(c *gin.Context) {
 			IsDir:       info.IsDir(),
 		}
 
-		// 将单个文件信息缓存到内存中，缓存1小时
-		fileCacheKey := enums.CACHE_FILE_INFO
-		global.GCACHE_WAFCACHE.SetWithTTl(fileCacheKey, fileInfo, 1*time.Hour)
-
 		fileInfos = append(fileInfos, fileInfo)
 		return nil
 	})
@@ -148,10 +144,16 @@ func (w *WafFileApi) DeleteFileByIdApi(c *gin.Context) {
 		return
 	}
 
-	// 获取缓存的文件列表结果
-	cachedResult := global.GCACHE_WAFCACHE.Get(cacheKey).(map[string]interface{})
-	filesInterface := cachedResult["files"]
-	fileInfos := filesInterface.([]FileInfo)
+	// 通过 GetAs 读取，兼容内存缓存和 Redis JSON 反序列化后的数据类型。
+	// Redis 的 Get 返回 []interface{}，不能直接断言为 []FileInfo。
+	var cachedResult struct {
+		Files []FileInfo `json:"files"`
+	}
+	if err := global.GCACHE_WAFCACHE.GetAs(cacheKey, &cachedResult); err != nil {
+		response.FailWithMessage("文件信息读取失败，请重新获取文件列表", c)
+		return
+	}
+	fileInfos := cachedResult.Files
 
 	// 遍历文件列表找到对应ID的文件
 	var targetFileInfo *FileInfo
