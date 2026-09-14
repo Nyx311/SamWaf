@@ -79,7 +79,7 @@ jobs:
 
           BUILDTIME=$(date +'%Y%m%d')
           if [ "${{ matrix.arch }}" = "amd64" ]; then
-            OUT_NAME="SamWafLinuxAmd64"
+            OUT_NAME="SamWafLinux64"
           else
             OUT_NAME="SamWafLinuxArm64"
           fi
