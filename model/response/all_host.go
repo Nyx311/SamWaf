@@ -10,6 +10,8 @@ type AllHostRep struct {
 	// GlobalHost 是否"全局网站"（1是）。它不是真实站点，只承载全局规则，
 	// 前端做"按站点选一个来配置/诊断"这类下拉时要把它过滤掉。
 	GlobalHost int `json:"global_host"`
+	// GroupCode 所属分组短码，空=未分组。供前端「先选分组再选站点」的下拉做本地筛选。
+	GroupCode string `json:"group_code"`
 }
 
 type AllShareDbRep struct {
@@ -18,6 +20,9 @@ type AllShareDbRep struct {
 	FileName  string              `json:"file_name"`  //文件名
 	Cnt       int64               `json:"cnt"`        //当前数量
 	IsCurrent bool                `json:"is_current"` //是否为当前(实时)分片：前端据此设默认选中项
+	PeriodKey string              `json:"period_key"` //周期键（月，如 202609）；按体积切出来的旧分片为空，前端回落显示起止日期
+	Tiers     []string            `json:"tiers"`      //该分区现存哪些层（仅服务型数据库给；按层过期后可能只剩安全事件与报文）
+	Missing   bool                `json:"missing"`    //登记还在但存储已不在（SQLite 文件被删 / 分区表都不存在）
 }
 
 // AllDomainRep 域名信息

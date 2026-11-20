@@ -3,6 +3,10 @@ package global
 var (
 	/******记录参数配置****************/
 	GCONFIG_LOG_PERSIST_ENABLED         int64  = 1                   //是否将web日志持久化到日志库（默认1 ） 1 持久化入库 0 不入库
+	// GCONFIG_LOG_FOLD_PER_MINUTE 同一「站点+IP+规则」的安全事件，每分钟最多落库的完整明细条数（0=不折叠，默认0）。
+	// 超过部分不落库（security_event/access_log/event_payload 都不写），但统计、分析、CC、文件与 Kafka 出口照常拿全量，
+	// 面板计数与封禁行为不受影响。大批量同类攻击下把明细写入量压到 K 条/分钟/来源，避免日志队列积压。
+	GCONFIG_LOG_FOLD_PER_MINUTE         int64  = 0
 	GCONFIG_RECORD_MAX_BODY_LENGTH      int64  = 1024 * 2            //限制记录最大请求的body长度 record_max_req_body_length
 	GCONFIG_RECORD_MAX_RES_BODY_LENGTH  int64  = 1024 * 4            //限制记录最大响应的body长度 record_max_rep_body_length
 	GCONFIG_RECORD_RESP                 int64  = 0                   // 是否记录响应记录 record_resp
@@ -93,6 +97,12 @@ var (
 	GCONFIG_RECORD_CONNECT_TIME_OUT   int64  = 30        // 连接超时 默认30s
 	GCONFIG_RECORD_KEEPALIVE_TIME_OUT int64  = 30        // 保持活动超时 默认30s
 	GCONFIG_RECORD_DRAIN_TIMEOUT      int64  = 30        // 升级/停止时连接优雅排空超时(秒) 默认30s，超时仍未排空的连接将被强制关闭
+	// 应用内升级替换二进制后，界面等待服务重新就绪的上限(秒)。容器与低配机器重启更慢，
+	// 故放开为可配；由升级进度接口下发给前端，前端不写死。
+	GCONFIG_UPDATE_RESTART_TIMEOUT int64 = 90
+	// 版本/清单检查请求是否附带运行环境标识(os/arch/rt)。默认开：升级源据此判断存量版本
+	// 与运行环境分布。关闭后只保留一直都有的 v(版本)与 u(实例码)，即回到旧版本的携带内容。
+	GCONFIG_UPDATE_ENV_REPORT bool = true
 	//GCONFIG_RECORD_PATCH_VERSION_CORE  int64 = 20250106 // 核心数据库补丁日期
 	//GCONFIG_RECORD_PATCH_VERSION_LOG   int64 = 20250106 // 日志数据库补丁日期
 	GCONFIG_RECORD_ALL_SRC_BYTE_INFO int64 = 0 //记录原始信息(默认不开启)
@@ -136,6 +146,9 @@ var (
 	GCONFIG_IP_FAILURE_STATUS_CODES  string = "401|403|404|444|429|503" //失败状态码配置，支持多个用|分隔，也支持正则表达式
 	GCONFIG_IP_FAILURE_BAN_ENABLED   int64  = 0                         //是否启用IP失败封禁 1启用 0禁用
 	GCONFIG_IP_FAILURE_BAN_LOCK_TIME int64  = 10                        //IP失败封禁锁定时间（分钟）默认10分钟
+
+	// 规则封禁相关配置（自定义规则 RF.Ban(分钟) 命中后临时封禁客户端IP）
+	GCONFIG_RULE_BAN_MODE int64 = 0 //规则封禁执行动作 0返回拦截页 1直接断开连接
 
 	GCONFIG_CHECK_BETA_VERSION int64 = 1 //是否检测beta版本更新 1启用 0禁用（默认检测最新版本）
 

@@ -10,8 +10,11 @@ type ApiGroup struct {
 	AllowUrlRouter
 	LdpUrlRouter
 	AntiCCRouter
+	AntiCCRuleRouter
 	IPFailureRouter
+	RuleBanRouter
 	BlockIpRouter
+	HostGroupRouter
 	IPGroupRouter
 	AccessAccountRouter
 	AccessConfigRouter
@@ -37,6 +40,7 @@ type ApiGroup struct {
 	SslOrderRouter
 	WafSslExpireRouter
 	WafHttpAuthBaseRouter
+	WafHttpAuthSessionRouter
 	WafTaskRouter
 	WafBlockingPageRouter
 	WafGPTRouter

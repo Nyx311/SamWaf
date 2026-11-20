@@ -9,8 +9,7 @@ import (
 	"SamWaf/model/baseorm"
 	"SamWaf/model/request"
 	"SamWaf/model/wafappmodel"
-	"crypto/sha256"
-	"encoding/hex"
+	"SamWaf/wafapppath"
 	"errors"
 	"fmt"
 	"io"
@@ -34,42 +33,27 @@ var envBlacklist = map[string]struct{}{
 	"LD_PRELOAD_ONCE":       {},
 }
 
-// parseAllowedDirs 解析逗号分隔的允许目录列表
-func parseAllowedDirs(dirStr string) []string {
-	var result []string
-	for _, p := range strings.Split(dirStr, ",") {
-		p = strings.TrimSpace(p)
-		if p != "" {
-			result = append(result, p)
-		}
-	}
-	if len(result) == 0 {
-		result = []string{"data/applications"}
-	}
-	return result
-}
-
 // resolveSafeAppDir 将用户提供的 appDir 解析并校验必须落在允许目录之一下
 func resolveSafeAppDir(code, appDir string) (string, error) {
-	allowedDirs := parseAllowedDirs(global.GWAF_APP_ALLOW_DIRS)
-	if appDir == "" {
-		return filepath.Join(allowedDirs[0], code), nil
+	p := wafapppath.Resolve(code, appDir, global.GWAF_APP_ALLOW_DIRS)
+	if !p.Valid {
+		return "", errors.New(p.Error)
 	}
-	absPath, err := filepath.Abs(filepath.Clean(appDir))
-	if err != nil {
-		return "", fmt.Errorf("无法解析应用目录路径: %w", err)
+	return p.ResolvedDir, nil
+}
+
+// prepareAppDir 预检目标目录：可创建且确为目录，失败时返回错误不落库
+func prepareAppDir(stage, code, safeDir string) error {
+	if err := os.MkdirAll(safeDir, 0755); err != nil {
+		zlog.Warn("应用目录预检失败", "stage", stage, "dir", safeDir, "code", code, "err", err.Error())
+		return fmt.Errorf("创建应用目录失败: %w", err)
 	}
-	for _, allowed := range allowedDirs {
-		allowedAbs, err2 := filepath.Abs(filepath.Clean(allowed))
-		if err2 != nil {
-			continue
-		}
-		rel, err3 := filepath.Rel(allowedAbs, absPath)
-		if err3 == nil && !strings.HasPrefix(rel, "..") && !filepath.IsAbs(rel) {
-			return absPath, nil
-		}
+	info, err := os.Stat(safeDir)
+	if err != nil || !info.IsDir() {
+		zlog.Warn("应用目录预检失败", "stage", stage, "dir", safeDir, "code", code, "err", "目标已存在且不是目录")
+		return fmt.Errorf("应用目录不可用（已存在且不是目录）: %s", safeDir)
 	}
-	return "", fmt.Errorf("应用目录必须在允许范围内（%s）", global.GWAF_APP_ALLOW_DIRS)
+	return nil
 }
 
 // validateEnv 校验用户提供的环境变量格式并拦截黑名单键
@@ -149,11 +133,10 @@ func (s *WafAppService) AddApi(req request.WafAppAddReq) (*model.WafApp, error) 
 	if err != nil {
 		return nil, err
 	}
-	bean.AppDir = safeDir
-
-	if err := os.MkdirAll(bean.AppDir, 0755); err != nil {
-		zlog.Warn("创建应用目录失败", "dir", bean.AppDir, "err", err.Error())
+	if err := prepareAppDir("add", bean.Code, safeDir); err != nil {
+		return nil, err
 	}
+	bean.AppDir = safeDir
 
 	if err := global.GWAF_LOCAL_DB.Create(bean).Error; err != nil {
 		return nil, err
@@ -183,6 +166,9 @@ func (s *WafAppService) ModifyApi(req request.WafAppEditReq) error {
 	}
 	safeDir, err := resolveSafeAppDir(existing.Code, req.AppDir)
 	if err != nil {
+		return err
+	}
+	if err := prepareAppDir("edit", existing.Code, safeDir); err != nil {
 		return err
 	}
 
@@ -256,30 +242,17 @@ func (s *WafAppService) UploadFile(code string, filename string, src io.Reader, 
 	safeFilename := filepath.Base(filename)
 	destPath := filepath.Join(appDir, safeFilename)
 
-	tmpPath := destPath + ".tmp"
-	f, err := os.Create(tmpPath)
-	if err != nil {
-		return fmt.Errorf("创建临时文件失败: %w", err)
+	var mode *os.FileMode
+	if info, err := os.Stat(destPath); err == nil {
+		if !info.Mode().IsRegular() {
+			return errors.New("目标不是普通文件")
+		}
+		perm := info.Mode().Perm()
+		mode = &perm
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("读取原文件权限失败: %w", err)
 	}
-	defer func() { os.Remove(tmpPath) }()
-
-	h := sha256.New()
-	writer := io.MultiWriter(f, h)
-	if _, err := io.Copy(writer, src); err != nil {
-		f.Close()
-		return fmt.Errorf("写入文件失败: %w", err)
-	}
-	f.Close()
-
-	actualHash := hex.EncodeToString(h.Sum(nil))
-	if expectedHash != "" && !equalIgnoreCase(actualHash, expectedHash) {
-		return fmt.Errorf("文件哈希校验失败，期望: %s，实际: %s", expectedHash, actualHash)
-	}
-
-	if err := os.Rename(tmpPath, destPath); err != nil {
-		return fmt.Errorf("保存文件失败: %w", err)
-	}
-	return nil
+	return writeAppFile(destPath, src, mode, expectedHash)
 }
 
 // UpgradeApp 升级应用：备份当前文件后替换
@@ -375,23 +348,4 @@ func (s *WafAppService) ListBackups(code string) ([]wafappmodel.BackupInfo, erro
 		})
 	}
 	return result, nil
-}
-
-func copyFile(src, dst string) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-	out, err := os.Create(dst)
-	if err != nil {
-		return err
-	}
-	defer out.Close()
-	_, err = io.Copy(out, in)
-	return err
-}
-
-func equalIgnoreCase(a, b string) bool {
-	return strings.EqualFold(a, b)
 }

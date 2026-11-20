@@ -91,6 +91,7 @@ const (
 	srcThreatExclude = "threat_exclude"
 	srcIPFailure     = "ip_failure"
 	srcCCBan         = "cc_ban"
+	srcRuleBan       = "rule_ban"
 	srcFirewall      = "firewall"
 	srcCDN           = "cdn"
 )
@@ -148,8 +149,8 @@ func (r *WafIPLookupService) Lookup(ipStr string, sources []string) (*response2.
 		Degraded:  make([]string, 0),
 	}
 	for _, src := range []string{
-		srcIPWhite, srcIPBlack, srcIPGroup, srcThreatIP,
-		srcIPFailure, srcCCBan, srcFirewall, srcCDN,
+		srcIPWhite, srcIPBlack, srcIPGroup, srcLogExclude, srcThreatIP,
+		srcIPFailure, srcCCBan, srcRuleBan, srcFirewall, srcCDN,
 	} {
 		if pick(src) {
 			resp.Sources = append(resp.Sources, src)
@@ -178,6 +179,9 @@ func (r *WafIPLookupService) Lookup(ipStr string, sources []string) (*response2.
 	if pick(srcIPGroup) {
 		r.matchIPGroup(ipStr, resp)
 	}
+	if pick(srcLogExclude) {
+		r.matchLogExclude(ipStr, resp)
+	}
 	if pick(srcThreatIP) {
 		r.matchThreatIP(ipStr, parsed, resp)
 	}
@@ -186,6 +190,9 @@ func (r *WafIPLookupService) Lookup(ipStr string, sources []string) (*response2.
 	}
 	if pick(srcCCBan) {
 		r.matchCCBan(ipStr, resp)
+	}
+	if pick(srcRuleBan) {
+		r.matchRuleBan(ipStr, resp)
 	}
 	if pick(srcFirewall) {
 		r.matchFirewall(ipStr, resp)
@@ -248,7 +255,8 @@ func (r *WafIPLookupService) hostLabel(code string, names map[string]string) str
 
 func (r *WafIPLookupService) matchAllowList(ip string, names map[string]string, resp *response2.IPLookupResp) {
 	var rows []model.IPAllowList
-	if err := global.GWAF_LOCAL_DB.Find(&rows).Error; err != nil {
+	//与引擎同口径：停用条目不参与判定，诊断结论才不会背离实际拦截行为
+	if err := global.GWAF_LOCAL_DB.Where("is_enable = 1").Find(&rows).Error; err != nil {
 		resp.Degraded = append(resp.Degraded, srcIPWhite)
 		return
 	}
@@ -272,7 +280,7 @@ func (r *WafIPLookupService) matchAllowList(ip string, names map[string]string, 
 
 func (r *WafIPLookupService) matchBlockList(ip string, names map[string]string, resp *response2.IPLookupResp) {
 	var rows []model.IPBlockList
-	if err := global.GWAF_LOCAL_DB.Find(&rows).Error; err != nil {
+	if err := global.GWAF_LOCAL_DB.Where("is_enable = 1").Find(&rows).Error; err != nil {
 		resp.Degraded = append(resp.Degraded, srcIPBlack)
 		return
 	}
@@ -317,6 +325,7 @@ func (r *WafIPLookupService) matchIPGroup(ip string, resp *response2.IPLookupRes
 	}
 
 	refs := r.groupRefs()
+	logRefs := r.logExcludeGroupRefs()
 	for _, g := range groups {
 		for _, it := range byGroup[g.GroupCode] {
 			if it.Ip == "" || !utils.MatchIPPattern(ip, it.Ip) {
@@ -327,6 +336,13 @@ func (r *WafIPLookupService) matchIPGroup(ip string, resp *response2.IPLookupRes
 			if ref, ok := refs[g.GroupCode]; ok {
 				effect = ref.effect
 				detail = ref.text
+			} else if text, ok := logRefs[g.GroupCode]; ok {
+				// 组没被黑白名单引用、却被日志排除清单引用时，原来的文案会让人以为这组没任何作用
+				effect = "log_skip"
+				detail = text
+			}
+			if text, ok := logRefs[g.GroupCode]; ok && effect != "log_skip" {
+				detail = detail + "；同时" + text
 			}
 			resp.Hits = append(resp.Hits, response2.IPLookupHit{
 				Source:     srcIPGroup,
@@ -351,7 +367,8 @@ func (r *WafIPLookupService) groupRefs() map[string]groupRef {
 	refs := map[string]groupRef{}
 
 	var blockRows []model.IPBlockList
-	global.GWAF_LOCAL_DB.Where("ip_type = ?", model.IPEntryTypeGroup).Find(&blockRows)
+	//引用统计同样只算启用条目，与引擎侧组短码抽取同口径
+	global.GWAF_LOCAL_DB.Where("ip_type = ? and is_enable = 1", model.IPEntryTypeGroup).Find(&blockRows)
 	for _, row := range blockRows {
 		if row.GroupCode == "" {
 			continue
@@ -360,7 +377,7 @@ func (r *WafIPLookupService) groupRefs() map[string]groupRef {
 	}
 
 	var allowRows []model.IPAllowList
-	global.GWAF_LOCAL_DB.Where("ip_type = ?", model.IPEntryTypeGroup).Find(&allowRows)
+	global.GWAF_LOCAL_DB.Where("ip_type = ? and is_enable = 1", model.IPEntryTypeGroup).Find(&allowRows)
 	for _, row := range allowRows {
 		if row.GroupCode == "" {
 			continue
@@ -494,6 +511,28 @@ func landTargetText(v string) string {
 	return v
 }
 
+// ipFailureEffect 由失败记录算出查询展示的 effect 与文案。
+// 有失败记录≠被封禁：记分卡只说明窗口内有失败请求，只有自定义规则真实命中
+// （记录上带阈值戳）才是 block；否则报 none，避免管理员把"有失败记录"当成"已被拦截"。
+// 判据与封禁列表(api.GetBanIpListApi)的收录条件一致。
+func ipFailureEffect(record *wafipban.IPFailureRecord, remain string) (string, string) {
+	effect := "none"
+	detail := ""
+	if wafipban.IsBannedRecord(record) {
+		effect = "block"
+		detail = fmt.Sprintf("%d分钟内失败%d次触发封禁", record.TriggerMinutes, record.TriggerCount)
+	} else if record != nil {
+		detail = fmt.Sprintf("近%d分钟失败%d次，未触发封禁规则", global.GCONFIG_IP_FAILURE_BAN_LOCK_TIME, record.Count)
+	}
+	if detail == "" {
+		detail = "有失败记录"
+	}
+	if remain != "" {
+		detail += "，剩余" + remain
+	}
+	return effect, detail
+}
+
 // matchIPFailure IP 失败封禁是缓存态的临时封禁，键就是完整 IP，直接查
 func (r *WafIPLookupService) matchIPFailure(ip string, resp *response2.IPLookupResp) {
 	if global.GCACHE_WAFCACHE == nil {
@@ -505,21 +544,17 @@ func (r *WafIPLookupService) matchIPFailure(ip string, resp *response2.IPLookupR
 		return
 	}
 
-	detail := "自动封禁中"
+	var record *wafipban.IPFailureRecord
 	if manager := wafipban.GetIPFailureManager(); manager != nil {
-		if record := manager.GetFailureInfo(ip); record != nil && record.TriggerCount > 0 {
-			detail = fmt.Sprintf("%d分钟内失败%d次触发封禁", record.TriggerMinutes, record.TriggerCount)
-		}
+		record = manager.GetFailureInfo(ip)
 	}
-	if remain := r.remainText(enums.CACHE_IP_FAILURE_PRE, ip); remain != "" {
-		detail += "，剩余" + remain
-	}
+	effect, detail := ipFailureEffect(record, r.remainText(enums.CACHE_IP_FAILURE_PRE, ip))
 
 	resp.Hits = append(resp.Hits, response2.IPLookupHit{
 		Source:     srcIPFailure,
 		SourceName: "IP失败封禁",
 		Scope:      "全局",
-		Effect:     "block",
+		Effect:     effect,
 		Detail:     detail,
 	})
 }
@@ -529,17 +564,66 @@ func (r *WafIPLookupService) matchCCBan(ip string, resp *response2.IPLookupResp)
 		resp.Degraded = append(resp.Degraded, srcCCBan)
 		return
 	}
-	if !global.GCACHE_WAFCACHE.IsKeyExist(enums.CACHE_CCVISITBAN_PRE + ip) {
+	// 封禁键按作用域分开存放，任一命中即视为处于封禁期
+	hitKey := ""
+	hitScope := ""
+	for cacheKey := range global.GCACHE_WAFCACHE.ListAvailableKeysWithPrefix(enums.CACHE_CCVISITBAN_PRE) {
+		if scope, _, banIp, ok := model.ParseCCBanKey(cacheKey); ok && banIp == ip {
+			hitKey, hitScope = cacheKey, scope
+			break
+		}
+	}
+	if hitKey == "" {
 		return
 	}
 	detail := "CC防护触发的临时封禁"
-	if remain := r.remainText(enums.CACHE_CCVISITBAN_PRE, ip); remain != "" {
+	if remain := r.remainTextByKey(enums.CACHE_CCVISITBAN_PRE, hitKey); remain != "" {
 		detail += "，剩余" + remain
+	}
+	scopeText := "全局"
+	if hitScope == model.CCBanScopeHost {
+		scopeText = "本站点"
 	}
 	resp.Hits = append(resp.Hits, response2.IPLookupHit{
 		Source:     srcCCBan,
 		SourceName: "CC封禁",
-		Scope:      "全局",
+		Scope:      scopeText,
+		Effect:     "block",
+		Detail:     detail,
+	})
+}
+
+// matchRuleBan 规则封禁命中（自定义规则 RF.Ban 写入，站点作用域）。
+func (r *WafIPLookupService) matchRuleBan(ip string, resp *response2.IPLookupResp) {
+	if global.GCACHE_WAFCACHE == nil {
+		resp.Degraded = append(resp.Degraded, srcRuleBan)
+		return
+	}
+	hitKey := ""
+	hitHostCode := ""
+	for cacheKey := range global.GCACHE_WAFCACHE.ListAvailableKeysWithPrefix(enums.CACHE_RULE_BAN_PRE) {
+		if hostCode, banIp, ok := model.ParseRuleBanKey(cacheKey); ok && banIp == ip {
+			hitKey, hitHostCode = cacheKey, hostCode
+			break
+		}
+	}
+	if hitKey == "" {
+		return
+	}
+	detail := "自定义规则 RF.Ban 触发的临时封禁"
+	if remain := r.remainTextByKey(enums.CACHE_RULE_BAN_PRE, hitKey); remain != "" {
+		detail += "，剩余" + remain
+	}
+	if hitHostCode != "" {
+		names := r.hostNameMap()
+		if label := r.hostLabel(hitHostCode, names); label != "" {
+			detail += "，站点 " + label
+		}
+	}
+	resp.Hits = append(resp.Hits, response2.IPLookupHit{
+		Source:     srcRuleBan,
+		SourceName: "规则封禁",
+		Scope:      "本站点",
 		Effect:     "block",
 		Detail:     detail,
 	})
@@ -547,6 +631,24 @@ func (r *WafIPLookupService) matchCCBan(ip string, resp *response2.IPLookupResp)
 
 // remainText 取缓存剩余时间。缓存接口只给了「按前缀列出可用键」，没有单键 TTL，
 // 所以这里列一次再挑出目标键。
+// remainTextByKey 与 remainText 同义，区别是直接给完整缓存键——
+// CC 封禁键含作用域与站点码，拼不出「前缀+ip」的形式。
+func (r *WafIPLookupService) remainTextByKey(prefix, key string) string {
+	list := global.GCACHE_WAFCACHE.ListAvailableKeysWithPrefix(prefix)
+	d, ok := list[key]
+	if !ok || d <= 0 {
+		return ""
+	}
+	if d < time.Minute {
+		return fmt.Sprintf("%d秒", int(d.Seconds()))
+	}
+	total := int(d.Minutes())
+	if total < 60 {
+		return fmt.Sprintf("%d分钟", total)
+	}
+	return fmt.Sprintf("%d小时%d分钟", total/60, total%60)
+}
+
 func (r *WafIPLookupService) remainText(prefix, ip string) string {
 	list := global.GCACHE_WAFCACHE.ListAvailableKeysWithPrefix(prefix)
 	d, ok := list[prefix+ip]
@@ -650,4 +752,95 @@ func (r *WafIPLookupService) matchCDN(ip string, resp *response2.IPLookupResp) {
 			Detail:     "该IP属于CDN回源节点，不是真实访客IP",
 		})
 	}
+}
+
+// srcLogExclude 日志排除清单（M6）：命中它的 IP，正常请求不记访问日志。
+//
+// 为什么要进「IP归属查询」：这条链路常常隔着一层——把 IP 放进一个 IP 组、
+// 组被某个站点的「记录日志时排除IP」引用，事后自己都想不起来为什么这个 IP 没有日志。
+// 归属查询本来就是回答「这个 IP 现在被什么规则罩着」，日志排除属于同一个问题。
+const srcLogExclude = "log_exclude"
+
+// logExcludeList 一份生效中的排除清单：来自全局配置或某个站点
+type logExcludeList struct {
+	scope string // 「全局」或站点名
+	raw   string
+}
+
+// collectLogExcludeLists 收齐全局与各站点的排除清单（空的跳过）
+func (r *WafIPLookupService) collectLogExcludeLists() []logExcludeList {
+	lists := make([]logExcludeList, 0, 4)
+	if strings.TrimSpace(global.GCONFIG_EXCLUDE_IP_LOG) != "" {
+		lists = append(lists, logExcludeList{scope: "全局", raw: global.GCONFIG_EXCLUDE_IP_LOG})
+	}
+	var hosts []model.Hosts
+	if err := global.GWAF_LOCAL_DB.Where("exclude_ip_log <> ''").Find(&hosts).Error; err == nil {
+		for _, h := range hosts {
+			if strings.TrimSpace(h.EXCLUDE_IP_LOG) == "" {
+				continue
+			}
+			name := h.Host
+			if name == "" {
+				name = h.Code
+			}
+			lists = append(lists, logExcludeList{scope: name, raw: h.EXCLUDE_IP_LOG})
+		}
+	}
+	return lists
+}
+
+// matchLogExclude 查这个 IP 是否被某份日志排除清单命中，直接命中与经由 IP 组命中都要报出来
+func (r *WafIPLookupService) matchLogExclude(ip string, resp *response2.IPLookupResp) {
+	for _, l := range r.collectLogExcludeLists() {
+		patterns, codes := ipset.ParseListText(l.raw)
+
+		// 直接写在清单里的模式
+		if len(patterns) > 0 {
+			if set := ipset.BuildMatchSet(patterns); set != nil && set.ContainsStr(ip) {
+				matched := ""
+				for _, p := range patterns {
+					if one := ipset.BuildMatchSet([]string{p}); one != nil && one.ContainsStr(ip) {
+						matched = p
+						break
+					}
+				}
+				resp.Hits = append(resp.Hits, response2.IPLookupHit{
+					Source: srcLogExclude, SourceName: "日志排除", Scope: l.scope,
+					Matched: matched, Effect: "log_skip",
+					Detail: "命中「记录日志时排除IP」，该IP的正常请求不记访问日志（安全事件照常记录）",
+				})
+			}
+		}
+
+		// 经由 group: 引用命中——用户最容易忘掉的就是这一层
+		for _, code := range codes {
+			m := ipset.GetGroupMatcher(code)
+			if m == nil || !m.ContainsStr(ip) {
+				continue
+			}
+			resp.Hits = append(resp.Hits, response2.IPLookupHit{
+				Source: srcLogExclude, SourceName: "日志排除", Scope: l.scope,
+				Matched: "group:" + code, Effect: "log_skip",
+				Detail: "通过IP组 " + code + " 被「记录日志时排除IP」命中，该IP的正常请求不记访问日志（安全事件照常记录）",
+			})
+		}
+	}
+}
+
+// logExcludeGroupRefs 返回被日志排除清单引用的组短码 → 说明文案
+func (r *WafIPLookupService) logExcludeGroupRefs() map[string]string {
+	refs := map[string]string{}
+	for _, l := range r.collectLogExcludeLists() {
+		for _, code := range ipset.GroupCodesOf(l.raw) {
+			if old, ok := refs[code]; ok {
+				refs[code] = old + "、" + l.scope
+				continue
+			}
+			refs[code] = "被「记录日志时排除IP」引用（" + l.scope
+		}
+	}
+	for code, text := range refs {
+		refs[code] = text + "）：组内IP的正常请求不记访问日志"
+	}
+	return refs
 }

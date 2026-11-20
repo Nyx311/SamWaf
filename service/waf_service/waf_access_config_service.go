@@ -9,6 +9,7 @@ import (
 	"SamWaf/model/baseorm"
 	"SamWaf/model/request"
 	"SamWaf/model/response"
+	"SamWaf/utils"
 	"SamWaf/wafenginecore/accessgate"
 	"crypto/sha256"
 	"encoding/hex"
@@ -105,6 +106,10 @@ func (receiver *WafAccessConfigService) SaveApi(req request.WafAccessConfigSaveR
 	bean.GlobalExcludePaths = req.GlobalExcludePaths
 	bean.BypassIPGroupCode = strings.TrimSpace(req.BypassIPGroupCode)
 	bean.ServiceTokenHeader = strings.TrimSpace(req.ServiceTokenHeader)
+	bean.CorsAllowOrigins = req.CorsAllowOrigins
+	bean.CorsAllowMethods = req.CorsAllowMethods
+	bean.CorsAllowHeaders = req.CorsAllowHeaders
+	bean.CorsMaxAge = req.CorsMaxAge
 	bean.UnauthAction = req.UnauthAction
 	bean.PassIdentityHeader = boolInt(req.PassIdentityHeader)
 	bean.ForceSecureCookie = boolInt(req.ForceSecureCookie)
@@ -210,11 +215,10 @@ func (receiver *WafAccessConfigService) PublishConfig() {
 		CenterOrigin: bean.CenterOrigin,
 		CenterHost:   centerHost,
 
-		PathPrefix:      accessgate.NormalizePathPrefix(bean.PathPrefix),
-		CookiePrefix:    bean.CookiePrefix,
-		CookieSSOName:   bean.CookiePrefix + "_sso",
-		CookieTokenName: bean.CookiePrefix + "_tk",
-		HmacSecret:      []byte(secret),
+		PathPrefix:    accessgate.NormalizePathPrefix(bean.PathPrefix),
+		CookiePrefix:  bean.CookiePrefix,
+		CookieSSOName: bean.CookiePrefix + "_sso",
+		HmacSecret:    []byte(secret),
 
 		SessionTTL:  time.Duration(bean.SessionTTLMinutes) * time.Minute,
 		TokenTTL:    time.Duration(bean.TokenTTLMinutes) * time.Minute,
@@ -232,11 +236,28 @@ func (receiver *WafAccessConfigService) PublishConfig() {
 		ServiceTokenHeader: bean.ServiceTokenHeader,
 		ServiceTokenHashes: splitLines(bean.ServiceTokenHashes),
 
+		CORS: accessgate.CORSPolicy{
+			AllowOrigins: accessgate.BuildAllowOrigins(bean.CorsAllowOrigins),
+			AllowMethods: accessgate.SanitizeHeaderValue(bean.CorsAllowMethods),
+			AllowHeaders: accessgate.SanitizeHeaderValue(bean.CorsAllowHeaders),
+			MaxAge:       bean.CorsMaxAge,
+		},
+
 		UnauthAction:       bean.UnauthAction,
 		PassIdentityHeader: bean.PassIdentityHeader == 1,
 		ForceSecureCookie:  bean.ForceSecureCookie == 1,
 		CachePositiveTTL:   time.Duration(bean.CachePositiveTTLSec) * time.Second,
 	}
+
+	// 非法 Origin 一律静默丢弃（fail-closed 是对的：宁可少放行一条，也不能因为一行写歪
+	// 就让整站跨源全开）。但"填了却不生效"必须有个说法，否则用户只会看到
+	// "明明配了 CORS 还是报跨源错"而无从查起。
+	if filled, kept := len(splitLines(bean.CorsAllowOrigins)), len(cfg.CORS.AllowOrigins); filled > kept {
+		zlog.Warn("统一访问认证：部分跨源 Origin 无效或重复，已被忽略。"+
+			"每行填完整的 scheme://host[:port]（区分端口，不支持 * 与 null，不能带路径）",
+			"填写条数", filled, "生效条数", kept)
+	}
+
 	accessgate.SetConfig(cfg)
 }
 
@@ -325,7 +346,8 @@ func (receiver *WafAccessConfigService) GetCenterHostOptionsApi() []response.Acc
 			if d == "" || strings.Contains(d, "*") {
 				continue
 			}
-			origin := buildOrigin(d, h.Port, h.Ssl == 1)
+			// 对外协议以主端口监听协议为准（Ssl 字段已降级为"是否配置证书"，issue #955）
+			origin := buildOrigin(d, h.Port, utils.HostMainProtocol(h) == utils.ListenProtoHTTPS)
 			if seen[origin] {
 				continue
 			}

@@ -3,6 +3,9 @@ package model
 import (
 	"SamWaf/model/baseorm"
 	"encoding/json"
+	"fmt"
+	"strconv"
+	"strings"
 )
 
 type Hosts struct {
@@ -25,6 +28,7 @@ type Hosts struct {
 	DEFENSE_JSON              string `gorm:"type:text" json:"defense_json"`                 //自身防御 json
 	START_STATUS              int    `json:"start_status"`                                  //启动状态 如果是0 启动  ; 如果是1 不启动
 	EXCLUDE_URL_LOG           string `gorm:"type:text" json:"exclude_url_log"`              //排除的url开头的数据 换行隔开
+	EXCLUDE_IP_LOG            string `gorm:"type:text" json:"exclude_ip_log"`             //排除记录日志的IP清单 换行或逗号隔开：单IP/CIDR/通配符/区间/group:组短码
 	IsEnableLoadBalance       int    `json:"is_enable_load_balance"`                        //是否激活负载  1 激活  非1 没有激活
 	LoadBalanceStage          int    `json:"load_balance_stage"`                            //负载策略
 	UnrestrictedPort          int    `json:"unrestricted_port"`                             //不限来源匹配端口 0 限制 1，不限制
@@ -36,6 +40,7 @@ type Hosts struct {
 	IsEnableHttpAuthBase      int    `json:"is_enable_http_auth_base"`                      //是否 HTTPAuthBase  1 激活  非1 没有激活
 	HttpAuthBaseType          string `gorm:"size:50" json:"http_auth_base_type"`            //认证类型 authorization(默认Basic Auth) custom(自定义页面)
 	HttpAuthPathPrefix        string `gorm:"size:255" json:"http_auth_path_prefix"`         //HTTP认证路径前缀，用于隐藏系统特征，默认为随机生成
+	HttpAuthJSON              string `gorm:"type:text" json:"http_auth_json"`               //网站密码访问的会话时效配置 json（有效期/空闲超时/绑定登录IP），空=按 DecodeHttpAuthConfig 的默认值
 	ResponseTimeOut           int    `json:"response_time_out"`                             //响应超时时间 默认60秒,为0则无限等待
 	HealthyJSON               string `gorm:"type:text" json:"healthy_json"`                 //后端健康度检测 json
 	InsecureSkipVerify        int    `json:"insecure_skip_verify"`                          //是否开启后端https证书有效性验证 默认 0 是校验 1 是不校验
@@ -54,8 +59,8 @@ type Hosts struct {
 	TamperJSON                string `gorm:"type:text" json:"tamper_json"`                  //网页防篡改配置 json（响应基线比对）
 	UploadSecurityJSON        string `gorm:"type:text" json:"upload_security_json"`         //文件上传内容检测配置 json（扩展名/Webshell/类型/大小）
 	IPMode                    string `gorm:"size:20" json:"ip_mode"`                        //IP提取模式: "nic" 网卡模式 或 "proxy" 代理模式
-	DisableHTTP2             int    `json:"disable_http2"`              //对外HTTP/2开关 0启用(默认/现状) 1关闭(该站点ALPN只提供http/1.1,兼容安卓等原生WebSocket客户端)
-	IsEnableResponseBuffering int    `json:"is_enable_response_buffering"` //响应缓冲 1开启(默认) 0关闭(类似 nginx proxy_buffering off，边收边推，利于流式/SSE/大文件)
+	DisableHTTP2              int    `json:"disable_http2"`                                 //对外HTTP/2开关 0启用(默认/现状) 1关闭(该站点ALPN只提供http/1.1,兼容安卓等原生WebSocket客户端)
+	IsEnableResponseBuffering int    `json:"is_enable_response_buffering"`                  //响应缓冲 1开启(默认) 0关闭(类似 nginx proxy_buffering off，边收边推，利于流式/SSE/大文件)
 	// 真实客户端 IP 提取加固（向后兼容：IPSourceMode 为空时行为与旧版完全一致——取 X-Forwarded-For 最左第一个）
 	IPSourceMode   string `gorm:"size:20" json:"ip_source_mode"`     //真实IP来源模式: ""(兼容,取最左) | nic | header | xff_depth | cdn_preset
 	IPTrustDepth   int    `json:"ip_trust_depth"`                    //xff_depth 模式：从右往左取第 N 个非可信 hop(默认1)
@@ -63,6 +68,53 @@ type Hosts struct {
 	IPTrustProxies string `gorm:"type:text" json:"ip_trust_proxies"` //可信代理网段(CIDR/IP，逗号分隔)，用于 xff_depth 跳过可信 hop
 	CDNProvider    string `gorm:"size:32" json:"cdn_provider"`       //cdn_preset 模式选择的 CDN 厂商: cloudflare|fastly|cloudfront|edgeone|aliyun|akamai
 	AccessJSON     string `gorm:"type:text" json:"access_json"`      //统一访问认证(Access模式)站点级配置 json（三态开关/路径白名单）
+	// GroupCode 所属分组短码，空=未分组。
+	// 纯管理端组织维度：只用于列表筛选与批量选择，不参与任何请求期判定，也不下发引擎（见 model/host_group.go）。
+	GroupCode string `gorm:"size:64" json:"group_code"`
+	// PortListensJSON 端口监听表(JSON)，形如 [{"port":80,"proto":"http","ipv":"both"}]。
+	// 空 = 按老规则从 Ssl/BindMorePort/AutoJumpHTTPS 派生（存量站点保持原行为）。
+	// addr 为预留字段：当前版本不生效，引擎读到会忽略并按通配监听。
+	// 解析唯一入口 utils.ResolveHostListens，其它地方不得自行解析。
+	PortListensJSON string `gorm:"size:2048" json:"port_listens_json"`
+	// EmergencyMode 紧急模式（对标 Under Attack Mode）：1=开启，全部页面请求先过一次人机验证。
+	//
+	// 它是站点级总闸，不改动任何一条 CC 规则——把规则的动作改掉再改回来，
+	// 中间出任何岔子都恢复不回原样，而这个开关多半是在被打的时候按的。
+	// 「永不挑战的路径」对它同样生效：App/API 客户端跑不了 JS 挑战，必须留得出口。
+	EmergencyMode int `json:"emergency_mode"`
+	// EmergencyUntil 紧急模式自动关闭时间(unix 秒)，0=手动关闭前一直开着。
+	// 默认给一个到期时间：这个开关会让全部访客多走一道挑战，忘了关的代价由真实用户承担。
+	EmergencyUntil int64 `json:"emergency_until"`
+}
+
+// DisplayName 站点在下拉/清单里的显示名：域名:端口(昵称,SSL,备注)。
+// 同一个域名常常有多条记录（不同端口各一条），只显示域名会看起来像重复数据。
+// 各处统一走这里，避免两个地方各写一份、显示名对不上。
+func (h Hosts) DisplayName() string {
+	var bracketContent []string
+	if h.Nickname != "" {
+		bracketContent = append(bracketContent, h.Nickname)
+	}
+	if h.Ssl == 1 {
+		bracketContent = append(bracketContent, "SSL")
+	}
+	if h.REMARKS != "" {
+		bracketContent = append(bracketContent, h.REMARKS)
+	}
+	if len(bracketContent) > 0 {
+		return fmt.Sprintf("%s:%d(%s)", h.Host, h.Port, strings.Join(bracketContent, ","))
+	}
+	return fmt.Sprintf("%s:%d", h.Host, h.Port)
+}
+
+// IsEmergencyActive 紧急模式当前是否生效（已开启且未到自动关闭时间）。
+// 到期判定放在读取侧而不是靠定时任务改库：定时任务没跑到的那段时间里，
+// 库里写着「开」而实际早该关了，两者不一致比晚关几秒更难查。
+func (h *Hosts) IsEmergencyActive(nowUnix int64) bool {
+	if h == nil || h.EmergencyMode != 1 {
+		return false
+	}
+	return h.EmergencyUntil <= 0 || h.EmergencyUntil > nowUnix
 }
 
 type HostsDefense struct {
@@ -89,19 +141,95 @@ type HealthyConfig struct {
 	LastErrorReason string `json:"last_error_reason"` // 最后一次错误原因
 }
 
+// FlexInt 兼容 JSON 里被写成字符串的数字（如 "24"）。
+//
+// 存量 captcha_json 里的数值字段大多是字符串形式。用普通 int 接收时，
+// encoding/json 会跳过该字段、继续解析其余字段，并只在最后返回一个类型错误——
+// 结果是字段悄悄回落到默认值：用户改了不生效，界面上也没有任何提示。
+type FlexInt int
+
+func (f *FlexInt) UnmarshalJSON(b []byte) error {
+	s := strings.TrimSpace(string(b))
+	if s == "" || s == "null" {
+		return nil
+	}
+	if s[0] == '"' {
+		var str string
+		if err := json.Unmarshal(b, &str); err != nil {
+			return err
+		}
+		str = strings.TrimSpace(str)
+		if str == "" {
+			return nil
+		}
+		n, err := strconv.Atoi(str)
+		if err != nil {
+			return err
+		}
+		*f = FlexInt(n)
+		return nil
+	}
+	var n int
+	if err := json.Unmarshal(b, &n); err != nil {
+		return err
+	}
+	*f = FlexInt(n)
+	return nil
+}
+
+// FlexLines 兼容 JSON 里被写成数组的换行分隔清单（如 ["/a","/b"]）。
+//
+// 存量 captcha_json 的 exclude_urls 有字符串和数组两种写法。用普通 string 接收数组时，
+// encoding/json 同样是跳过该字段、继续解析其余字段——清单会整份消失，
+// 表现为「明明配了永不挑战的路径，却照样被挑战」。
+type FlexLines string
+
+func (f *FlexLines) UnmarshalJSON(b []byte) error {
+	s := strings.TrimSpace(string(b))
+	if s == "" || s == "null" {
+		return nil
+	}
+	if s[0] == '[' {
+		var arr []string
+		if err := json.Unmarshal(b, &arr); err != nil {
+			return err
+		}
+		lines := make([]string, 0, len(arr))
+		for _, v := range arr {
+			if v = strings.TrimSpace(v); v != "" {
+				lines = append(lines, v)
+			}
+		}
+		*f = FlexLines(strings.Join(lines, "\n"))
+		return nil
+	}
+	var str string
+	if err := json.Unmarshal(b, &str); err != nil {
+		return err
+	}
+	*f = FlexLines(str)
+	return nil
+}
+
 // CaptchaConfig 验证码配置
 type CaptchaConfig struct {
-	IsEnableCaptcha int    `json:"is_enable_captcha"` // 是否开启验证码 1开启 0关闭
-	ExcludeURLs     string `json:"exclude_urls"`      // 排除验证码的URL列表
-	ExpireTime      int    `json:"expire_time"`       // 验证通过后的有效期(小时)
-	IPMode          string `json:"ip_mode"`           // IP提取模式: "nic" 网卡模式 或 "proxy" 代理模式
-	EngineType      string `json:"engine_type"`       // 验证码引擎类型: 传统方式 "traditional",capJS工作量证明 "capJs"
-	PathPrefix      string `json:"path_prefix"`       // 验证码路径前缀，用于隐藏系统特征，默认为随机生成
-	CapJsConfig     struct {
-		ChallengeCount      int `json:"challengeCount,omitempty"`      // Number of challenges to generate (default: 50)
-		ChallengeSize       int `json:"challengeSize,omitempty"`       // Size of each challenge in bytes (default: 32)
-		ChallengeDifficulty int `json:"challengeDifficulty,omitempty"` // Difficulty level (default: 4)
-		ExpiresMs           int `json:"expiresMs,omitempty"`           // Expiration time in milliseconds (default: 600000)
+	IsEnableCaptcha FlexInt   `json:"is_enable_captcha"` // 是否开启验证码 1开启 0关闭
+	ExcludeURLs     FlexLines `json:"exclude_urls"`      // 排除验证码的URL列表（换行分隔；对所有触发来源生效）
+	ExpireTime      FlexInt   `json:"expire_time"`       // 验证通过后的有效期(小时)
+	IPMode          string    `json:"ip_mode"`           // IP提取模式: "nic" 网卡模式 或 "proxy" 代理模式
+	EngineType      string    `json:"engine_type"`       // 验证码引擎类型: 传统方式 "traditional",capJS工作量证明 "capJs"
+	PathPrefix      string    `json:"path_prefix"`       // 验证码路径前缀，用于隐藏系统特征，默认为随机生成
+	// ContactInfo 管理员联系方式，填了就显示在挑战页上，留空则整块不渲染。
+	//
+	// 挑战页对访客是个死胡同：被挡住之后既进不去、也没地方问。这一栏就是给这种情况留的出口。
+	// 内容由管理员自己写（邮箱、电话、工单地址、一句说明都行），渲染时**必须 HTML 转义**——
+	// 它出现在给访客看的公开页面上。
+	ContactInfo string `json:"contact_info"` // 挑战页展示的管理员联系方式，留空=不显示
+	CapJsConfig struct {
+		ChallengeCount      FlexInt `json:"challengeCount,omitempty"`      // Number of challenges to generate (default: 50)
+		ChallengeSize       FlexInt `json:"challengeSize,omitempty"`       // Size of each challenge in bytes (default: 32)
+		ChallengeDifficulty FlexInt `json:"challengeDifficulty,omitempty"` // Difficulty level (default: 4)
+		ExpiresMs           FlexInt `json:"expiresMs,omitempty"`           // Expiration time in milliseconds (default: 600000)
 		InfoTitle           struct {
 			En string `json:"en,omitempty"` // English title
 			Zh string `json:"zh,omitempty"` // Chinese title
@@ -146,8 +274,33 @@ func ParseCaptchaConfig(captchaJSON string) CaptchaConfig {
 			return config
 		}
 	}
+	// 归一化验证方式：只认 traditional / capJs，其余一律按 traditional。
+	//
+	// 存量数据里出现过 "default" 这种当前代码不认的值（更早版本或导入留下的）。
+	// 下游按 EngineType 分发挑战页时是「两个 if，没有 else」，
+	// 取到不认识的值就两个分支都不进、什么都不写——响应是空的、挑战永远发不出来，
+	// 而配置、日志、界面上一切正常。在解析入口收口，所有下游一次性受益。
+	if config.EngineType != CaptchaEngineTraditional && config.EngineType != CaptchaEngineCapJs {
+		config.EngineType = CaptchaEngineTraditional
+	}
+	// 联系方式要显示在公开的挑战页上，在解析入口就把长度封住：
+	// 这段文本来自管理端输入，界面上限制得住，直接改库或旧数据限制不住。
+	config.ContactInfo = strings.TrimSpace(config.ContactInfo)
+	if n := []rune(config.ContactInfo); len(n) > CaptchaContactMaxRunes {
+		config.ContactInfo = string(n[:CaptchaContactMaxRunes])
+	}
 	return config
 }
+
+// 验证方式取值。只有这两个是引擎认得的，其余一律按 traditional 处理（见 ParseCaptchaConfig）。
+const (
+	CaptchaEngineTraditional = "traditional"
+	CaptchaEngineCapJs       = "capJs"
+)
+
+// CaptchaContactMaxRunes 挑战页联系方式的长度上限（按字符算，不是字节）。
+// 够写下"邮箱 + 电话 + 一句说明"，又不至于让人把整页说明塞进挑战页。
+const CaptchaContactMaxRunes = 200
 
 // AntiLeechConfig 防盗链配置
 type AntiLeechConfig struct {
@@ -325,8 +478,8 @@ func ParseUploadSecurityConfig(jsonStr string) UploadSecurityConfig {
 
 // 站点级 Access 三态。判定实现只有一处，在 wafenginecore/accessgate.IsAccessEnabled。
 const (
-	AccessModeInherit = 0 // 继承全局总开关（默认）
-	AccessModeForceOn = 1 // 强制开启：全局关也要认证（单站点试点、只保护后台）
+	AccessModeInherit  = 0 // 继承全局总开关（默认）
+	AccessModeForceOn  = 1 // 强制开启：全局关也要认证（单站点试点、只保护后台）
 	AccessModeForceOff = 2 // 强制关闭：全局开也放行（对外公开的站点）
 )
 
@@ -341,6 +494,13 @@ type HostAccessConfig struct {
 	RequireOtp       int    `json:"require_otp"`         //0继承全局 1本站强制 2本站豁免
 	UnauthAction     string `json:"unauth_action"`       //""继承全局 auto|redirect|401
 	AllowIPGroupCode string `json:"allow_ip_group_code"` //本站额外的免认证 IP 组
+
+	// 跨源（CORS）：按字段覆盖全局，空值即沿用全局，让用户只改 Origin 清单就能生效。
+	// 两级都为空 = 不启用，存量站点行为完全不变。
+	CorsAllowOrigins string `json:"cors_allow_origins"` //本站允许的完整 Origin，换行分隔，精确匹配
+	CorsAllowMethods string `json:"cors_allow_methods"` //空=沿用全局
+	CorsAllowHeaders string `json:"cors_allow_headers"` //空=沿用全局
+	CorsMaxAge       int    `json:"cors_max_age"`       //空=沿用全局
 }
 
 // ParseAccessConfig 解析站点级 Access 配置。
@@ -364,6 +524,15 @@ func ParseAccessConfig(jsonStr string) HostAccessConfig {
 	default:
 		c.UnauthAction = ""
 	}
+	// 越界的预检缓存时长归零（=沿用全局），非法字符在这里就消掉：
+	// 这三个值会被原样拼进响应头，而站点配置是一整串 JSON 透传进来的，
+	// 不像全局配置那样必然经过 FillDefaults。
+	if c.CorsMaxAge < 0 || c.CorsMaxAge > AccessCorsMaxAgeCap {
+		c.CorsMaxAge = 0
+	}
+	c.CorsAllowMethods = stripHeaderCtrlChars(c.CorsAllowMethods)
+	c.CorsAllowHeaders = stripHeaderCtrlChars(c.CorsAllowHeaders)
+	c.CorsAllowOrigins = strings.NewReplacer("\r", "\n", "\t", " ").Replace(c.CorsAllowOrigins)
 	return c
 }
 
@@ -575,4 +744,85 @@ func GetClientIPByMode(ipMode string, netSrcIp string, srcIP string) string {
 	}
 	// 默认使用网卡模式
 	return netSrcIp
+}
+
+// HttpAuthConfig 「网站密码访问」的会话时效与保护范围配置（hosts.HttpAuthJSON）。
+//
+// 兼容硬约束：HttpAuthJSON 为空串时（全部存量站点），DecodeHttpAuthConfig 必须还原成
+// 「24 小时绝对有效期 + 绑定登录 IP + 不启用空闲超时 + 整站保护」，即与加这套配置之前的行为逐条一致。
+// 数值字段用 FlexInt 是因为前端表单回传的是字符串，普通 int 会让该字段悄悄回落默认值。
+type HttpAuthConfig struct {
+	SessionTTL    FlexInt `json:"session_ttl"`    // 绝对有效期(分钟)，<=0 视为默认 1440
+	IdleTimeout   FlexInt `json:"idle_timeout"`   // 空闲超时(分钟)，0=不启用
+	BindIP        FlexInt `json:"bind_ip"`        // 1=登录令牌绑定登录时的 IP(默认) 0=不绑
+	PathScope     string  `json:"path_scope"`     // 保护范围：all=整站(默认) include=仅指定路径 exclude=除指定路径外
+	Paths         string  `json:"paths"`          // 路径模式清单（换行/逗号分隔，支持 * 通配），path_scope=all 时忽略
+	BypassIPGroup string  `json:"bypass_ip_group"` // 免密IP组 code，命中该组的来源跳过密码校验，空=不启用
+}
+
+// 保护范围取值。空串与非法值一律等价 all（整站），解析失败不允许静默改变防护行为。
+const (
+	HttpAuthScopeAll     = "all"
+	HttpAuthScopeInclude = "include"
+	HttpAuthScopeExclude = "exclude"
+)
+
+// 默认值。DefaultHttpAuthSessionTTL 对齐改造前硬编码的 24 小时。
+const (
+	DefaultHttpAuthSessionTTL = 1440 // 分钟
+)
+
+// DecodeHttpAuthConfig 解析站点的 http_auth_json。
+//
+// 空串、非法 JSON、字段缺省一律回落到「等价现状」而不是零值：
+// 时效为 0 会让所有人一登录就掉线，BindIP 为 0 会静默放宽一条既有约束——
+// 两者都属于「解析失败反而改变了防护行为」，这里不允许发生。
+func DecodeHttpAuthConfig(raw string) HttpAuthConfig {
+	cfg := HttpAuthConfig{
+		SessionTTL:    DefaultHttpAuthSessionTTL,
+		IdleTimeout:   0,
+		BindIP:        1,
+		PathScope:     HttpAuthScopeAll,
+		Paths:         "",
+		BypassIPGroup: "",
+	}
+	if strings.TrimSpace(raw) == "" {
+		return cfg
+	}
+	var parsed HttpAuthConfig
+	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+		return cfg
+	}
+	if parsed.SessionTTL > 0 {
+		cfg.SessionTTL = parsed.SessionTTL
+	}
+	if parsed.IdleTimeout > 0 {
+		cfg.IdleTimeout = parsed.IdleTimeout
+	}
+	// BindIP 是显式三态：JSON 里给了 0 就是「用户主动关掉」，不能当成缺省再拉回 1。
+	// 但整份 JSON 都没这个键时（老配置升级上来）必须保持 1，所以靠下面这次单独探测区分。
+	cfg.BindIP = parsed.BindIP
+	if !jsonHasKey(raw, "bind_ip") {
+		cfg.BindIP = 1
+	}
+	// 保护范围：只认三个合法取值，其余（含缺省）一律整站
+	switch parsed.PathScope {
+	case HttpAuthScopeInclude, HttpAuthScopeExclude:
+		cfg.PathScope = parsed.PathScope
+	default:
+		cfg.PathScope = HttpAuthScopeAll
+	}
+	cfg.Paths = strings.TrimSpace(parsed.Paths)
+	cfg.BypassIPGroup = strings.TrimSpace(parsed.BypassIPGroup)
+	return cfg
+}
+
+// jsonHasKey 判断顶层是否显式出现过某个键，用于区分「用户填了 0」与「压根没这个字段」。
+func jsonHasKey(raw, key string) bool {
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		return false
+	}
+	_, ok := m[key]
+	return ok
 }

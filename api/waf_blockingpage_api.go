@@ -7,9 +7,15 @@ import (
 	"SamWaf/model/common/response"
 	"SamWaf/model/request"
 	"SamWaf/model/spec"
+	"SamWaf/utils"
+	"encoding/json"
 	"errors"
+	"html/template"
+	"io"
+	"strings"
 
 	"github.com/gin-gonic/gin"
+	"golang.org/x/net/http/httpguts"
 	"gorm.io/gorm"
 )
 
@@ -24,10 +30,89 @@ func normalizeContentPriority(v string) string {
 	return model.BlockingPageContentPrioritySamwaf
 }
 
+func validateUnmatchedHostPage(hostCode, responseCode, attackType, content, headers string) error {
+	if hostCode != global.GWAF_GLOBAL_HOST_CODE || responseCode != "403" || attackType != "" {
+		return errors.New("未匹配网站响应仅支持全局网站、403响应码及通用类型")
+	}
+	if len(content) > 256*1024 {
+		return errors.New("页面内容超出长度限制")
+	}
+	if strings.TrimSpace(content) != "" {
+		tmpl, err := template.New("unmatchedHost").Delims("[[", "]]").Parse(content)
+		if err != nil {
+			return errors.New("页面模板格式错误")
+		}
+		if err := tmpl.Execute(io.Discard, map[string]string{"SAMWAF_HOST": "example.com"}); err != nil {
+			return errors.New("页面模板变量或上下文错误")
+		}
+	}
+	return validateSpecialPageHeaders(headers)
+}
+
+func validateBlockingPage(blockingType, name, hostCode, responseCode, attackType, content, headers string) error {
+	switch blockingType {
+	case model.BlockingPageTypeUnmatchedHost:
+		return validateUnmatchedHostPage(hostCode, responseCode, attackType, content, headers)
+	case model.BlockingPageTypeBackendUnavailable:
+		if global.GWAF_GLOBAL_HOST_CODE == "" || hostCode != global.GWAF_GLOBAL_HOST_CODE || responseCode != "503" || attackType != "" {
+			return errors.New("源站不可用响应仅支持全局网站及通用类型")
+		}
+		if len([]rune(name)) > 255 {
+			return errors.New("页面名称超出长度限制")
+		}
+		if len(content) > utils.BackendUnavailablePageMaxBytes {
+			return errors.New("页面内容超出长度限制")
+		}
+		if strings.TrimSpace(content) != "" {
+			tmpl, err := utils.ParseBackendUnavailablePage(content)
+			if err != nil {
+				return errors.New("页面模板格式错误，仅支持 SAMWAF_HOST 和 SAMWAF_STATUS_CODE 变量")
+			}
+			if err := tmpl.Execute(io.Discard, utils.BackendUnavailablePageData{SAMWAF_HOST: "example.com", SAMWAF_STATUS_CODE: "503"}); err != nil {
+				return errors.New("页面模板变量上下文错误")
+			}
+		}
+		return validateSpecialPageHeaders(headers)
+	default:
+		if responseCode == model.BlockingPageTypeUnmatchedHost || responseCode == model.BlockingPageTypeBackendUnavailable {
+			return errors.New("响应代码格式错误")
+		}
+		return nil
+	}
+}
+
+func validateSpecialPageHeaders(headers string) error {
+	if len(headers) > 16*1024 {
+		return errors.New("响应头超出长度限制")
+	}
+	if headers == "" {
+		return nil
+	}
+	var list []map[string]string
+	if err := json.Unmarshal([]byte(headers), &list); err != nil || len(list) > 32 {
+		return errors.New("响应头格式错误或数量超出限制")
+	}
+	for _, header := range list {
+		name, value := header["name"], header["value"]
+		if !httpguts.ValidHeaderFieldName(name) || !httpguts.ValidHeaderFieldValue(value) {
+			return errors.New("响应头名称或值格式错误")
+		}
+		switch strings.ToLower(name) {
+		case "content-length", "content-encoding", "transfer-encoding", "connection", "trailer", "upgrade", "te":
+			return errors.New("不支持设置传输控制响应头")
+		}
+	}
+	return nil
+}
+
 func (w *WafBlockingPageApi) AddApi(c *gin.Context) {
 	var req request.WafBlockingPageAddReq
 	err := c.ShouldBindJSON(&req)
 	if err == nil {
+		if err := validateBlockingPage(req.BlockingType, req.BlockingPageName, req.HostCode, req.ResponseCode, req.AttackType, req.ResponseContent, req.ResponseHeader); err != nil {
+			response.FailWithMessage(err.Error(), c)
+			return
+		}
 		req.ContentPriority = normalizeContentPriority(req.ContentPriority)
 		cnt := wafBlockingPageService.CheckIsExistApi(req)
 		if cnt == 0 {
@@ -64,7 +149,15 @@ func (w *WafBlockingPageApi) GetListApi(c *gin.Context) {
 	var req request.WafBlockingPageSearchReq
 	err := c.ShouldBindJSON(&req)
 	if err == nil {
-		BlockingPage, total, _ := wafBlockingPageService.GetListApi(req)
+		if req.PageIndex < 1 || req.PageSize < 1 || req.PageSize > 1000 {
+			response.FailWithMessage("分页参数超出范围", c)
+			return
+		}
+		BlockingPage, total, err := wafBlockingPageService.GetListApi(req)
+		if err != nil {
+			response.FailWithMessage("获取失败", c)
+			return
+		}
 		response.OkWithDetailed(response.PageResult{
 			List:      BlockingPage,
 			Total:     total,
@@ -103,8 +196,16 @@ func (w *WafBlockingPageApi) ModifyApi(c *gin.Context) {
 	var req request.WafBlockingPageEditReq
 	err := c.ShouldBindJSON(&req)
 	if err == nil {
+		if err := validateBlockingPage(req.BlockingType, req.BlockingPageName, req.HostCode, req.ResponseCode, req.AttackType, req.ResponseContent, req.ResponseHeader); err != nil {
+			response.FailWithMessage(err.Error(), c)
+			return
+		}
 		req.ContentPriority = normalizeContentPriority(req.ContentPriority)
 		bean := wafBlockingPageService.GetDetailByIdApi(req.Id)
+		if (bean.BlockingType == model.BlockingPageTypeBackendUnavailable) != (req.BlockingType == model.BlockingPageTypeBackendUnavailable) {
+			response.FailWithMessage("源站不可用响应必须通过专用入口新建或编辑", c)
+			return
+		}
 		err = wafBlockingPageService.ModifyApi(req)
 		if err != nil {
 			response.FailWithMessage("编辑发生错误"+err.Error(), c)
@@ -117,29 +218,20 @@ func (w *WafBlockingPageApi) ModifyApi(c *gin.Context) {
 	}
 }
 
-func (w *WafBlockingPageApi) NotifyWaf(hostCode string) {
-	var blockingPageList []model.BlockingPage
-	global.GWAF_LOCAL_DB.Where("host_code=? ", hostCode).Find(&blockingPageList)
-	blockingPageMap := map[string]model.BlockingPage{}
-	if len(blockingPageList) > 0 {
-		for i := 0; i < len(blockingPageList); i++ {
-			if blockingPageList[i].BlockingType == "not_match_website" {
-				// 域名不匹配使用固定的key
-				blockingPageMap["not_match_website"] = blockingPageList[i]
-			} else if blockingPageList[i].BlockingType == "other_block" {
-				// other_block 类型根据 response_code 区分不同的错误页面
-				// 例如: 403(WAF拦截), 404, 500, 502 等
-				if blockingPageList[i].ResponseCode != "" {
-					blockingPageMap[blockingPageList[i].ResponseCode] = blockingPageList[i]
-				}
-			}
-		}
-	}
+// GetUnmatchedBuiltinApi 返回未匹配网站的内置响应页面，供管理端弹窗预览，保持与运行时同一来源。
+func (w *WafBlockingPageApi) GetUnmatchedBuiltinApi(c *gin.Context) {
+	response.OkWithDetailed(global.GLOBAL_DEFAULT_NOT_MATCH_WEBSITE, "获取成功", c)
+}
 
+func (w *WafBlockingPageApi) GetBackendUnavailableBuiltinApi(c *gin.Context) {
+	response.OkWithDetailed(global.GLOBAL_DEFAULT_BACKEND_UNAVAILABLE, "获取成功", c)
+}
+
+func (w *WafBlockingPageApi) NotifyWaf(hostCode string) {
 	var chanInfo = spec.ChanCommonHost{
 		HostCode: hostCode,
 		Type:     enums.ChanTypeBlockingPage,
-		Content:  blockingPageMap,
+		Content:  wafBlockingPageService.LoadBlockingPageMap(hostCode),
 	}
 	global.GWAF_CHAN_MSG <- chanInfo
 }

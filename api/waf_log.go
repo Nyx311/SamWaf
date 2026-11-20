@@ -7,22 +7,32 @@ import (
 	"SamWaf/model/common/response"
 	"SamWaf/model/request"
 	response2 "SamWaf/model/response"
-	"SamWaf/utils"
 	"SamWaf/wafdb"
-	"SamWaf/wafdb/dialect"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
-	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
-	"time"
+	"sync/atomic"
 
 	"github.com/gin-gonic/gin"
 )
 
 type WafLogAPi struct {
+}
+
+var logRequestIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$`)
+
+func normalizeLogRequestID(value string, required bool) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" && !required {
+		return "", nil
+	}
+	if !logRequestIDPattern.MatchString(value) {
+		return "", fmt.Errorf("访问识别码格式不正确（需为 1–64 位字母、数字或分隔符）")
+	}
+	return value, nil
 }
 
 // GetDetailApi 获取攻击日志详情
@@ -46,7 +56,16 @@ func (w *WafLogAPi) GetDetailApi(c *gin.Context) {
 			response.FailWithMessage("正在切换数据库请等待", c)
 			return
 		}
-		wafLog, _ := wafLogService.GetDetailApi(req)
+		req.REQ_UUID, err = normalizeLogRequestID(req.REQ_UUID, true)
+		if err != nil {
+			response.FailWithMessage(err.Error(), c)
+			return
+		}
+		wafLog, err := wafLogService.GetDetailApi(req)
+		if err != nil {
+			response.FailWithMessage("获取日志详情失败:"+err.Error(), c)
+			return
+		}
 		response.OkWithDetailed(wafLog, "获取成功", c)
 	} else {
 		response.FailWithMessage("解析失败", c)
@@ -55,7 +74,7 @@ func (w *WafLogAPi) GetDetailApi(c *gin.Context) {
 
 // GetListApi 获取攻击日志列表
 // @Summary      获取攻击日志列表
-// @Description  分页查询攻击日志，支持按主机码、规则、IP、时间范围等过滤
+// @Description  分页查询攻击日志，支持按主机码、规则、IP、URL关键字、时间范围等过滤
 // @Tags         日志-攻击日志
 // @Accept       json
 // @Produce      json
@@ -73,17 +92,32 @@ func (w *WafLogAPi) GetListApi(c *gin.Context) {
 			response.FailWithMessage("正在切换数据库请等待", c)
 			return
 		}
-		wafLogs, total, err2 := wafLogService.GetListApi(req)
+		req.ReqUuid, err = normalizeLogRequestID(req.ReqUuid, false)
+		if err != nil {
+			response.FailWithMessage(err.Error(), c)
+			return
+		}
+		wafLogs, total, meta, err2 := wafLogService.GetListApiWithMeta(req)
 		if err2 != nil {
 			zlog.Warn("WafLogAPI GetListApi failed", "err", err2.Error())
 			response.FailWithMessage("访问列表失败:"+err2.Error(), c)
 		} else {
 			zlog.Debug("WafLogAPI GetListApi ok", "rows", len(wafLogs), "total", total)
-			response.OkWithDetailed(response.PageResult{
-				List:      wafLogs,
-				Total:     total,
-				PageIndex: req.PageIndex,
-				PageSize:  req.PageSize,
+			// 除了列表本身，还要告诉前端这次到底查了哪些分区：
+			// 自动模式下用户没选分区，界面得能说明数据是从哪来的、识别码是在哪找到的
+			response.OkWithDetailed(gin.H{
+				"list":             wafLogs,
+				"total":            total,
+				"pageIndex":        req.PageIndex,
+				"pageSize":         req.PageSize,
+				"shards":           meta.Shards,
+				"found_in":         meta.FoundIn,
+				"scanned":          meta.Scanned,
+				"uuid_lookup":      meta.UuidLookup,
+				"sort_forced_time": meta.SortForcedTime,
+				"partial":          meta.Partial,
+				"took_ms":          meta.TookMs,
+				"issues":           meta.Issues,
 			}, "获取成功", c)
 		}
 
@@ -92,108 +126,16 @@ func (w *WafLogAPi) GetListApi(c *gin.Context) {
 	}
 }
 func (w *WafLogAPi) ExportDBApi(c *gin.Context) {
-	// 该导出走 BackupDatabase 备份 .db 文件，仅文件型数据库(SQLite)支持；
-	// MySQL 等无日志文件，直接屏蔽，避免进入后台 goroutine 后才失败。
-	if !dialect.Get().SupportsBackup() {
-		response.FailWithMessage("当前数据库不支持日志文件导出（仅 SQLite 支持）", c)
-		return
-	}
-	if global.GWAF_CAN_EXPORT_DOWNLOAD_LOG == false {
-		// 使用操作结果消息格式
-		serverName := global.GWAF_CUSTOM_SERVER_NAME
-		if serverName == "" {
-			serverName = "未命名服务器"
-		}
-		global.GQEQUE_MESSAGE_DB.Enqueue(innerbean.OpResultMessageInfo{
-			BaseMessageInfo: innerbean.BaseMessageInfo{
-				OperaType: "导出失败",
-				Server:    serverName,
-			},
-			Msg:     "当前不允许导出",
-			Success: "false",
-		})
-		response.FailWithMessage("当前不允许导出", c)
-		return
-	}
-	if global.GDATA_CURRENT_CHANGE {
-		//如果正在切换库,跳过
-		response.FailWithMessage("正在切换数据库请等待", c)
-		return
-	}
-	//TODO 必须再验证一次权限
-	//是否生成了,还没下载
-	if len(global.GWAF_RUNTIME_CURRENT_EXPORT_DB_LOG_FILE_PATH) > 0 {
-		response.FailWithMessage("文件还未下载请等待", c)
-		return
-	}
-
-	go func() {
-		currentDir := utils.GetCurrentDir()
-		downLoadDir := currentDir + "/download"
-		// 判断备份目录是否存在，不存在则创建
-		if _, err := os.Stat(downLoadDir); os.IsNotExist(err) {
-			if err := os.MkdirAll(downLoadDir, os.ModePerm); err != nil {
-				zlog.Error("创建下载目录失败:", err)
-				return
-			}
-		}
-		//处理老旧数据
-		duration := 30 * time.Minute
-		utils.DeleteOldFiles(downLoadDir, duration)
-
-		// 创建下载文件
-		downloadFileName := fmt.Sprintf("local_log_backup_%s.db", time.Now().Format("20060102150405"))
-		downloadFilePath := filepath.Join(downLoadDir, downloadFileName)
-		err := wafdb.BackupDatabase(global.GWAF_LOCAL_LOG_DB, downloadFilePath)
-		if err != nil {
-			global.GQEQUE_MESSAGE_DB.Enqueue(innerbean.OpResultMessageInfo{
-				BaseMessageInfo: innerbean.BaseMessageInfo{OperaType: "DOWNLOAD_LOG", Server: global.GWAF_CUSTOM_SERVER_NAME},
-				Msg:             "导出失败",
-				Success:         "true",
-			})
-		} else {
-			global.GWAF_RUNTIME_CURRENT_EXPORT_DB_LOG_FILE_PATH = downloadFilePath
-			//发送websocket 推送消息
-			global.GQEQUE_MESSAGE_DB.Enqueue(innerbean.ExportResultMessageInfo{
-				BaseMessageInfo: innerbean.BaseMessageInfo{OperaType: "DOWNLOAD_LOG", Server: global.GWAF_CUSTOM_SERVER_NAME},
-				Msg:             "导出完毕",
-				Success:         "true",
-			})
-		}
-	}()
+	logExportAPIChanged(c)
 }
-func (w *WafLogAPi) DownloadApi(c *gin.Context) {
-	if global.GWAF_CAN_EXPORT_DOWNLOAD_LOG == false {
-		// 使用操作结果消息格式
-		serverName := global.GWAF_CUSTOM_SERVER_NAME
-		if serverName == "" {
-			serverName = "未命名服务器"
-		}
-		global.GQEQUE_MESSAGE_DB.Enqueue(innerbean.OpResultMessageInfo{
-			BaseMessageInfo: innerbean.BaseMessageInfo{
-				OperaType: "下载失败",
-				Server:    serverName,
-			},
-			Msg:     "当前不允许下载",
-			Success: "false",
-		})
-		c.JSON(http.StatusInternalServerError, gin.H{"message": "当前不允许下载"})
-		return
-	}
-	if len(global.GWAF_RUNTIME_CURRENT_EXPORT_DB_LOG_FILE_PATH) == 0 {
-		c.JSON(http.StatusInternalServerError, gin.H{"message": "Failed to download file,not find file"})
-		return
-	}
-	// 提供文件下载
-	c.FileAttachment(global.GWAF_RUNTIME_CURRENT_EXPORT_DB_LOG_FILE_PATH, "log.db")
 
-	global.GWAF_RUNTIME_CURRENT_EXPORT_DB_LOG_FILE_PATH = ""
-	// 下载完成后删除文件
-	err := os.Remove(global.GWAF_RUNTIME_CURRENT_EXPORT_DB_LOG_FILE_PATH)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"message": "Failed to delete file"})
-		return
-	}
+func (w *WafLogAPi) DownloadApi(c *gin.Context) {
+	logExportAPIChanged(c)
+}
+
+func logExportAPIChanged(c *gin.Context) {
+	response.FailWithDetailed(gin.H{"error_code": "EXPORT_API_CHANGED"},
+		"日志导出接口已更新，请升级管理端后通过导出任务创建和下载日志包", c)
 }
 func (w *WafLogAPi) GetListByHostCodeApi(c *gin.Context) {
 	var req request.WafAttackLogSearch
@@ -217,7 +159,7 @@ func (w *WafLogAPi) GetListByHostCodeApi(c *gin.Context) {
 }
 
 func (w *WafLogAPi) GetAllShareDbApi(c *gin.Context) {
-	wafShareList, _ := wafShareDbService.GetAllShareDbApi()
+	wafShareList, _ := wafShareDbService.GetAllShareDbWithTiers()
 	liveName := wafdb.LiveLogName()                                     // 当前驱动的实时分片标识，用于标记默认选中项
 	allShareDbRep := make([]response2.AllShareDbRep, len(wafShareList)) // 创建数组
 	for i, _ := range wafShareList {
@@ -228,10 +170,38 @@ func (w *WafLogAPi) GetAllShareDbApi(c *gin.Context) {
 			FileName:  wafShareList[i].FileName,
 			Cnt:       wafShareList[i].Cnt,
 			IsCurrent: wafShareList[i].FileName == liveName,
+			PeriodKey: wafShareList[i].PeriodKey,
+			Tiers:     wafShareList[i].Tiers,
+			Missing:   wafShareList[i].Missing,
 		}
 
 	}
 	response.OkWithDetailed(allShareDbRep, "获取成功", c)
+}
+
+// DelShardApi 主动删除一个归档分区（不看保留期）。
+//
+// 以前想立刻腾空间只能去「文件管理」删 .db 文件——那条路只对 SQLite 有效，
+// 而且删完 share_dbs 记录还在，归档下拉里会留着一个已经不存在的分区。
+// 这里按分区删：文件型删文件、服务型丢表，两边都把记录与计数缓存一并清掉。
+func (w *WafLogAPi) DelShardApi(c *gin.Context) {
+	var req struct {
+		FileName string `json:"file_name"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.FailWithMessage("解析失败", c)
+		return
+	}
+	if global.GDATA_CURRENT_CHANGE {
+		response.FailWithMessage("正在切换数据库请等待", c)
+		return
+	}
+	detail, err := wafShareDbService.ForceDeleteShard(req.FileName)
+	if err != nil {
+		response.FailWithMessage("删除分区失败："+err.Error(), c)
+		return
+	}
+	response.OkWithMessage(detail, c)
 }
 
 // http 原始请求并进行脱敏处理
@@ -244,7 +214,16 @@ func (w *WafLogAPi) GetHttpCopyMaskApi(c *gin.Context) {
 			response.FailWithMessage("正在切换数据库请等待", c)
 			return
 		}
-		wafLog, _ := wafLogService.GetDetailApi(req)
+		req.REQ_UUID, err = normalizeLogRequestID(req.REQ_UUID, true)
+		if err != nil {
+			response.FailWithMessage(err.Error(), c)
+			return
+		}
+		wafLog, err := wafLogService.GetDetailApi(req)
+		if err != nil {
+			response.FailWithMessage("获取日志详情失败:"+err.Error(), c)
+			return
+		}
 
 		if req.OutputFormat == "curl" {
 			response.OkWithDetailed(GenerateCurlRequest(wafLog), "获取成功", c)
@@ -255,6 +234,16 @@ func (w *WafLogAPi) GetHttpCopyMaskApi(c *gin.Context) {
 	} else {
 		response.FailWithMessage("解析失败", c)
 	}
+}
+
+// GetIPTagDBStatusApi 报告 IP 标签的当前归属库与合并进度。
+// 切换归属会把另一个库里的历史标签并过来，量大时要跑一会儿，
+// 页面据此显示「合并中」并在合并结束后重新拉取列表。
+func (w *WafLogAPi) GetIPTagDBStatusApi(c *gin.Context) {
+	response.OkWithData(gin.H{
+		"db":      global.GDATA_IP_TAG_DB,
+		"merging": atomic.LoadInt32(&global.GDATA_IP_TAG_MERGING) == 1,
+	}, c)
 }
 
 // GetAttackIPListApi 获取风险数据列表
@@ -412,9 +401,7 @@ func GenerateRawHTTPRequest(weblog innerbean.WebLog) string {
 }
 func GenerateCurlRequest(weblog innerbean.WebLog) string {
 
-	headers := strings.Split(weblog.HEADER, "\n")
-	maskedHeaders := maskSensitiveHeader(weblog.HEADER)
-	headers = strings.Split(maskedHeaders, "\n")
+	headers := strings.Split(maskSensitiveHeader(weblog.HEADER), "\n")
 	headerStrings := ""
 	for _, header := range headers {
 		headerStrings += fmt.Sprintf("-H '%s' ", strings.TrimSpace(header))
@@ -440,18 +427,49 @@ func GenerateCurlRequest(weblog innerbean.WebLog) string {
 }
 func maskSensitiveHeader(header string) string {
 	sensitiveKeys := []string{
-		"Authorization", "Token", "Api-Key", "Secret", "Access-Token", "X-Api-Key",
+		"Authorization", "Proxy-Authorization", "Cookie", "Token", "Api-Key", "Secret", "Access-Token", "X-Api-Key",
 		"X-Access-Token", "X-Secret", "Session-Key", "Set-Cookie",
 	}
 	maskedHeader := header
 	for _, key := range sensitiveKeys {
-		regex := regexp.MustCompile(fmt.Sprintf(`(?i)(%s):\s*[^\\n]+`, key))
+		// 反引号串里 \\n 是字面反斜杠+n（排除的是这两个字符而不是换行），
+		// 值里碰到字母 n 就会断尾泄密；这里要的是「到换行/串尾为止」。
+		regex := regexp.MustCompile(fmt.Sprintf(`(?i)(%s):\s*[^\n]+`, key))
 		maskedHeader = regex.ReplaceAllString(maskedHeader, "$1: [MASKED]")
 	}
 	return maskedHeader
 }
 
+// displaySensitiveCookieKeywords Cookie 名带这些关键字的，值在展示层抹掉（历史报文兜底，
+// 与落库脱敏规则同源；新数据落库时已脱敏，这里是双保险）。
+var displaySensitiveCookieKeywords = []string{"session", "auth", "token", "secret", "passwd", "password", "credential", "key", "sid", "jwt"}
+
 func maskSensitiveCookies(cookies string) string {
+	// COOKIES 列是 r.Cookies() 序列化出的 JSON 数组（见引擎侧 refreshWeblogCookies），
+	// k=v 正则永远匹配不上，必须按 JSON 解析后按名脱敏。
+	if strings.HasPrefix(strings.TrimSpace(cookies), "[") {
+		var list []http.Cookie
+		if err := json.Unmarshal([]byte(cookies), &list); err == nil {
+			changed := false
+			for i := range list {
+				name := strings.ToLower(list[i].Name)
+				for _, kw := range displaySensitiveCookieKeywords {
+					if strings.Contains(name, kw) {
+						list[i].Value = "[MASKED]"
+						changed = true
+						break
+					}
+				}
+			}
+			if !changed {
+				return cookies
+			}
+			if out, err := json.Marshal(list); err == nil {
+				return string(out)
+			}
+			return cookies
+		}
+	}
 	cookieRegex := regexp.MustCompile(`(?i)(sessionid|auth|token|key|secret)=[^;]+`)
 	return cookieRegex.ReplaceAllString(cookies, "$1=[MASKED]")
 }

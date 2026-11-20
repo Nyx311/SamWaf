@@ -61,6 +61,9 @@ func ProcessMessageDequeEngine() {
 				case innerbean.ExportResultMessageInfo:
 					//导出结果
 					sendToWebSocket("导出结果", msg.Msg, nil, "DOWNLOAD_LOG")
+				case innerbean.LogExportReadyMessageInfo:
+					//导出任务产物就绪：只通知任务号，下载由用户从任务列表发起
+					sendToWebSocket("日志导出任务", msg.Msg, map[string]interface{}{"task_id": msg.TaskID}, "LOG_EXPORT_READY")
 				case innerbean.UpdateResultMessageInfo:
 					//升级结果
 					sendToWebSocket("升级结果", msg.Msg, nil, "Info")
@@ -198,6 +201,15 @@ func handleAttackInfoMessage(msg innerbean.AttackInfoMessageInfo) {
 	// 1. 交给通知订阅系统
 	waf_service.WafNotifySenderServiceApp.SendMessageInfo(msg)
 
+	if global.GWAF_NOTICE_ENABLE {
+		utils.NotifyHelperApp.SendRuleInfo(innerbean.RuleMessageInfo{
+			BaseMessageInfo: innerbean.BaseMessageInfo{OperaType: "命中保护规则", Server: msg.Server},
+			Domain:          msg.Domain,
+			RuleInfo:        msg.AttackType,
+			Ip:              msg.Ip,
+		})
+	}
+
 	// 2. 发送到 WebSocket（实时推送）
 	wsContent := fmt.Sprintf("检测到 %s 攻击，来源IP: %s", msg.AttackType, msg.Ip)
 	sendToWebSocket("攻击告警", wsContent, nil, "Info")
@@ -282,6 +294,12 @@ func handleIPBanMessage(msg innerbean.IPBanMessageInfo) {
 // 写入必须走 global.GWebSocket.Broadcast：它按连接加锁串行化并带写超时，
 // 直接对裸连接 WriteMessage 会与 ping 回显、定时任务撞成 concurrent write panic。
 func sendToWebSocket(messageType, messageData string, messageAttach interface{}, cmdType string) {
+	// 在线表尚未建好时直接丢弃：本协程可能早于初始化跑起来，对 nil 调方法会 panic。
+	// 正常启动顺序下不会走到这里，留着是防止将来调整启动顺序时再踩一次。
+	if global.GWebSocket == nil {
+		zlog.Debug("WebSocket 在线表未就绪，跳过本条通知", messageType)
+		return
+	}
 	dataPacket := model.MsgDataPacket{
 		MessageId:           uuid.GenUUID(),
 		MessageType:         messageType,

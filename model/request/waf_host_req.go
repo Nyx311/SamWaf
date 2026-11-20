@@ -19,6 +19,7 @@ type WafHostAddReq struct {
 	DEFENSE_JSON              string `json:"defense_json"`                 //自身防御 json
 	START_STATUS              int    `json:"start_status"`                 //启动状态
 	EXCLUDE_URL_LOG           string `json:"exclude_url_log"`              //排除的url开头的数据 换行隔开
+	EXCLUDE_IP_LOG            string `json:"exclude_ip_log"`             //排除记录日志的IP清单 换行或逗号隔开：单IP/CIDR/通配符/区间/group:组短码
 	IsEnableLoadBalance       int    `json:"is_enable_load_balance"`       //是否激活负载  1 激活  非1 没有激活
 	LoadBalanceStage          int    `json:"load_balance_stage"`           //负载策略
 	UnrestrictedPort          int    `json:"unrestricted_port"`            //不限来源匹配端口 0 限制 1，不限制
@@ -30,6 +31,7 @@ type WafHostAddReq struct {
 	IsEnableHttpAuthBase      int    `json:"is_enable_http_auth_base"`     //是否 HTTPAuthBase  1 激活  非1 没有激活
 	HttpAuthBaseType          string `json:"http_auth_base_type"`          //认证类型 authorization(默认Basic Auth) custom(自定义页面)
 	HttpAuthPathPrefix        string `json:"http_auth_path_prefix"`        //HTTP认证路径前缀，用于隐藏系统特征，默认为随机生成
+	HttpAuthJSON              string `json:"http_auth_json"`               //网站密码访问的会话时效配置 json
 	ResponseTimeOut           int    `json:"response_time_out"`            //响应超时时间
 	HealthyJSON               string `json:"healthy_json"`                 //后端健康度检测 json
 	InsecureSkipVerify        int    `json:"insecure_skip_verify"`         //是否开启后端https证书有效性验证 默认 0 是校验 1 是不校验
@@ -48,22 +50,24 @@ type WafHostAddReq struct {
 	TamperJSON                string `json:"tamper_json"`                  //网页防篡改配置 json
 	UploadSecurityJSON        string `json:"upload_security_json"`         //文件上传内容检测配置 json
 	IPMode                    string `json:"ip_mode"`                      //IP提取模式: "nic" 网卡模式 或 "proxy" 代理模式
-	DisableHTTP2              int    `json:"disable_http2"`                 //对外HTTP/2开关 0启用 1关闭(该站点只走http/1.1,兼容原生WebSocket客户端)
-	IsEnableResponseBuffering int    `json:"is_enable_response_buffering"`  //响应缓冲 1开启(默认) 0关闭(类似 nginx proxy_buffering off)
+	DisableHTTP2              int    `json:"disable_http2"`                //对外HTTP/2开关 0启用 1关闭(该站点只走http/1.1,兼容原生WebSocket客户端)
+	IsEnableResponseBuffering int    `json:"is_enable_response_buffering"` //响应缓冲 1开启(默认) 0关闭(类似 nginx proxy_buffering off)
 	AccessJSON                string `json:"access_json"`                  //统一访问认证(Access模式)站点级配置 json
 	IPSourceMode              string `json:"ip_source_mode"`               //真实IP来源模式: ""(兼容,取XFF最左) | nic | header | xff_depth | cdn_preset
 	IPTrustDepth              int    `json:"ip_trust_depth"`               //xff_depth 模式：从右往左取第 N 个 hop(默认1)
 	IPRealHeader              string `json:"ip_real_header"`               //header/cdn_preset 模式指定的真实IP头，如 CF-Connecting-IP
 	IPTrustProxies            string `json:"ip_trust_proxies"`             //可信代理网段(CIDR/IP，逗号分隔)，用于校验真实IP头来源
 	CDNProvider               string `json:"cdn_provider"`                 //cdn_preset 模式选择的 CDN 厂商码
+	GroupCode                 string `json:"group_code"`                   //所属分组短码，空=未分组（纯管理端组织维度，不下发引擎）
+	PortListensJSON           string `json:"port_listens_json"`            //端口监听表(JSON)，空=按老规则派生
 }
 
 type WafHostDelReq struct {
-	CODE string `json:"code"`
+	CODE string `json:"code" form:"code" binding:"required"`
 }
 
 type WafHostDetailReq struct {
-	CODE string `json:"code"`
+	CODE string `json:"code" form:"code" binding:"required"`
 }
 
 type WafHostEditReq struct {
@@ -83,6 +87,7 @@ type WafHostEditReq struct {
 	DEFENSE_JSON              string `json:"defense_json"`                 //自身防御 json
 	START_STATUS              int    `json:"start_status"`                 //启动状态
 	EXCLUDE_URL_LOG           string `json:"exclude_url_log"`              //排除的url开头的数据 换行隔开
+	EXCLUDE_IP_LOG            string `json:"exclude_ip_log"`             //排除记录日志的IP清单 换行或逗号隔开：单IP/CIDR/通配符/区间/group:组短码
 	IsEnableLoadBalance       int    `json:"is_enable_load_balance"`       //是否激活负载  1 激活  非1 没有激活
 	LoadBalanceStage          int    `json:"load_balance_stage"`           //负载策略
 	UnrestrictedPort          int    `json:"unrestricted_port"`            //不限来源匹配端口 0 限制 1，不限制
@@ -94,6 +99,7 @@ type WafHostEditReq struct {
 	IsEnableHttpAuthBase      int    `json:"is_enable_http_auth_base"`     //是否 HTTPAuthBase  1 激活  非1 没有激活
 	HttpAuthBaseType          string `json:"http_auth_base_type"`          //认证类型 authorization(默认Basic Auth) custom(自定义页面)
 	HttpAuthPathPrefix        string `json:"http_auth_path_prefix"`        //HTTP认证路径前缀，用于隐藏系统特征，默认为随机生成
+	HttpAuthJSON              string `json:"http_auth_json"`               //网站密码访问的会话时效配置 json
 	ResponseTimeOut           int    `json:"response_time_out"`            //响应超时时间
 	HealthyJSON               string `json:"healthy_json"`                 //后端健康度检测 json
 	InsecureSkipVerify        int    `json:"insecure_skip_verify"`         //是否开启后端https证书有效性验证 默认 0 是校验 1 是不校验
@@ -112,23 +118,41 @@ type WafHostEditReq struct {
 	TamperJSON                string `json:"tamper_json"`                  //网页防篡改配置 json
 	UploadSecurityJSON        string `json:"upload_security_json"`         //文件上传内容检测配置 json
 	IPMode                    string `json:"ip_mode"`                      //IP提取模式: "nic" 网卡模式 或 "proxy" 代理模式
-	DisableHTTP2              int    `json:"disable_http2"`                 //对外HTTP/2开关 0启用 1关闭(该站点只走http/1.1,兼容原生WebSocket客户端)
-	IsEnableResponseBuffering int    `json:"is_enable_response_buffering"`  //响应缓冲 1开启(默认) 0关闭(类似 nginx proxy_buffering off)
+	DisableHTTP2              int    `json:"disable_http2"`                //对外HTTP/2开关 0启用 1关闭(该站点只走http/1.1,兼容原生WebSocket客户端)
+	IsEnableResponseBuffering int    `json:"is_enable_response_buffering"` //响应缓冲 1开启(默认) 0关闭(类似 nginx proxy_buffering off)
 	AccessJSON                string `json:"access_json"`                  //统一访问认证(Access模式)站点级配置 json
 	IPSourceMode              string `json:"ip_source_mode"`               //真实IP来源模式: ""(兼容,取XFF最左) | nic | header | xff_depth | cdn_preset
 	IPTrustDepth              int    `json:"ip_trust_depth"`               //xff_depth 模式：从右往左取第 N 个 hop(默认1)
 	IPRealHeader              string `json:"ip_real_header"`               //header/cdn_preset 模式指定的真实IP头，如 CF-Connecting-IP
 	IPTrustProxies            string `json:"ip_trust_proxies"`             //可信代理网段(CIDR/IP，逗号分隔)，用于校验真实IP头来源
 	CDNProvider               string `json:"cdn_provider"`                 //cdn_preset 模式选择的 CDN 厂商码
+	GroupCode                 string `json:"group_code"`                   //所属分组短码，空=未分组（纯管理端组织维度，不下发引擎）
+	// PortListensJSON 端口监听表(JSON)。指针语义：nil=本次请求未携带该字段(老前端/脚本)，
+	// 落库时保持原值不动；非 nil(含空串)才写库。防止旧客户端把端口表抹空导致协议突变。
+	PortListensJSON *string `json:"port_listens_json"`
 }
+
+// WafHostCheckPortsReq 保存前端口监听表预检（新增时 code 传空）
+type WafHostCheckPortsReq struct {
+	CODE            string `json:"code"`
+	Port            int    `json:"port"`
+	Ssl             int    `json:"ssl"`
+	AutoJumpHTTPS   int    `json:"auto_jump_https"`
+	PortListensJSON string `json:"port_listens_json"`
+}
+
 type WafHostGuardStatusReq struct {
-	CODE         string `json:"code"`
-	GUARD_STATUS int    `json:"guard_status"` //防御状态 1 是开启防御 0 是防御关闭
+	CODE         string `json:"code" form:"code" binding:"required"`
+	GUARD_STATUS int    `json:"guard_status" form:"guard_status"` //防御状态 1 是开启防御 0 是防御关闭
 }
 
 type WafHostSearchReq struct {
-	Code           string `json:"code" `                                  //主机码
-	REMARKS        string `json:"remarks"`                                //备注
+	Code    string `json:"code" `   //主机码
+	REMARKS string `json:"remarks"` //备注
+	// GroupCode 分组筛选：走精确匹配，不并入 FilterBy 那条 like 通道
+	// （短码走 like 会出现 "a" 命中 "abc" 的串组）。
+	// 传 model.HostGroupNone 表示只看未分组。
+	GroupCode      string `json:"group_code" form:"group_code"`
 	SortBy         string `json:"sort_by" form:"sort_by"`                 //排序字段
 	SortDescending string `json:"sort_descending" form:"sort_descending"` //排序方式
 	FilterBy       string `json:"filter_by" form:"filter_by"`             //筛选字段
@@ -137,8 +161,8 @@ type WafHostSearchReq struct {
 }
 
 type WafHostStartStatusReq struct {
-	CODE         string `json:"code"`
-	START_STATUS int    `json:"start_status"` //启动状态
+	CODE         string `json:"code" form:"code" binding:"required"`
+	START_STATUS int    `json:"start_status" form:"start_status"` //启动状态
 }
 
 type WafHostAllDomainsReq struct {

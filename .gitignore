@@ -24,6 +24,8 @@ dist/
 /.trae/
 /.cursor/
 /.claude/
+/.agents/
+/AGENTS.md
 /docs/openapi/
 /.data/
 .gocache/
@@ -33,3 +35,9 @@ dist/
 # 只挡 wafsec/ 下这两个固定文件名，不影响内嵌资源 cmd/samwaf/exedata/public_key.pem。
 /wafsec/private_key.pem
 /wafsec/public_key.pem
+/wafinit/testdata
+/download/
+
+# go test 各包时按包目录创建的日志导出跨进程锁文件（每包一份，互不争用）
+**/data/.samwaf_log_lifecycle.lock
+**/data/.samwaf_log_export_executor.lock

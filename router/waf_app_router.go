@@ -11,13 +11,16 @@ type WafAppRouter struct{}
 func (r *WafAppRouter) InitWafAppRouter(group *gin.RouterGroup) {
 	appApi := api.APIGroupAPP.WafAppApi
 
-	// 功能开关守卫：application_manage: false 时全部返回 403
+	group.GET("/api/v1/application/app/feature_status", appApi.GetFeatureStatusApi)
+
+	// 应用操作在 application_manage: false 时返回 403
 	appGroup := group.Group("", middleware.AppManageEnabled())
 
 	// 只读 / 低风险操作（无需操作密码）
 	// stop 也在此组：停止已有进程属低风险，不引入新危险能力
 	appGroup.POST("/api/v1/application/app/list", appApi.GetListApi)
 	appGroup.GET("/api/v1/application/app/detail", appApi.GetDetailApi)
+	appGroup.POST("/api/v1/application/app/directory_preview", appApi.DirectoryPreviewApi)
 	appGroup.GET("/api/v1/application/app/status", appApi.GetStatusApi)
 	appGroup.GET("/api/v1/application/app/logs", appApi.GetLogsApi)
 	appGroup.GET("/api/v1/application/app/backups", appApi.GetBackupsApi)

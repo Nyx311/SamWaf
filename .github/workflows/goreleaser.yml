@@ -7,13 +7,16 @@ on:
 
 permissions:
   contents: write
+  issues: read
+  pull-requests: read
 env:
   REGISTRY: docker.io
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 jobs:
   # Linux 和 Windows 编译任务
   goreleaser-linux-windows:
-    runs-on: ubuntu-latest
+    # 固定 24.04：26.04 runner 上的 musl 是 x86-64-v3 构建，静态链接后的产物在无 AVX2/BMI 的 CPU 上启动即 SIGILL
+    runs-on: ubuntu-24.04
     # 卡死保护：apt/网络挂住时快速失败，而不是烧满 6 小时默认上限
     timeout-minutes: 60
     steps:
@@ -21,6 +24,8 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Test release acknowledgements
+        run: node --test .github/scripts/release_acknowledgements.test.cjs
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
@@ -32,7 +37,7 @@ jobs:
           # 等哪天在 main 上加了缓存预热 job（默认分支的缓存所有 ref 都能读），再把这里改回 true。
           cache: false
       
-      # 说明：tar/gzip/wget/curl 是 ubuntu-latest 镜像自带的，原来的 "Install basic tools"
+      # 说明：tar/gzip/wget/curl 是 ubuntu runner 镜像自带的，原来的 "Install basic tools"
       # 步骤只是白跑一次 apt，却是 2026-08-19 卡住 72 分钟的那一步，已删除。
       - name: Install dependencies for cross-compilation
         timeout-minutes: 15
@@ -49,6 +54,20 @@ jobs:
           CGO_ENABLED: 1
           # 设置环境变量跳过macOS编译
           SKIP_MACOS: "true"
+      - name: Add release acknowledgements
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { updateRelease } = require('./.github/scripts/release_acknowledgements.cjs');
+            await updateRelease({
+              github, core,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag: process.env.GITHUB_REF_NAME,
+              exclude: ['samwafgo'],
+            });
       - name: List Folder
         run: |
           ls
@@ -163,13 +182,8 @@ jobs:
           cache: false
       
       - name: Download SamWafWeb
-        run: |
-          curl -fSL --retry 3 --retry-all-errors --connect-timeout 15 --max-time 300             https://github.com/samwafgo/SamWafWeb/releases/latest/download/dist.tar.gz -o dist.tar.gz
-          tar -zxvf dist.tar.gz
-          rm -rf public/dist
-          mv -f dist public
-          rm -rf dist.tar.gz
-      
+        run: bash .github/scripts/fetch_web_dist.sh
+
       - name: Check if should build macOS
         id: check_macos
         run: |
@@ -232,7 +246,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   win7win2008r2:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - name: Check if should build Win7
@@ -277,11 +291,7 @@ jobs:
       - name: DownLoad New SamWafWeb
         if: steps.check_win7_build.outputs.skip_win7_build != 'true'
         run: |
-          curl -fSL --retry 3 --retry-all-errors --connect-timeout 15 --max-time 300             https://github.com/samwafgo/SamWafWeb/releases/latest/download/dist.tar.gz -o dist.tar.gz
-          tar -zxvf dist.tar.gz
-          rm -rf public/dist
-          mv -f dist public
-          rm -rf dist.tar.gz
+          bash .github/scripts/fetch_web_dist.sh
           ls
           ls public
           ls public/dist
@@ -327,9 +337,38 @@ jobs:
           name: SamWaf64ForWin7Win8Win2008
           path: release/SamWaf64ForWin7Win8Win2008.exe
       
-      - name: Release 
+      - name: Release
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/')
         with:
           files: |
             release/SamWaf64ForWin7Win8Win2008.exe
+
+  # 汇总全部资产的校验清单：三个编译任务各自只上传自己构建的产物，
+  # 任何单一任务生成的 checksums 都会漏掉其余平台的资产。
+  # 这里等三者全部完成、release 资产齐了以后统一下载、统一算 SHA256。
+  release-checksums:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    needs: [goreleaser-linux-windows, goreleaser-macos, win7win2008r2]
+    steps:
+      - name: Aggregate release checksums
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          VER_NUM="${TAG#v}"
+
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir assets
+
+          # 清掉 release 上已有的校验清单（历史版本可能是不同任务生成的），只保留产物
+          rm -f assets/*checksums*.txt
+
+          cd assets
+          # 条目名沿用历史格式：文件名里的 ".<tag>" 记作 " <tag>"（空格形态）。
+          # GitHub 落盘资产名会把空格转成点，install_samwaf.sh 与
+          # download-release.sh 两个消费端都是按空格形态解析的。
+          sha256sum * | sed "s/\.${TAG}/ ${TAG}/" > "SamWaf_${VER_NUM}_checksums.txt"
+          cat "SamWaf_${VER_NUM}_checksums.txt"
+
+          gh release upload "$TAG" "SamWaf_${VER_NUM}_checksums.txt" --repo "$GITHUB_REPOSITORY" --clobber

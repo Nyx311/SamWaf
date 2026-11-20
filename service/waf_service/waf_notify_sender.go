@@ -216,21 +216,21 @@ func (receiver *WafNotifySenderService) deliverToChannel(channel model.NotifyCha
 	subscription model.NotifySubscription, messageType, title, content string) (recipients string, err error) {
 	switch channel.Type {
 	case "dingtalk":
-		if ok, reason := utils.IsSafeOutboundURL(channel.WebhookURL); !ok {
+		if ok, reason := utils.IsAllowedOutboundURL(channel.WebhookURL); !ok {
 			err = fmt.Errorf("WebhookURL 目标不被允许: %s", reason)
 		} else {
 			notifier := dingtalk.NewDingTalkNotifier(channel.WebhookURL, channel.Secret)
 			err = notifier.SendMarkdown(title, content)
 		}
 	case "feishu":
-		if ok, reason := utils.IsSafeOutboundURL(channel.WebhookURL); !ok {
+		if ok, reason := utils.IsAllowedOutboundURL(channel.WebhookURL); !ok {
 			err = fmt.Errorf("WebhookURL 目标不被允许: %s", reason)
 		} else {
 			notifier := feishu.NewFeishuNotifier(channel.WebhookURL, channel.Secret)
 			err = notifier.SendMarkdown(title, content)
 		}
 	case "wechatwork":
-		if ok, reason := utils.IsSafeOutboundURL(channel.WebhookURL); !ok {
+		if ok, reason := utils.IsAllowedOutboundURL(channel.WebhookURL); !ok {
 			err = fmt.Errorf("WebhookURL 目标不被允许: %s", reason)
 		} else {
 			notifier := wechatwork.NewWechatWorkNotifier(channel.WebhookURL)
@@ -505,6 +505,9 @@ func (receiver *WafNotifySenderService) FormatAccessMessageFromBean(msg innerbea
 func (receiver *WafNotifySenderService) FormatAttackInfoMessageFromBean(msg innerbean.AttackInfoMessageInfo) (string, string, string) {
 	messageType := "attack_info" // 攻击信息类型
 	title, content := receiver.FormatAttackInfoMessage(msg.AttackType, msg.Url, msg.Ip, msg.Time)
+	if msg.Domain != "" {
+		content = "**域名:** " + msg.Domain + "\n\n" + content
+	}
 	return messageType, title, content
 }
 

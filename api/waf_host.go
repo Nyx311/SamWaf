@@ -1,6 +1,7 @@
 package api
 
 import (
+	"SamWaf/common/zlog"
 	"SamWaf/enums"
 	"SamWaf/global"
 	"SamWaf/globalobj"
@@ -15,6 +16,7 @@ import (
 	"SamWaf/utils"
 	"SamWaf/wafenginecore"
 	"SamWaf/wafenginecore/clientip"
+	"SamWaf/wafenginecore/ipset"
 	"errors"
 	"fmt"
 	"net"
@@ -105,6 +107,30 @@ func checkIPSourceConfig(cfg *ipSourceConfig) error {
 	return nil
 }
 
+// checkExcludeIPLog 校验「排除记录日志的IP」清单：长度封顶 + 每行必须是可解析的
+// IP 模式（单IP/CIDR/通配符/区间）或 group:组短码。保存时拒绝，避免配错一行静默不生效。
+func checkExcludeIPLog(raw string) error {
+	if len(raw) > 10000 {
+		return errors.New("排除记录日志的IP清单过长（上限10000字符）")
+	}
+	for _, line := range strings.FieldsFunc(raw, func(r rune) bool { return r == '\n' || r == '\r' || r == ',' }) {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if len(line) >= len("group:") && strings.EqualFold(line[:len("group:")], "group:") {
+			if strings.TrimSpace(line[len("group:"):]) == "" {
+				return errors.New("排除清单里的 group: 后面缺少组短码")
+			}
+			continue
+		}
+		if _, err := ipset.ParsePatternLenient(line); err != nil {
+			return fmt.Errorf("排除清单无法识别的IP模式: %s", line)
+		}
+	}
+	return nil
+}
+
 // checkCDNPresetTrustSource cdn_preset 模式必须至少有一个可信来源可用(中心库回源段 或 手填可信网段)。
 //
 // 缺了它保存下去不是"少一层校验"，而是静默降级成更危险的状态：来源判定恒为 false，
@@ -152,6 +178,25 @@ func (w *WafHostAPi) AddApi(c *gin.Context) {
 		req.IPSourceMode, req.IPTrustDepth, req.IPRealHeader = ipCfg.Mode, ipCfg.Depth, ipCfg.Header
 		req.IPTrustProxies, req.CDNProvider = ipCfg.TrustProxies, ipCfg.Provider
 
+		if verr := checkExcludeIPLog(req.EXCLUDE_IP_LOG); verr != nil {
+			response.FailWithMessage(verr.Error(), c)
+			return
+		}
+		if verr := checkCustomRequestHost(req.CustomHeadersJSON); verr != nil {
+			response.FailWithMessage(verr.Error(), c)
+			return
+		}
+		// 端口监听表校验（issue #955）：仅当本次显式携带时才阻断（脏数据/addr预留/HTTPS无证书一律拒绝）
+		listens, verr := wafHostService.ValidatePortListensReq(req.PortListensJSON, req.Port, req.Ssl, req.AutoJumpHTTPS)
+		if verr != nil {
+			response.FailWithMessage(verr.Error(), c)
+			return
+		}
+		if conflicts := wafHostService.CheckPortListensConflict("", listens); len(conflicts) > 0 {
+			response.FailWithMessage(waf_service.FormatListenConflicts(conflicts), c)
+			return
+		}
+
 		//端口从未在本系统加过，检测端口是否被其他应用占用
 		_, svrOk := globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.ServerOnline.Get(req.Port)
 		if !svrOk && utils.PortCheck(req.Port) == false {
@@ -168,6 +213,11 @@ func (w *WafHostAPi) AddApi(c *gin.Context) {
 		if err != nil && errors.Is(err, gorm.ErrRecordNotFound) {
 			hostCode, err := wafHostService.AddApi(req)
 			if err == nil {
+				// 给新站点铺一套开箱可用的 CC 规则。失败只记日志：
+				// 建站本身已经成功，不该因为附带的默认规则没生成而让用户以为建站失败。
+				if ruleErr := wafAntiCCRuleService.CreateDefaultRules(hostCode); ruleErr != nil {
+					zlog.Warn("生成默认CC规则失败", ruleErr)
+				}
 				w.NotifyWaf(hostCode, nil)
 				response.OkWithDetailed(hostCode, "添加成功", c)
 			} else {
@@ -235,7 +285,12 @@ func (w *WafHostAPi) GetDetailApi(c *gin.Context) {
 	err := c.ShouldBind(&req)
 	if err == nil {
 		wafHost := wafHostService.GetDetailApi(req)
-		response.OkWithDetailed(wafHost, "获取成功", c)
+		// resolved_listens：当前真实生效的端口监听表（含空表派生），前端端口区按它渲染
+		detail := struct {
+			model.Hosts
+			ResolvedListens []utils.HostListen `json:"resolved_listens"`
+		}{Hosts: wafHost, ResolvedListens: utils.ResolveHostListens(wafHost)}
+		response.OkWithDetailed(detail, "获取成功", c)
 	} else {
 		response.FailWithMessage("解析失败", c)
 	}
@@ -255,7 +310,11 @@ func (w *WafHostAPi) GetListApi(c *gin.Context) {
 	var req request.WafHostSearchReq
 	err := c.ShouldBindJSON(&req)
 	if err == nil {
-		wafHosts, total, _ := wafHostService.GetListApi(req)
+		wafHosts, total, queryErr := wafHostService.GetListApi(req)
+		if queryErr != nil {
+			response.FailWithMessage(queryErr.Error(), c)
+			return
+		}
 		hostCodes := make([]string, 0, len(wafHosts))
 		for _, srcHost := range wafHosts {
 			if srcHost.Code != "" {
@@ -263,6 +322,7 @@ func (w *WafHostAPi) GetListApi(c *gin.Context) {
 			}
 		}
 		todayStatsMap := waf_service.WafStatServiceApp.GetTodaySiteStatsByHostCodes(hostCodes)
+		conflictCodes := wafHostService.HostPortConflictCodes()
 		// 初始化返回结果列表
 		var repList []response2.HostRep
 		for _, srcHost := range wafHosts {
@@ -293,6 +353,8 @@ func (w *WafHostAPi) GetListApi(c *gin.Context) {
 				TodayTrafficIn:     todayStatsMap[srcHost.Code].TodayTrafficIn,
 				TodayTrafficOut:    todayStatsMap[srcHost.Code].TodayTrafficOut,
 				HealthyStatus:      healthy,
+				PortConflict:       conflictCodes[srcHost.Code],
+				ResolvedListens:    utils.ResolveHostListens(srcHost),
 			}
 			repList = append(repList, rep)
 		}
@@ -306,37 +368,19 @@ func (w *WafHostAPi) GetListApi(c *gin.Context) {
 		response.FailWithMessage("解析失败", c)
 	}
 }
+
+// HostDisplayName 站点显示名。实现在 model.Hosts.DisplayName——
+// service 层也要用它，而 service 不能反向依赖 api。
+func HostDisplayName(h model.Hosts) string {
+	return h.DisplayName()
+}
+
 func (w *WafHostAPi) GetAllListApi(c *gin.Context) {
 	wafHosts := wafHostService.GetAllHostApi()
 	allHostRep := make([]response2.AllHostRep, len(wafHosts)) // 创建数组
 	for i, _ := range wafHosts {
-		var hostDisplay string
 		var preHost string = fmt.Sprintf("%s:%d", wafHosts[i].Host, wafHosts[i].Port)
-
-		// 构建括号内的内容
-		var bracketContent []string
-
-		// 如果有昵称，优先显示昵称
-		if wafHosts[i].Nickname != "" {
-			bracketContent = append(bracketContent, wafHosts[i].Nickname)
-		}
-
-		// 如果是SSL，添加SSL标识
-		if wafHosts[i].Ssl == 1 {
-			bracketContent = append(bracketContent, "SSL")
-		}
-
-		// 如果有备注，添加备注
-		if wafHosts[i].REMARKS != "" {
-			bracketContent = append(bracketContent, wafHosts[i].REMARKS)
-		}
-
-		// 构建最终的Host显示字符串
-		if len(bracketContent) > 0 {
-			hostDisplay = fmt.Sprintf("%s:%d(%s)", wafHosts[i].Host, wafHosts[i].Port, strings.Join(bracketContent, ","))
-		} else {
-			hostDisplay = fmt.Sprintf("%s:%d", wafHosts[i].Host, wafHosts[i].Port)
-		}
+		hostDisplay := HostDisplayName(wafHosts[i])
 
 		allHostRep[i] = response2.AllHostRep{
 			Host:       hostDisplay,
@@ -344,6 +388,7 @@ func (w *WafHostAPi) GetAllListApi(c *gin.Context) {
 			PreHost:    preHost,
 			Nickname:   wafHosts[i].Nickname,
 			GlobalHost: wafHosts[i].GLOBAL_HOST,
+			GroupCode:  wafHosts[i].GroupCode,
 		}
 	}
 	response.OkWithDetailed(allHostRep, "获取成功", c)
@@ -439,6 +484,27 @@ func (w *WafHostAPi) ModifyHostApi(c *gin.Context) {
 		req.IPTrustProxies, req.CDNProvider = ipCfg.TrustProxies, ipCfg.Provider
 
 		wafHostOld := wafHostService.GetDetailByCodeApi(req.CODE)
+
+		if verr := checkExcludeIPLog(req.EXCLUDE_IP_LOG); verr != nil {
+			response.FailWithMessage(verr.Error(), c)
+			return
+		}
+		if verr := checkCustomRequestHost(req.CustomHeadersJSON); verr != nil {
+			response.FailWithMessage(verr.Error(), c)
+			return
+		}
+		// 端口监听表校验（issue #955）：nil=本次未携带（旧前端），不校验不阻断（存量冲突不能卡死普通编辑）
+		if req.PortListensJSON != nil && strings.TrimSpace(*req.PortListensJSON) != "" {
+			listens, verr := wafHostService.ValidatePortListensReq(*req.PortListensJSON, req.Port, req.Ssl, req.AutoJumpHTTPS)
+			if verr != nil {
+				response.FailWithMessage(verr.Error(), c)
+				return
+			}
+			if conflicts := wafHostService.CheckPortListensConflict(req.CODE, listens); len(conflicts) > 0 {
+				response.FailWithMessage(waf_service.FormatListenConflicts(conflicts), c)
+				return
+			}
+		}
 		//端口从未在本系统加过，检测端口是否被其他应用占用
 
 		_, svrOk := globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.ServerOnline.Get(req.Port)
@@ -455,6 +521,10 @@ func (w *WafHostAPi) ModifyHostApi(c *gin.Context) {
 		if err != nil {
 			response.FailWithMessage("编辑发生错误", c)
 		} else {
+			// 健康检测配置变化时重置该站点的健康计票：关闭后立即清除旧状态，开启后从头计票
+			if wafHostOld.HealthyJSON != req.HealthyJSON {
+				wafenginecore.CleanupHostHealthStatus(req.CODE)
+			}
 			w.NotifyWaf(req.CODE, wafHostOld)
 			response.OkWithMessage("编辑成功", c)
 		}
@@ -470,7 +540,8 @@ func (w *WafHostAPi) ModifyHostApi(c *gin.Context) {
 // @Tags         网站防护-主机管理
 // @Accept       json
 // @Produce      json
-// @Param        data  body      request.WafHostGuardStatusReq  true  "防御状态参数"
+// @Param        code          query     string  true  "主机唯一编码"
+// @Param        guard_status  query     int     true  "防御状态 1开启 0关闭"
 // @Success      200   {object}  response.Response  "状态更新成功"
 // @Security     ApiKeyAuth
 // @Router       /wafhost/host/guardstatus [get]
@@ -544,7 +615,8 @@ func (w *WafHostAPi) ModifyAllGuardStatusApi(c *gin.Context) {
 // @Tags         网站防护-主机管理
 // @Accept       json
 // @Produce      json
-// @Param        data  body      request.WafHostStartStatusReq  true  "启动状态参数"
+// @Param        code          query     string  true  "主机唯一编码"
+// @Param        start_status  query     int     true  "启动状态 1启动 0停止"
 // @Success      200   {object}  response.Response  "状态更新成功"
 // @Security     ApiKeyAuth
 // @Router       /wafhost/host/startstatus [get]
@@ -585,6 +657,68 @@ func (w *WafHostAPi) ModifyStartStatusApi(c *gin.Context) {
 *
 通知到waf引擎实时生效
 */
+// CheckPortsApi 保存前预检端口监听表
+// @Summary      预检端口监听表
+// @Description  校验端口监听表合法性并返回与其它站点的协议冲突明细（不落库）
+// @Tags         网站防护-主机管理
+// @Accept       json
+// @Produce      json
+// @Param        data  body      request.WafHostCheckPortsReq  true  "预检参数"
+// @Success      200   {object}  response.Response  "检测完成"
+// @Security     ApiKeyAuth
+// @Router       /wafhost/host/checkports [post]
+func (w *WafHostAPi) CheckPortsApi(c *gin.Context) {
+	var req request.WafHostCheckPortsReq
+	err := c.ShouldBindJSON(&req)
+	if err != nil {
+		response.FailWithMessage("解析失败", c)
+		return
+	}
+	listens, verr := wafHostService.ValidatePortListensReq(req.PortListensJSON, req.Port, req.Ssl, req.AutoJumpHTTPS)
+	if verr != nil {
+		response.FailWithMessage(verr.Error(), c)
+		return
+	}
+	conflicts := wafHostService.CheckPortListensConflict(req.CODE, listens)
+	response.OkWithDetailed(gin.H{
+		"conflicts": conflicts,
+		"message":   waf_service.FormatListenConflicts(conflicts),
+	}, "检测完成", c)
+}
+
+// GetPortOverviewApi 端口占用总览
+// @Summary      端口占用总览
+// @Description  全机端口→协议→占用站点汇总，含冲突标记与当前实际监听状态
+// @Tags         网站防护-主机管理
+// @Accept       json
+// @Produce      json
+// @Success      200  {object}  response.Response  "获取成功"
+// @Security     ApiKeyAuth
+// @Router       /wafhost/port/overview [get]
+func (w *WafHostAPi) GetPortOverviewApi(c *gin.Context) {
+	rows := wafHostService.GetPortOverviewApi()
+	type overviewRow struct {
+		waf_service.PortOverviewRow
+		Online      bool   `json:"online"`       //该端口当前是否有监听
+		ActiveProto string `json:"active_proto"` //实际生效协议（先加载者）
+		ActiveIpv   string `json:"active_ipv"`   //实际生效IP版本
+	}
+	result := make([]overviewRow, 0, len(rows))
+	for _, row := range rows {
+		item := overviewRow{PortOverviewRow: row}
+		if sr, ok := globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.ServerOnline.Get(row.Port); ok {
+			item.Online = true
+			item.ActiveProto = sr.ServerType
+			item.ActiveIpv = sr.IPVersion
+			if item.ActiveIpv == "" {
+				item.ActiveIpv = utils.ListenIPVBoth
+			}
+		}
+		result = append(result, item)
+	}
+	response.OkWithDetailed(result, "获取成功", c)
+}
+
 func (w *WafHostAPi) NotifyWaf(hostCode string, oldHostInterface interface{}) {
 
 	var hosts []model.Hosts

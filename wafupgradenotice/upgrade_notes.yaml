@@ -12,6 +12,460 @@
 #   5. fresh_install: true 的条目只在"全新安装"时生成，不参与版本区间计算
 
 notes:
+  - id: v1_3_26_log_event_fold
+    version: v1.3.26
+    kind: notice
+    level: normal
+    page: /waf/wafvisitlog
+    apply:
+      type: navigate
+    zh:
+      title: 新增同类安全事件折叠选项，日志消费不再空等
+      detail: >-
+        系统配置新增「同类安全事件折叠」：同一「站点+来源IP+命中规则」的安全事件，每分钟最多落库 K 条完整明细（含报文），
+        超出的部分不再写明细表。被折叠的部分照常计入访问统计、IP 画像、CC 计数与封禁判断，
+        文件日志与 Kafka 外送也不受影响——面板上的数量、封禁行为与原来完全一致，
+        只有日志列表里的明细条数在开启后于请求高峰期会变少。默认 0（不折叠），升级后行为与旧版本一致；
+        遭受大批量同类请求、日志队列积压时可设为 5 等较小值，把明细写入量压到 K 条/分钟/来源。
+        同时批量插入数量默认值由 100 提高到 500（消费协程在队列有积压时不再空等，落库语句按固定大小分块）。
+        仍停在批量插入旧默认值 100 的实例会在下次启动时自动升到 500，自行调整过该值的实例不受影响。
+      revert: 系统配置把「同类安全事件折叠」设为 0 即每分钟全量明细；高写入量场景建议设为 5 并配合批量插入 500。
+    en:
+      title: New option to fold repeated security events; log consumer no longer idles
+      detail: >-
+        A new system config "Fold repeated security events" is added: for security events sharing the same
+        site, source IP and matched rule, at most K full records (with payload) are stored per minute;
+        additional events skip the detail tables. Folded events are still counted in visit statistics,
+        IP tags, CC counters and ban decisions, and file logging / Kafka export are unaffected —
+        dashboard numbers and blocking behave exactly as before; only the number of detail rows in the log
+        lists shrinks once the option is enabled. The default is 0 (off), so behavior after upgrading is
+        unchanged from older versions; when facing mass identical requests or a log queue backlog,
+        set it to a small value such as 5 to cap detail writes at K records per minute per source.
+        The default batch insert size is also raised from 100 to 500 (the consumer no longer sleeps while
+        the queue has a backlog; insert statements are split into fixed-size chunks). Instances still on
+        the old default 100 are migrated to 500 on next startup; instances with a user-tuned value are left untouched.
+      revert: Set "Fold repeated security events" to 0 in system config for full per-minute detail; for high-write scenarios set it to 5 together with batch insert 500.
+
+  - id: v1_3_26_account_session_state
+    version: v1.3.26
+    kind: notice
+    level: normal
+    page: /account/Account
+    apply:
+      type: navigate
+    zh:
+      title: 管理会话随账号变更失效
+      detail: >-
+        删除管理账号，或修改其角色、登录名、状态后，该账号的网页端与移动端会话均需重新登录；
+        管理员重置密码后同样需要重新登录；仅修改备注不影响会话。认证同时核对当前账号和持久会话，重启后继续执行相同校验。
+        账号状态 0 与 1 均沿用现有登录行为，自助修改密码后可继续使用当前会话，初始及重置密码仍需先完成改密。
+        数据库或缓存暂时不可用时提示稍后重试并保留客户端登录状态，恢复后可继续操作。
+      revert: 无需调整配置或数据库结构；账号变更后请使用当前登录名重新登录。
+    en:
+      title: Management sessions follow account changes
+      detail: >-
+        Deleting a management account or changing its role, login name or status requires its web and mobile sessions
+        to sign in again; an administrator password reset also requires signing in again. Editing remarks alone keeps sessions active.
+        Authentication checks both the current account and its persisted session, including after restart. Status values 0 and 1 retain their existing login behavior.
+        Self-service password changes keep the current session; initial and reset passwords still require a password change first.
+        Temporary database or cache failures ask for a retry and preserve the client login state so work can continue after recovery.
+      revert: No configuration or schema changes are required. Sign in with the current login name after account changes.
+
+  - id: v1_3_26_security_report
+    version: v1.3.26
+    kind: notice
+    level: normal
+    page: /waf/security-report
+    apply:
+      type: navigate
+    zh:
+      title: 新增安全运营报告中心
+      detail: >-
+        新增日、周、月安全运营报告，默认按服务器本地时区在下一周期开始后定时生成单文件离线 HTML，
+        也可手动生成、预览与下载；只汇总统计层数据与当前配置快照，不扫请求明细。
+        首次开启后不会自动补写启用前的历史周期，更早周期可在页面手动生成。
+        报告统一保存在本机固定目录并按保留天数与磁盘配额自动清理。
+        定时报告完成后会按现有「日报、周报、月报」订阅投递摘要；未启用相关订阅或渠道时不外发，也不会自动创建订阅。
+        仅在活动的本机 Worker 中生成，重启会接续未完成任务并避免蓝绿升级重复生成。
+      revert: 关闭任一分项或总开关后仅停止自动定时，手动生成与已有产物保留；缩减保留天数或配额会尽快按新上限清理产物。
+    en:
+      title: Security operations report center added
+      detail: >-
+        Daily, weekly and monthly security reports are generated as single-file offline HTML in the server local time zone
+        after each closed period begins, with manual create, preview and download also supported. Reports aggregate the stats layer and the current configuration snapshot only; request payloads are not scanned. After first enablement, closed periods before enablement are not auto-generated; older periods can be created manually.
+        Reports stay in a fixed local directory and are cleaned by retention days and disk quota.
+        A scheduled report completion is delivered through the existing Daily/Weekly/Monthly Report subscriptions; nothing is sent when subscriptions or channels are not configured, and no subscription is created automatically.
+        Generation runs only in the active local Worker and resumes unfinished work after restart without duplicating blue-green upgrades.
+      revert: Turning off any schedule or the master switch only stops automatic generation; manual creation and existing artifacts remain. Reducing retention or quota applies the new caps during cleanup.
+
+  - id: v1_3_25_large_upload_body
+    version: v1.3.25
+    kind: notice
+    level: normal
+    apply:
+      type: none
+    zh:
+      title: 放行的大文件上传完整回源
+      detail: >-
+        允许回源的上传会保留完整请求体。启用 OWASP 时，multipart 表单按 OWASP 的请求体上限和检测字节上限处理。
+        如需支持较大的文件，请按完整表单大小检查这两项，以及站点和源站的上传限制。
+      revert: 已有上传限制继续由各自的配置控制。
+    en:
+      title: Allowed large uploads reach the origin intact
+      detail: >-
+        Allowed uploads reach the origin with the complete request body. When OWASP is enabled, multipart forms use its
+        request body and inspection byte limits. For larger uploads, check those settings against the size of the entire
+        multipart form, along with the site and origin limits.
+      revert: Existing upload limits are controlled by their respective settings.
+
+  - id: v1_3_25_custom_origin_host
+    version: v1.3.25
+    kind: check
+    level: normal
+    page: /waf-host/wafhost
+    apply:
+      type: navigate
+    zh:
+      title: 网站自定义回源 Host 开始生效
+      detail: >-
+        网站「自定义请求头」中已启用的有效 Host 配置会在升级后生效，优先于「传递后端域名」。
+        可填具体域名或 IP（可带端口），也可填 ${host} 保留访客 Host，或填 ${hostname} 只传访客主机名。
+        请核对已保存的 Host 值是否符合源站的虚拟主机配置。
+      revert: 删除自定义 Host 项或将值留空，即恢复按「传递后端域名」开关决定回源 Host。
+    en:
+      title: Custom origin Host settings take effect
+      detail: >-
+        After upgrading, valid Host entries in enabled custom request headers take precedence over the
+        Pass backend domain setting. Enter a concrete domain name or IP with an optional port, ${host} to keep
+        the visitor Host, or ${hostname} to send only the visitor hostname. Check saved values against your origin virtual host settings.
+      revert: Remove the custom Host entry or leave it empty to use the Pass backend domain setting again.
+
+  - id: v1_3_25_https_redirect_bound_domains
+    version: v1.3.25
+    kind: check
+    level: normal
+    page: /waf-host/wafhost
+    apply:
+      type: navigate
+    zh:
+      title: 绑定域名遵循本站的 HTTPS 跳转设置
+      detail: >-
+        HTTPS 站点开启「强制80跳转HTTPS」时，绑定域名的 HTTP 请求也会跳转到该访问域名的 HTTPS 地址。
+        升级前请确认 TLS 证书覆盖每个使用的域名。
+      revert: 如需允许本站通过已配置的 HTTP 端口访问，可关闭该站点的「强制80跳转HTTPS」。
+    en:
+      title: Bound domains follow the site's HTTPS redirect setting
+      detail: >-
+        When an HTTPS site has its port 80 redirect enabled, HTTP requests for bound domains also redirect
+        to HTTPS on the requested domain. Check that your TLS certificate covers each domain in use before upgrading.
+      revert: To allow access over a configured HTTP listener, turn off the HTTPS redirect for that site.
+
+  - id: v1_3_25_log_record_bounds
+    version: v1.3.25
+    kind: check
+    level: normal
+    apply:
+      type: none
+    zh:
+      title: 日志报文按实际内容限长保存
+      detail: >-
+        开启响应报文记录后，超长正文保留前一段，而不再按传输长度决定是否整段省略。
+        请求正文、表单与响应正文的落库副本分别遵守 record_max_req_body_length、record_max_res_body_length 的正数配置，
+        同时受单字段 65535 字节上限约束；其他日志文本按对应字段容量保存。
+        文本保存时保持 UTF-8 字符完整并清理不支持的字节，发生裁剪或清理时标记为截断。
+        原有安全事件留痕策略保留；响应上限非正数时不采集普通响应正文。
+        请求上限非正数时沿用原有请求采集路径，已采集报文按数据库上限保存。
+        客户端收到的业务响应及原始日志出口不因落库限长而改变，历史缺失报文不会回填。
+      revert: 无需调整数据库结构；可在系统参数中修改报文长度。需要完整业务响应时请在源站留存，日志详情可能只包含正文前段。
+    en:
+      title: Log payload storage uses actual content limits
+      detail: >-
+        When response recording is enabled, oversized bodies retain a prefix instead of being omitted based on transport length.
+        Persisted request bodies and forms use a positive record_max_req_body_length; response bodies use a positive
+        record_max_res_body_length. Each field is also capped at 65535 bytes, and other log text respects its column capacity.
+        Stored text preserves complete UTF-8 characters and removes unsupported bytes; shortened or cleaned rows are marked truncated.
+        Existing security-event recording policies remain in place. A non-positive response limit disables ordinary response-body capture.
+        A non-positive request limit retains existing request-capture behavior; captured payloads use the database cap.
+        Client responses and original log exports remain unchanged.
+        Previously missing payloads are not backfilled.
+      revert: No schema changes are required. Adjust payload limits in system settings. Retain complete responses at the origin when needed; log details may contain only a body prefix.
+
+  - id: v1_3_25_notify_detection_classification
+    version: v1.3.25
+    kind: check
+    level: normal
+    apply:
+      type: none
+    zh:
+      title: 内置检测通知归入攻击信息
+      detail: >-
+        Bot、SQL 注入、XSS、扫描工具、RCE 与目录穿越这六类内置检测拦截后发送「攻击信息」，
+        请求与响应敏感词、自定义规则、名单等其他防护策略命中发送「规则触发」。每次命中只进入对应的一类通知，订阅的频控、过滤与模板仍按该类型生效。
+        如需接收内置检测通知，请启用「攻击信息」订阅；原先仅启用「规则触发」的用户请检查订阅设置。
+      revert: 在通知订阅中按需启用「攻击信息」和「规则触发」，分别检查两类订阅的渠道、过滤条件与频控。
+    en:
+      title: Built-in detection notifications use Attack Info
+      detail: >-
+        Built-in Bot, SQL injection, XSS, scanner, RCE and directory-traversal detections
+        send Attack Info; request/response sensitive-word policies, custom rules, blacklists and other protection policies send Rule Trigger. Each match enters only its
+        corresponding notification category, whose throttling, filters and templates still apply.
+        Enable an Attack Info subscription to receive built-in detection notifications; review your
+        subscriptions if you previously enabled only Rule Trigger.
+      revert: Enable Attack Info and Rule Trigger as needed in notification subscriptions, and check each category's channels, filters and throttling.
+
+  - id: v1_3_25_cli_site_automation
+    version: v1.3.25
+    kind: notice
+    level: normal
+    doc: https://doc.samwaf.com/guide/CLI.html
+    apply:
+      type: none
+    zh:
+      title: 新增本机命令行网站管理，未知命令退出码调整为 2
+      detail: >-
+        新增 apikey init 与 site list/get/apply/delete/start/stop 命令，可使用本机 API Key
+        查询、创建、合并修改和启停网站，支持 JSON 输出与批量配置。本机 Key 不受开放平台总开关影响，
+        仍按状态、有效期和白名单校验；请妥善保管 Key 文件。原有服务、维护及数据密钥命令名称不变。
+        未知命令的退出码由 0 调整为 2，使用命令行的脚本请检查退出码处理。
+    en:
+      title: Local CLI site management added; unknown commands now exit with code 2
+      detail: >-
+        New apikey init and site list/get/apply/delete/start/stop commands use a local API Key
+        to inspect, create, merge, start and stop websites, with JSON output and batch configuration.
+        Local Keys work independently of the global Open Platform switch while retaining status,
+        expiry and whitelist checks; keep the Key file private. Existing service, maintenance and
+        data key command names are unchanged. Unknown commands now return exit code 2 instead of 0;
+        review exit code handling in command-line scripts.
+
+  - id: v1_3_25_log_unified_export
+    version: v1.3.25
+    kind: notice
+    level: normal
+    page: /waf/wafvisitlog
+    apply:
+      type: navigate
+    zh:
+      title: 访问日志导出改为后台任务，支持 JSONL / CSV / 加密 SQLite
+      detail: >-
+        访问日志页新增「导出日志」：选择格式（JSONL 默认 / CSV / 加密 SQLite）与时间范围后创建后台导出任务，
+        支持 SQLite、MySQL、PostgreSQL 三种日志库，任务完成后在任务列表中凭短效票据下载 ZIP 包
+        （内含 manifest 校验清单与 README）。仅超级管理员可操作，且仍受全局「是否允许导出」开关控制；
+        导出内容仅包含 access_log 与 security_event 两张表，不含请求/响应报文与旧版 web_logs。
+        原「直接导出整个日志库文件」的接口已由任务接口（waflog/exports）替代，
+        旧接口返回 EXPORT_API_CHANGED 与迁移指引；如通过脚本对接，请改用任务接口。
+    en:
+      title: Access log export is now a background task with JSONL / CSV / encrypted SQLite
+      detail: >-
+        The visit log page gains "Export logs": pick a format (JSONL default / CSV / encrypted SQLite)
+        and a time range to create a background export task. SQLite, MySQL and PostgreSQL log databases
+        are all supported; when the task finishes, download the ZIP package (with manifest and README)
+        from the task list using a short-lived ticket. Only super administrators can operate it, and the
+        global "allow export" switch still applies. Exports contain only the access_log and security_event
+        tables - no request/response payloads and no legacy web_logs. The previous
+        "export the whole log database" endpoints are replaced by the task API (waflog/exports);
+        the old endpoints return EXPORT_API_CHANGED with migration guidance. If you integrate via
+        scripts, please switch to the task API.
+
+  - id: v1_3_25_hosts_excel_integer_import
+    version: v1.3.25
+    kind: check
+    level: low
+    page: /waf-host/wafhost
+    apply:
+      type: navigate
+    zh:
+      title: 网站 Excel 导入支持各位宽整数
+      detail: 网站 Excel 导入支持包括紧急模式到期时间在内的整数字段，转换错误会标明行号与字段，每行最多计一次失败。导入仍要求完整字段表头；旧文件缺少新增列时，请使用当前版本重新导出后填写。
+      revert: 无需调整配置；导入前请确认文件字段完整，并核对导入结果中的成功数和失败原因。
+    en:
+      title: Website Excel import supports all integer widths
+      detail: Website Excel import supports integer fields including the emergency-mode expiry time. Conversion errors identify the row and field, with at most one failure per row. A complete column header is still required; if an older file lacks new columns, export a fresh file from the current version before filling it in.
+      revert: No configuration changes are needed. Check that the file has all columns before import, then review the success count and failure reasons.
+
+  - id: v1_3_25_website_access_diagnostic
+    version: v1.3.25
+    kind: check
+    level: low
+    page: /wafhost/website-diagnostic
+    apply:
+      type: navigate
+    zh:
+      title: 网站列表新增网站访问诊断
+      detail: 网站列表顶部「网站访问诊断」可按已保存网站填写实际访问网址，从服务器分段检查配置匹配、本机入口、源站和访问地址，展示请求、响应、连接与证书证据及处理建议。GET/HEAD 检测会真实访问业务并正常经过认证、防护和访问日志；不会修改网站配置。
+      revert: 不使用该页面即可；诊断不会保存或改变网站配置。
+    en:
+      title: Website access diagnostics added to the site list
+      detail: The Website Access Diagnostic action in the site-list toolbar selects a saved website and visitor URL, then independently checks configuration matching, the local ingress, origins and the access URL from the server. It shows request, response, connection and certificate evidence with handling suggestions. GET/HEAD probes make real business requests that pass through authentication, protection and access logs; website settings are not changed.
+      revert: Simply do not use this page; diagnostics neither save nor change website settings.
+
+  - id: v1_3_25_app_manage_setup_guide
+    version: v1.3.25
+    kind: check
+    level: low
+    page: /application/AppList
+    apply:
+      type: navigate
+    zh:
+      title: 应用管理未开启时显示配置引导
+      detail: 应用管理页面会先检查功能状态；未开启时显示配置位置、开启方法与重启提示，开启后显示应用列表。启用功能与设置应用操作密码仍需由管理员在 conf/config.yml 中完成，页面不提供在线修改配置。
+      revert: 无需额外操作；修改 application_manage 配置并重启后，页面按当前功能状态显示。
+    en:
+      title: Setup guidance when application management is disabled
+      detail: The application management page checks the feature status first. When disabled, it shows the configuration location, setup steps and restart reminder; when enabled, it displays the application list. Administrators still enable the feature and set the application operation password in conf/config.yml. The page does not edit configuration online.
+      revert: No additional action is required. After changing application_manage and restarting, the page reflects the current feature status.
+
+  - id: v1_3_25_app_file_permissions
+    version: v1.3.25
+    kind: notice
+    level: normal
+    page: /application/AppList
+    apply:
+      type: navigate
+    zh:
+      title: 应用首次上传增加所有者执行权限，文件操作纳入审计
+      detail: Linux 首次上传文件时，在系统初始权限上增加所有者执行位，读写权限仍受 umask 限制。覆盖上传与升级沿用已有文件的普通权限，新备份保留源文件权限，回滚按备份权限恢复。新增应用、文件上传、升级及回滚等操作可在安全审计的应用管理分类中查看操作者与结果，不再写入系统日志；启动指令提交不代表应用已正常运行，请结合运行状态与日志确认。此前已丢失执行位的文件及历史备份仍需核对并修复权限。
+      revert: 无需调整配置；请按应用运行账号所需权限维护文件，已有备份不会自动补回历史权限。
+    en:
+      title: First application uploads receive owner execute permission, with application operations audited
+      detail: On Linux, first uploads add the owner's execute bit to the initial file permissions while read and write permissions remain subject to umask. File overwrites and upgrades preserve existing ordinary permissions; new backups retain source permissions, and rollback restores backup permissions. Application creation, uploads, upgrades, rollback and other operations appear under Application Management in Security Audit with the operator and result, and are no longer written to the system log. Submitting a start command does not confirm that the application is running normally; check its status and logs. Files and older backups that have already lost execute bits still require permission checks and correction.
+      revert: No configuration changes are required. Maintain permissions for the application's runtime account; historical backup permissions are not repaired automatically.
+
+  - id: v1_3_25_app_dir_preview_and_start_feedback
+    version: v1.3.25
+    kind: notice
+    level: normal
+    page: /application/AppList
+    apply:
+      type: navigate
+    zh:
+      title: 应用管理工作目录显示服务端实际路径，保存与启动失败会直接提示
+      detail: 新建/编辑应用时，工作目录下方会实时显示服务端解析后的绝对路径、允许目录范围和相对路径基准；留空时使用服务端默认目录。保存或启动失败时会在页面持续显示具体原因，不再只提示“指令已发送”。初始文件上传失败后，应用记录仍会保留，可直接在同一窗口修改配置并重试上传，不会重复创建应用。
+      revert: 无需调整配置；如需继续使用旧交互，可暂不升级前端或后端，但无法获得新的目录预检与失败提示。
+    en:
+      title: Application working directory now shows the server-resolved path, with direct save/start failure feedback
+      detail: When adding or editing an application, the working directory field now shows the server-resolved absolute path, allowed directory roots and the relative-path base in real time; leaving it blank uses the server default. Save or start failures are shown directly on the page with the specific reason instead of only reporting that the command was sent. If the initial file upload fails, the application record is kept and can be edited and retried in the same dialog without creating a duplicate application.
+      revert: No configuration changes are required. To keep the old interaction, you may stay on the previous frontend or backend build, but the new directory preview and failure feedback will not be available.
+
+  - id: v1_3_25_list_entry_switches
+    version: v1.3.25
+    kind: check
+    level: low
+    page: /waf/wafipwhitelist
+    apply:
+      type: navigate
+    zh:
+      title: IP/URL 黑白名单支持按条目启用停用
+      detail: >-
+        IP白名单、URL白名单、IP黑名单、URL黑名单的每条记录新增启用开关，在列表中直接切换，
+        新增条目默认启用，存量条目升级后保持启用。停用的条目不再参与对应站点的防护判定
+        （全局名单同理），配置仍保留在列表中，随时可重新启用；批量和编辑等原有操作不受影响。
+      revert: 在对应名单页面把条目开关重新打开，即恢复该条目的防护效果。
+    en:
+      title: Per-entry enable switches for IP/URL black- and whitelists
+      detail: >-
+        Each entry in the IP whitelist, URL whitelist, IP blacklist and URL blacklist now has an
+        enable switch toggled directly in the list. New entries default to enabled and existing
+        entries stay enabled after the upgrade. Disabled entries stop taking effect for the
+        corresponding website (global entries likewise) but remain in the list and can be
+        re-enabled at any time; batch import and editing behave as before.
+      revert: Turn the entry switch back on in the corresponding list page to restore its effect.
+
+  - id: v1_3_25_rule_ban
+    version: v1.3.25
+    kind: check
+    level: normal
+    page: /waf/wafRuleBan
+    apply:
+      type: navigate
+    zh:
+      title: 自定义规则支持临时封禁 IP
+      detail: 在已启用规则的动作中使用 RF.Ban(10)，可拦截当前请求并将客户端 IP 在当前站点封禁 10 分钟，无需单独开启。封禁列表支持查询和解封，配置可选返回拦截页或直接断开；该配置用于后续封禁命中。已有封禁不续期，仅记录模式不写入新封禁。使用失败次数作为条件时，计数保留时间与封禁分钟数分别设置。
+      revert: 将规则动作改回 RF.Deny() 或停用该规则，并在规则封禁列表解除已有记录；仅停用规则不会立即解除已有封禁。
+    en:
+      title: Temporarily ban IPs with custom rules
+      detail: Use RF.Ban(10) in an enabled rule to block the current request and ban the client IP on the current website for 10 minutes. No separate switch is required. The ban list supports inspection and removal. Choose a blocking page or connection closure for subsequent banned requests. Existing bans are not renewed, and log-only mode does not create bans. When using failure counts as a condition, configure count retention and ban duration separately.
+      revert: Change the rule action back to RF.Deny() or disable the rule, then remove existing entries from the rule ban list. Disabling a rule alone does not immediately remove existing bans.
+
+  - id: v1_3_25_log_url_keyword
+    version: v1.3.25
+    kind: check
+    level: low
+    page: /waf/wafvisitlog
+    apply:
+      type: navigate
+    zh:
+      title: 访问日志支持按 URL 关键字查询
+      detail: 在访问日志顶部填写访问 URL 的路径或关键字，可与网站、日期、来源 IP 等条件组合查询访问记录。查询包含原始路径与查询串，百分号和下划线按字面匹配；域名请通过网站条件筛选。访问日志与安全事件视图、历史归档均适用，窄行中 URL 超过保留上限的部分不参与匹配。
+      revert: 清空访问 URL 条件后重新查询，即恢复原查询范围。
+    en:
+      title: Search access logs by URL keyword
+      detail: Enter a path or keyword in the Access URL field and combine it with website, date, source IP and other filters. The search matches the stored path and query string, treating percent signs and underscores literally. Use the website filter to select a domain. Both access and security event views, including archived logs, support this filter; URL content beyond the narrow-row storage limit is unavailable for matching.
+      revert: Clear the Access URL field and search again to restore the previous scope.
+
+  - id: v1_3_25_admin_titles
+    version: v1.3.25
+    kind: check
+    level: low
+    page: /sys/VpConfig?section=title
+    apply:
+      type: navigate
+    zh:
+      title: 支持统一自定义后台标题
+      detail: 可在「系统设置 → 管理配置 → 后台标题」设置一个后台标题，同时用于登录页和浏览器标签页，保存后无需重启。留空时两处各自沿用当前语言的默认文案；其他已打开的页面刷新后显示新标题。
+      revert: 清空后台标题并保存，即可恢复两处的默认文案。
+    en:
+      title: Customize a shared admin title
+      detail: Set one Admin Title under System Settings > Management Configuration > Admin Titles to use the same text on the login page and browser tab. Saving applies immediately without restart. Leave it blank to use each location's default text for the current language; refresh other open pages to load the new title.
+      revert: Clear the Admin Title and save to restore the default text in both locations.
+
+  - id: v1_3_25_unmatched_website_response
+    version: v1.3.25
+    kind: check
+    level: normal
+    page: /waf-host/wafBlockingPagelist
+    apply:
+      type: navigate
+    zh:
+      title: 未匹配网站时显示接入引导，支持全局自定义页面
+      detail: 未匹配到网站的请求统一返回 403 页面，内置页面提示管理员在「网站防护」中新建对应主机。可在「自定义拦截响应界面 → 未匹配网站响应」编辑全局专用 HTML，留空恢复内置页面；已有网站的拦截模板继续单独生效。
+      revert: 将专用 HTML 清空并保存即可恢复内置引导页；HTTP 状态码保持 403。
+    en:
+      title: Setup guidance and a global custom page for unmatched websites
+      detail: Requests that do not match a website return a 403 page. The built-in page guides administrators to add a host under Website Protection. Edit the dedicated global HTML under Custom Blocking Response Pages > Unmatched Website Response, or leave it blank to use the built-in page. Blocking templates for configured websites remain separate.
+      revert: Clear the dedicated HTML and save to restore the built-in guidance page. The HTTP status remains 403.
+
+  - id: v1_3_26_backend_unavailable_response
+    version: v1.3.26
+    kind: notice
+    level: low
+    page: /waf-host/wafBlockingPagelist
+    apply:
+      type: navigate
+    zh:
+      title: 源站不可用时可显示自定义页面
+      detail: 在「自定义拦截响应界面 → 源站不可用响应」设置全局 HTML。代理回源失败时使用此页面，并保留实际的 502、503 或 504 状态码。已有页面和配置无需迁移。
+      revert: 清空专用 HTML 并保存即可恢复内置页面。
+    en:
+      title: Customize the page shown when the origin is unavailable
+      detail: Set a global HTML template under Custom Blocking Response Pages > Origin Unavailable Response. Proxy failures use the page with their original 502, 503, or 504 status. Existing pages and settings require no migration.
+      revert: Clear the dedicated HTML and save to restore the built-in page.
+
+  - id: v1_3_25_health_check_status_refresh
+    version: v1.3.25
+    kind: check
+    level: low
+    page: /waf-host/wafhost
+    apply:
+      type: navigate
+    zh:
+      title: 健康检测配置变化后，列表状态立即重置
+      detail: 编辑站点修改健康检测配置（开关或检测参数）并保存后，该站点的健康状态立即清除并重新计票：关闭检测后列表显示「检测已关闭」不再残留旧数据；重新开启后从「暂无数据」开始重新检测。此前关闭检测后列表会一直显示关闭前的旧状态。
+      revert: 无需操作，保存站点配置即按新逻辑生效。
+    en:
+      title: Health check status now resets immediately when its settings change
+      detail: After editing a host and saving health check settings (the toggle or any probe parameter), the host's health status is cleared and counting restarts. Disabling the check shows "Check off" in the list without leftover data; re-enabling starts from "No data yet". Previously the list kept showing the pre-disable state indefinitely.
+      revert: No action needed; saving the host applies the new behavior.
+
   # ---------------- 全新安装建议 ----------------
   - id: fresh_change_default_password
     version: v1.3.21
@@ -221,3 +675,1030 @@ notes:
     en:
       title: New Run Diagnostic page for troubleshooting high CPU or memory usage
       detail: System - Run Diagnostic shows resource usage from the SamWaf process perspective - process CPU and memory, the Go runtime, internal queues and component gauges, plus a 1-hour usage trend (sampled every 10 seconds, kept in memory only, cleared on restart, with no noticeable overhead). When usage looks high you can generate a diagnostic package in one click and send it to the developers; it contains only runtime metrics and call-stack information - no passwords, tokens, certificate keys or any business request data. The optional 30-second CPU profiling runs only when triggered manually and adds slight overhead while sampling. The page is visible to system administrators only.
+
+  - id: v1_3_25_host_group
+    version: v1.3.25
+    kind: notice
+    level: low
+    page: /waf-host/wafhost
+    doc: https://doc.samwaf.com/guide/Host.html
+    apply:
+      type: navigate
+    zh:
+      title: 网站列表新增分组，可按分组筛选与批量移动
+      detail: 「网站防护 - 网站防护」列表页工具栏下方新增一条分组导航，可以按自己的口径（生产/测试/内网、按客户、按机房等）给网站归类，点分组即筛选，鼠标移到分组上可重命名、改颜色、调整顺序或删除。表格新增「分组」列，勾选多个网站后用导航条上的「移动到分组」可批量归组；新增或编辑网站的表单里也能直接选择所属分组。需要明确的是：分组只是管理端的组织与筛选维度，不会给网站带来任何防护配置，也不影响 WAF 对请求的处理，把网站移进移出分组，防护行为完全不变。删除分组不会删除网站，组内网站会回到「未分组」。升级后所有网站默认都在「未分组」，与升级前完全一致，不需要任何操作。另外本版本把列表的操作列收敛成「编辑 / 证书申请 / 更多」一行，复制与删除移到「更多」里，操作列与勾选列分别吸附在表格左右两侧，窄屏下不用再横向拖到底才能点到。
+    en:
+      title: Website groups added to the list, with group filtering and bulk move
+      detail: A group navigation bar now sits below the toolbar on the Website Protection list page. You can classify websites by your own criteria - production, test, intranet, by customer, by data center and so on - click a group to filter, and hover a group to rename it, change its color, reorder it or delete it. The table gains a Group column, and after ticking several websites you can move them into a group in bulk from the navigation bar; the add and edit website form also lets you pick a group directly. To be clear, a group is only an organizing and filtering dimension in the console. It applies no protection configuration to a website and does not affect how the WAF handles requests, so moving websites in and out of groups changes nothing about protection behavior. Deleting a group does not delete its websites - they fall back to Ungrouped. After upgrading, every website starts out Ungrouped, which behaves exactly as before and requires no action from you. This version also condenses the row actions into a single line of Edit, Auto Cert and More, moving Copy and Delete under More, and pins the action column and the selection column to the right and left edges of the table so narrow screens no longer need scrolling to the end.
+
+  - id: v1_3_25_port_protocol
+    version: v1.3.25
+    kind: notice
+    level: high
+    page: /waf-host/wafhost
+    doc: https://doc.samwaf.com/guide/Host.html
+    apply:
+      type: navigate
+    zh:
+      title: 端口协议可逐端口显式选择，80 端口不再被 SSL 开关"连带"改成 HTTPS
+      detail: 网站的监听端口现在逐个声明协议：编辑网站时每个端口一行，右侧直接选 HTTP 或 HTTPS，还可选择只监听 IPv4 或 IPv6（默认两者都收，与升级前一致）。此前协议由 SSL 开关整体决定，最典型的问题是"主端口 80 + 开了 SSL"会把整机 80 端口建成 HTTPS，同机其它明文网站和 CDN 明文回源全部收到 400。升级本身不改变任何现有行为：没动过端口设置的网站完全保持原样（包括上述 80 变 HTTPS 的现象也原样保留，不会被自动"纠正"）；只有你打开网站编辑、调整端口协议并保存后，新声明才生效。如果你正是 CDN 明文回源收到 400 的用户：编辑该网站，把 80 端口改成 HTTP 保存即可，证书不受影响可继续用于 443。同一端口在整机只能是一种协议，保存时会检测并明确指出与哪个网站冲突；已存在的冲突会在网站列表标红、在系统日志与消息推送中提示，新增的「端口占用总览」页可查看每个端口被哪些网站以什么协议占用。
+    en:
+      title: Per-port protocol selection - port 80 is no longer forced to HTTPS by the SSL switch
+      detail: Listening ports are now declared one by one. When editing a website each port takes its own row where you pick HTTP or HTTPS directly, and optionally restrict it to IPv4 or IPv6 only (both are accepted by default, same as before the upgrade). Previously the protocol was derived from the SSL switch as a whole, and the most typical problem was that a site with main port 80 plus SSL enabled turned port 80 of the whole machine into HTTPS, so every plaintext site on the same machine and any CDN origin-pull over plain HTTP got a 400. The upgrade itself changes nothing - websites whose port settings were never touched keep their exact previous behavior, including the port-80-as-HTTPS phenomenon above, which is deliberately not auto-corrected. A new declaration only takes effect after you open the website editor, adjust the port protocols and save. If you are hitting the CDN plaintext origin-pull 400 - edit that website and switch port 80 to HTTP; the certificate is unaffected and keeps serving 443. A given port can only speak one protocol per machine - saving validates this and names the conflicting website, existing conflicts are flagged in red on the website list and reported in the system log and message push, and the new Port Overview page shows which websites occupy each port with which protocol.
+
+  - id: v1_3_25_cc_multi_rule
+    version: v1.3.25
+    kind: check
+    level: high
+    page: /waf-host/anticc
+    doc: https://doc.samwaf.com/guide/AntiCC.html
+    apply:
+      type: navigate
+    zh:
+      title: CC 防护改为多规则，并修正了「平均速率模式」保存后阈值不一致的问题
+      detail: >-
+        CC 防护从「一个网站一条配置」改成「一个网站多条规则，按优先级自上而下执行，命中即停」。
+        新增三样以前没有的能力：一是统计口径可以排除静态资源——一次页面加载会带出几十个 js/css/图片请求，
+        以前它们全部计入，导致阈值只能设得很松；二是统计维度除了客户端 IP，还能按 IP+URL、Cookie、
+        请求头、查询参数或整站总量归堆；三是超过阈值后的动作除了拦截和封禁，新增了「观察（仅记录不阻断）」
+        与「人机验证」，且封禁可以只作用于本站点。
+        升级不改变你现有的防护行为：旧配置会自动转换成一条名为「默认CC防护」的等价规则，
+        统计口径仍是「全部请求」、封禁仍作用于「全部站点」、限流算法沿用原设置，界面上带「兼容旧配置」标记。
+        更合理的新默认值（排除静态、人机验证、只封本站点）只作用于你之后新建的规则。
+        需要你留意的一点：如果你用的是「平均速率模式」，这个版本修正了一处缺陷——
+        此前在界面点一次保存，实际生效的阈值会与启动时不同（例如配置 60 秒 100 次，保存后会变成每秒 100 次左右），
+        重启后又会变回去。修正后保存前后、重启前后一致，因此你可能会观察到实际拦截强度与之前不同，
+        这是把阈值恢复成你配置的值，不是新增的限制。
+      effect_on: 保持默认即可：存量配置已自动转换成等价规则，防护行为与升级前一致。建议在网站防护 - CC防护里看一眼转换结果，把「统计口径」改成「排除静态资源」、「封禁作用范围」改成「仅本站点」，阈值会更贴合真实情况、也不会再因为一个站点触发就影响其它站点。
+      effect_off: 不做任何调整：防护照常工作，但统计口径仍把 js/css/图片算进来，同样的阈值实际能容纳的真实操作次数少得多，只能靠放松阈值来避免误伤；封禁也仍然作用于全部站点，一个站点触发会连带影响同实例的其它站点。
+      revert: 转换出来的规则可以随时编辑或停用；停用全部规则即回到不做 CC 限制的状态。
+    en:
+      title: CC protection is now rule-based, and a rate-mode threshold inconsistency is fixed
+      detail: >-
+        CC protection moves from one configuration per website to multiple rules per website, evaluated
+        top-down by priority and stopping at the first match. Three capabilities are new. First, the count
+        scope can exclude static assets - one page load pulls dozens of js/css/image requests, and previously
+        all of them counted, which forced thresholds to be set very loose. Second, besides client IP, hits can
+        be grouped by IP+URL, a cookie, a request header, a query parameter, or the whole site. Third, in
+        addition to blocking and banning, a rule can now Observe (log only, no blocking) or require human
+        verification, and a ban can be limited to the current website only.
+        The upgrade does not change your existing protection behavior - the old configuration is converted
+        into an equivalent rule named "Default CC protection", keeping the All requests count scope, the
+        All sites ban scope and the original rate-limiting algorithm, and it is tagged as legacy in the UI.
+        The better new defaults (exclude static assets, human verification, ban this site only) apply only
+        to rules you create from now on.
+        One thing to note - if you use the average rate mode, this version fixes a defect where saving the
+        form in the UI produced a different effective threshold than the one applied at startup (for example
+        60 seconds / 100 times became roughly 100 per second after saving), reverting again after a restart.
+        Now saving and restarting are consistent, so you may notice the effective strictness differs from
+        before. That is the threshold being restored to what you configured, not a new restriction.
+      effect_on: Keeping the defaults is fine - existing configuration has been converted into an equivalent rule and behaves as before. It is worth reviewing the converted rule under Website Protection - CC Protection and switching the count scope to Exclude static assets and the ban scope to This site only, so the threshold reflects real activity and one website no longer affects the others.
+      effect_off: If you change nothing, protection keeps working, but the count scope still includes js/css/images, so the same threshold tolerates far fewer real user actions and can only be made safe by loosening it; bans also still apply to all websites, so one site triggering affects every other site on the same instance.
+      revert: Converted rules can be edited or disabled at any time; disabling every rule returns to having no CC limiting.
+  - id: v1_3_25_bot_verify_and_cc_exempt
+    version: v1.3.25
+    kind: check
+    level: normal
+    page: /waf-host/anticc
+    doc: https://doc.samwaf.com/guide/AntiCC.html
+    apply:
+      type: navigate
+    zh:
+      title: 搜索引擎爬虫的身份验证补齐了正向回查，CC 规则可豁免已验证爬虫
+      detail: >-
+        以前判断一个来访 IP 是不是真的搜索引擎爬虫，只做了反向 DNS 解析并比对域名后缀。
+        各家官方文档（Google、百度等）要求的是两步：反向拿到域名之后，还要对该域名做正向解析，
+        确认能解析回最初那个来访 IP。这个版本补上了第二步。
+        补齐之后新增了一个能力：CC 规则可以设置「已验证爬虫豁免」，开启后完成完整身份验证的
+        搜索引擎爬虫不计入这条规则的计数。以前 CC 防护完全不看爬虫身份，抓取快的搜索引擎
+        一样会被限流甚至封禁。
+        有两点需要留意。其一，正向解析确认不了的爬虫仍按原来的判定放行、不会被判成伪装爬虫，
+        但也拿不到豁免——实测部分厂商的老抓取段没有正向解析记录，严格执行会误伤真爬虫、导致掉索引，
+        所以这里刻意做得宽松，只在需要更强把握的豁免场合才要求完整验证。
+        其二，豁免默认只作用于新建的规则，你已有的规则保持关闭，防护行为与升级前一致。
+      effect_on: 建议在网站防护 - CC防护里，给「全站兜底」这类不该拦搜索引擎的规则打开「已验证爬虫豁免」。存量规则升级后默认是关闭的，需要你自己打开。
+      effect_off: 不打开也可以：防护照常工作，但搜索引擎爬虫会和普通访客一样计入 CC 计数，抓取密集时可能被限流或封禁，进而影响收录。
+      revert: 这个开关随时可以关掉，关掉后该规则立即恢复对爬虫一并计数。
+    en:
+      title: Crawler verification now includes a forward DNS confirmation, and CC rules can exempt verified crawlers
+      detail: >-
+        Deciding whether a visiting IP is really a search-engine crawler previously used only a reverse DNS
+        lookup plus a domain suffix comparison. The vendors' own documentation (Google, Baidu and others)
+        describes two steps: after the reverse lookup returns a hostname, resolve that hostname forward and
+        confirm it maps back to the original visiting IP. This version adds that second step.
+        On top of it, CC rules gain an "Exempt verified crawlers" option: when on, search-engine crawlers that
+        completed full identity verification are not counted by that rule. Previously CC protection ignored
+        crawler identity entirely, so an actively crawling search engine could be rate-limited or even banned.
+        Two things to note. First, a crawler whose forward lookup cannot be confirmed is still treated exactly
+        as before and is not classified as spoofed - measurements show some vendors' older crawling ranges have
+        no forward records, and enforcing this strictly would block real crawlers and cost you search indexing.
+        Full verification is required only for the exemption, where a stronger guarantee is warranted.
+        Second, the exemption defaults to on only for newly created rules; your existing rules keep it off, so
+        protection behaves exactly as before the upgrade.
+      effect_on: In Website protection - CC protection, turn on "Exempt verified crawlers" for rules that should not block search engines, such as a site-wide fallback. Existing rules have it off after the upgrade, so you need to enable it yourself.
+      effect_off: Leaving it off is fine - protection keeps working, but search-engine crawlers are counted like ordinary visitors and may be rate-limited or banned during heavy crawling, which can affect indexing.
+      revert: The switch can be turned off at any time; that rule immediately goes back to counting crawlers along with everyone else.
+  - id: v1_3_25_captcha_capability_split
+    version: v1.3.25
+    kind: check
+    level: normal
+    page: /waf-host/wafhostlist
+    doc: https://doc.samwaf.com/guide/HumanVerify.html
+    apply:
+      type: navigate
+    zh:
+      title: 人机验证设置不再被开关藏起来，「排除URL列表」更名为「永不挑战的路径」
+      detail: >-
+        网站编辑里的验证码设置以前整体挂在「是否开启验证码」这个开关后面，开关一关，
+        验证方式、路径前缀、有效期、排除URL 等字段全部从界面上消失。
+        但这些设置并不只服务于那个开关——CC 防护规则的「人机验证」动作同样在使用它们，
+        于是会出现「规则命中了、日志也写了人机验证，却因为看不见的排除清单而从不弹出挑战」。
+        这个版本把它们分成两块：上半部分是「验证能力」，无论开关开关都始终可见可改；
+        下半部分是「触发来源」，原来的开关改名为「站点常开人机验证」，它只是众多触发来源之一。
+        「排除URL列表」更名为「永不挑战的路径」，并写明它对所有触发来源生效。
+        另外修正了一处解析问题：验证码配置里的数值字段（有效期、capJs 的挑战数量/难度等）
+        在存量数据里是字符串形式，此前会被静默忽略、悄悄回落到默认值，现在能正确读取——
+        如果你以前调过这些值却感觉没生效，升级后它们才真正开始起作用。
+        同一类问题还修了「验证方式」：存量数据里出现过当前版本不认识的取值，此前会导致挑战页发不出来——站点常开验证码、CC 规则的人机验证动作、紧急模式三条路径在这类站点上一律失效，而界面和日志看起来都正常。现在不认识的取值一律按「传统方式」处理。
+        另外新增一栏「挑战页联系方式」：填了会显示在人机验证页面上，留空则不显示。访客被挡下来之后进不去也没地方问，这里给他一条出路。
+      effect_on: 请到网站防护 - 网站编辑 - 人机验证里看一眼「永不挑战的路径」。列在那里的路径不会被任何来源挑战，包括 CC 规则；不需要的条目可以删掉。若你调过 capJs 的挑战数量或难度，也请确认现在生效的值是不是你想要的。
+      effect_off: 不看也可以：设置的实际行为与升级前完全一致，只是不再被开关藏起来。但如果你配过 CC 规则的人机验证却一直没见到挑战页，多半就是被这份清单跳过了。
+      revert: 界面分组与名称的调整不影响已保存的配置，字段本身没有变化。
+    en:
+      title: Human verification settings are no longer hidden behind the switch, and the exclude list is renamed
+      detail: >-
+        The captcha settings in the website editor used to sit entirely behind the "Enable captcha" switch:
+        turning it off made the verification type, path prefix, lifetime and exclude list disappear from the UI.
+        Those settings are not exclusive to that switch, though - the Human verification action of CC rules
+        uses them too, which produced the confusing case where a rule matched and the log said human
+        verification, yet no challenge ever appeared because of an exclude list nobody could see.
+        This version splits them in two: the upper part is the verification capability, always visible and
+        editable regardless of the switch; the lower part is trigger sources, where the old switch is renamed
+        Site-wide human verification and becomes just one source among several. The exclude list is renamed
+        "Never challenge these paths" and now states that it applies to every trigger source.
+        A parsing defect is also fixed: numeric fields in the captcha config (lifetime, capJs challenge count
+        and difficulty, and so on) are stored as strings in existing data and used to be silently ignored,
+        quietly falling back to defaults. They are read correctly now - if you tuned those values before and
+        felt nothing happened, they only start taking effect after this upgrade.
+        The same class of problem is fixed for the verification type: existing data could hold a value this version does not recognise, which stopped the challenge page from being produced at all - the site-wide captcha, the CC rule Human verification action and Emergency mode all silently failed on such websites while the UI and logs looked fine. Unrecognised values now fall back to the traditional captcha.
+        A new "Contact shown on the challenge page" field was also added: when filled in it appears on the verification page, and when empty nothing is shown. A blocked visitor can neither get in nor ask anyone - this gives them a way out.
+      effect_on: Open Website protection - edit a website - Human verification and review "Never challenge these paths". Paths listed there are never challenged by any source, CC rules included; remove the entries you no longer need. If you tuned capJs challenge count or difficulty, confirm the values now in effect are the ones you want.
+      effect_off: Skipping the review is fine - behavior is identical to before the upgrade, the settings are simply no longer hidden. But if you configured human verification on a CC rule and never saw a challenge page, this list is the most likely reason.
+      revert: The regrouping and renaming do not change any saved configuration; the underlying fields are unchanged.
+  - id: v1_3_25_cc_captcha_loop
+    version: v1.3.25
+    kind: check
+    level: normal
+    page: /waf-host/anticc
+    doc: https://doc.samwaf.com/guide/CC.html
+    apply:
+      type: navigate
+    zh:
+      title: CC 规则的「人机验证」动作：通过验证后不再被反复挑战
+      detail: >-
+        动作选「人机验证」的 CC 规则，访客完成挑战之后本应进入一段免挑战期，
+        期间即使计数窗口里的次数仍然超标也不再重复挑战。实际上这段免挑战期发不出来：
+        它由检测链后半段的验证码闸门在「访客带着有效凭证出现」时发放，
+        而 CC 检测跑在闸门前面，会先把访客刚拿到的凭证作废掉，闸门于是永远看不到它。
+        表现是访客每完成一次挑战、下一个请求又被挑战，直到计数窗口自己漏空为止。
+        这个版本把交接提前到 CC 检测这一步完成：只要上一轮确实要求过验证、
+        而访客这次带着有效凭证过来，就地换成免挑战期。
+        「超量时作废陈旧凭证」的行为保留不变——此前没被要求过验证、
+        拿着站点常开验证码留下的长期凭证的访客，超量时仍会被要求重新验证。
+      effect_on: 如果你配过动作为「人机验证」的 CC 规则，升级后请自己走一遍：触发阈值、完成挑战，之后应当能正常访问而不是反复看到挑战页。日志里会多出「CC人机验证-本轮已通过」这条文案。
+      effect_off: 不需要改任何配置，升级后自动生效。
+      revert: 这是行为修正，没有开关。若要暂时避开，可把规则动作临时改为「观察」。
+    en:
+      title: CC rules with the Human verification action no longer re-challenge visitors who already passed
+      detail: >-
+        A CC rule whose action is Human verification is supposed to give a visitor a grace period once they
+        complete the challenge, so that they are not challenged again while the counting window is still over
+        the threshold. That grace period could never actually be granted: it is issued by the captcha gate in
+        the second half of the detection chain when a visitor arrives holding a valid pass, but the CC check
+        runs before that gate and revoked the pass the visitor had just obtained, so the gate never saw it.
+        The visible symptom was a visitor being challenged again on every request after each successful
+        challenge, until the counting window drained on its own. This version completes that handover at the
+        CC check itself: when verification was requested in the previous round and the visitor now arrives
+        with a valid pass, the grace period is granted right there.
+        Revoking stale passes on threshold breach is unchanged - a visitor who was not previously asked to
+        verify and is carrying a long-lived pass from the site-wide captcha is still asked to verify again.
+      effect_on: If you have CC rules using the Human verification action, walk through it yourself after upgrading - trip the threshold, complete the challenge, and you should then browse normally instead of seeing the challenge page repeatedly. Logs now include a "CC human verification - passed this round" entry.
+      effect_off: No configuration changes are needed; the fix applies automatically.
+      revert: This is a behavioural correction with no switch. To avoid it temporarily, set the rule action to Observe.
+  - id: v1_3_25_cc_emergency_mode
+    version: v1.3.25
+    kind: notice
+    level: normal
+    page: /waf-host/anticc
+    doc: https://doc.samwaf.com/guide/CC.html
+    apply:
+      type: navigate
+    zh:
+      title: 新增「紧急模式」：被打的时候一键让全部访客先过人机验证
+      detail: >-
+        CC 页面新增「紧急模式」按钮。开启后，该站点的所有访客都要先完成一次人机验证，
+        通过之后 30 分钟内不再重复挑战。它不看阈值、也不改动你已有的任何一条 CC 规则，
+        关掉即恢复原状，因此可以在被攻击时直接按下、事后直接关掉。
+        选择全局网站开启则对所有站点生效，适合一次被打一片的情况。
+        它与 CC 规则的人机验证动作共用同一套闸门与凭证，所以站点的「永不挑战的路径」
+        对它同样生效——App / API 客户端跑不了 JS 挑战，必须先把这些路径列进去。
+        默认关闭，升级不会改变任何站点的现有行为。
+      effect_on: 建议先去网站编辑 - 人机验证里确认「永不挑战的路径」已经写上了 App/API 的接口路径，这样真要用的时候按下去不会把客户端全挡在门外。开启时请选一个自动关闭时间，忘了关的代价由真实访客承担。
+      effect_off: 不开就完全不影响。它默认关闭，只有你自己按下才会生效。
+      revert: 在同一个弹窗里关闭即可，站点立刻恢复升级前的行为。
+    en:
+      title: New Emergency mode - one click to put every visitor behind a human verification
+      detail: >-
+        The CC page has a new Emergency mode button. Once enabled, every visitor to that website must complete
+        a human verification first and is then not challenged again for 30 minutes. It ignores thresholds and
+        does not modify any of your existing CC rules, and turning it off restores the previous behaviour, so
+        it is safe to hit while under attack and switch off afterwards. Enabling it on the global website
+        applies it to every site, which is what you want when many sites are hit at once.
+        It shares the same gate and pass mechanism as the Human verification action of CC rules, so the
+        website's "Never challenge these paths" applies to it as well - App and API clients cannot run a JS
+        challenge, so those paths must be listed there first.
+        It is off by default; upgrading changes nothing for any website.
+      effect_on: Before you need it, open the website editor - Human verification and make sure "Never challenge these paths" already lists your App/API endpoints, so hitting the button does not lock those clients out. When enabling it, pick an auto turn-off time - forgetting about it costs your real visitors.
+      effect_off: Leaving it alone has no effect at all. It is off by default and only applies when you turn it on yourself.
+      revert: Turn it off in the same dialog; the website immediately returns to its previous behaviour.
+
+  - id: v1_3_25_notify_webhook_intranet
+    version: v1.3.25
+    kind: notice
+    level: normal
+    page: /notify/channel
+    doc: https://doc.samwaf.com/guide/NotifyChannel.html
+    apply:
+      type: navigate
+    zh:
+      title: 通知渠道 Webhook 支持内网告警平台，需在 config.yml 声明放行
+      detail: 通知渠道（钉钉/飞书/企业微信/自定义 Webhook）的目标地址默认仍只允许公网；自建在内网的告警平台（如 ntfy、Gotify、内部工单系统）此前会被直接拒绝，现在可在 conf/config.yml 的 security.outbound_allowed_hosts 里按主机名、IP 或网段（逗号分隔）声明放行，保存并重启后该目标即可保存与发送。该文件只能由能改服务器配置的人维护，管理端界面与 API 不提供修改入口。不配置则行为与之前完全一致。
+    en:
+      title: Notification channel Webhooks can now reach intranet alerting platforms when declared in config.yml
+      detail: Notification channel targets (DingTalk, Feishu, WeCom, custom Webhook) still default to public addresses only. Self-hosted alerting platforms on the intranet (such as ntfy, Gotify or an internal ticketing system) were previously rejected outright; they can now be allowed by declaring the host name, IP or CIDR (comma separated) in security.outbound_allowed_hosts in conf/config.yml, then saving and restarting. That file can only be maintained by someone with access to the server configuration - the console UI and API offer no way to change it. Without this setting, behavior is exactly as before.
+
+  - id: v1_3_25_httpauth_session
+    version: v1.3.25
+    kind: notice
+    level: normal
+    page: /waf-host/list
+    doc: https://doc.samwaf.com/guide/HttpAuthBase.html
+    apply:
+      type: navigate
+    zh:
+      title: 网站密码访问新增有效期与在线会话管理，认证链路改用真实访客 IP
+      detail: >-
+        网站编辑 - 网站密码访问里新增三项配置：登录有效期（默认 1440 分钟，与旧版本一致）、
+        空闲超时（默认 0 不启用，仅「自定义页面」方式支持）、绑定登录 IP（默认开启，与旧版本一致）。
+        同一页新增「在线会话」列表，可以看到谁在什么时候从哪个 IP 登录的、还剩多久到期，
+        并支持踢下线（单条 / 按用户 / 本站全部）。登录成败、锁定、踢下线现在会记入
+        系统设置 - 安全审计，分类为「网站密码访问」。
+        同时，认证链路的客户端 IP 由「连接 IP」改为按站点「真实IP来源」解析，与访问日志同源。
+      effect_on: >-
+        两处变化需要留意。其一，站点挂在 CDN 或前置 Nginx 后面、且「绑定登录 IP」开着时：
+        升级前绑的是边缘节点地址（对所有访客都一样，等于没绑），升级后绑的是访客真实 IP，
+        访客切换基站或重新拨号就会被要求重新登录；频繁掉线可以在同一页把「绑定登录 IP」关掉。
+        其二，升级后已经登录的访客需要重新登录一次。
+      effect_off: 没有开启「网站密码访问」的站点完全不受影响。
+      revert: 把「登录有效期」设回 1440、「空闲超时」设回 0、「绑定登录 IP」保持开启，即为旧版本行为。
+    en:
+      title: Website password access gains session lifetime and online session management; auth now uses the real visitor IP
+      detail: >-
+        Website editor - Website password access has three new settings: session lifetime (default 1440 minutes,
+        same as before), idle timeout (default 0 = off, supported only by the Custom page method) and bind to
+        login IP (on by default, same as before). The same page now lists online sessions - who signed in, from
+        which IP, at what time and how long is left - and lets you kick them (one session, one user, or all
+        sessions of the site). Sign-in success and failure, lockout and kick are now recorded under
+        System settings - Security audit in the "Website password" category.
+        The client IP used by this authentication path also changed from the connection IP to the site's
+        configured Real client IP source, the same one used by access logs.
+      effect_on: >-
+        Two things to watch. First, for sites behind a CDN or a front Nginx with "bind to login IP" enabled:
+        before the upgrade this bound to the edge node address (identical for every visitor, so effectively no
+        binding), and now it binds to the visitor's real IP, so switching mobile towers or reconnecting will
+        require signing in again - turn "bind to login IP" off on the same page if that happens too often.
+        Second, visitors who are already signed in must sign in once more after the upgrade.
+      effect_off: Sites that do not have Website password access enabled are not affected at all.
+      revert: Set session lifetime back to 1440, idle timeout back to 0 and keep bind to login IP enabled - that is the previous behaviour.
+
+  - id: v1_3_25_manage_client_ip
+    version: v1.3.25
+    kind: check
+    level: high
+    page: /sys/SystemConfig
+    doc: https://doc.samwaf.com/quickstart/Update.html
+    apply:
+      type: navigate
+    zh:
+      title: 检查「管理端可信代理网段」是否填得过宽
+      detail: >-
+        这项决定管理端把哪个 IP 当成真实客户端，而管理端 IP 白名单、登录失败锁定、令牌 IP 绑定、
+        登录历史与安全审计全部按它判定。本版本修正了一处取值错误：当网段填得比真实客户端 IP 还宽时
+        （典型是填了 10.0.0.0/8 而管理员本身也在 10.x 内网访问），代理头里的真实 IP 会被当成代理节点跳过，
+        最终记成上一跳地址。修正后这种情况按代理链起点取真实 IP，并且不会再抢在后面那个更可信的头前面下结论。
+        另外网段现在支持直接填关键字 private（展开为 10/8、172.16/12、192.168/16、环回与 fc00::/7），
+        容器部署不必再去查网关地址。请顺手确认这里没有填 0.0.0.0/0 之类覆盖全网的写法：
+        这种网段无法用来判断代理头里哪个 IP 才是客户端，程序会拒绝采信代理头、继续按网络层 IP 识别
+        （容器里就是网关地址，所有人看起来是同一个 IP），启动日志里也会提示。
+      effect_on: 填上游代理自身的地址（容器部署可直接填 private）后：管理端按真实客户端 IP 判定白名单与登录锁定，登录历史与安全审计记的也是真实来源。
+      effect_off: 填 0.0.0.0/0 或留空：代理头不被采信，所有请求都记成代理机/网关的同一个地址——IP 白名单失去区分能力，一次爆破尝试就可能把所有人一起挡在门外。
+      revert: 清空该配置即恢复为"只认直连 IP"。
+    en:
+      title: Check whether the console trusted proxy ranges are set too wide
+      detail: >-
+        This setting decides which address the console treats as the real client, and the console IP allowlist,
+        login failure lockout, token IP binding, login history and security audit are all judged by it. This
+        version fixes a case where the value came out wrong: when the ranges were wider than the real client IP
+        (typically 10.0.0.0/8 while administrators themselves connect from 10.x), the real IP inside the proxy
+        header was skipped as a proxy hop and the previous hop was recorded instead. It now takes the start of
+        the proxy chain in that situation, and no longer jumps ahead of a later, more trustworthy header. The
+        ranges also accept the keyword private, which expands to 10/8, 172.16/12, 192.168/16, loopback and
+        fc00::/7, so container deployments need not look up the gateway address. While you are there, make sure
+        the value is not something like 0.0.0.0/0: a range that wide cannot tell which address in the proxy
+        header is the client, so the proxy header is not honoured at all and the network layer address is used
+        instead (the gateway address in a container, making every visitor look identical). The startup log points
+        this out as well.
+      effect_on: With the upstream proxy's own address (or simply private in containers), the console judges the allowlist and login lockout by the real client IP, and login history and security audit record the real source.
+      effect_off: With 0.0.0.0/0 or an empty value the proxy header is not honoured and every request is recorded as the same proxy or gateway address - the IP allowlist can no longer tell anyone apart, and a single brute-force burst can lock everyone out at once.
+      revert: Clearing the setting restores the "direct peer only" behaviour.
+
+  - id: v1_3_25_access_cookie_per_site
+    version: v1.3.25
+    kind: notice
+    level: low
+    page: ''
+    doc: https://doc.samwaf.com/quickstart/Update.html
+    apply:
+      type: none
+    zh:
+      title: 统一访问认证的登录凭据改为按站点区分
+      detail: >-
+        只影响开启了「统一访问认证」的部署，其余部署无感。凭据 Cookie 过去所有站点共用一个名字，
+        而浏览器保存 Cookie 时不区分端口，于是同一域名下不同端口的两个站点会互相覆盖对方的登录状态——
+        表现为「明明登录过，换个端口的站点却一直要求重新登录」。现在按站点各自命名，不再冲突。
+        升级后所有人需要重新认证一次，浏览器访问时会自动跳转完成，无需人工操作。
+    en:
+      title: Unified Access credentials are now scoped per site
+      detail: >-
+        This only affects deployments with Unified Access enabled; everything else is unchanged. The credential
+        cookie previously used one shared name for every site, and browsers do not scope cookies by port, so two
+        sites on the same hostname but different ports overwrote each other's login state - which looked like
+        "I am logged in, yet this other port keeps asking me to log in again". Each site now gets its own cookie
+        name, so they no longer collide. Everyone has to authenticate once more after the upgrade; browsers
+        complete that automatically on the next page load, with nothing to do by hand.
+
+  - id: v1_3_25_redis_cache_error_semantics
+    version: v1.3.25
+    kind: notice
+    level: normal
+    page: ''
+    doc: https://doc.samwaf.com/quickstart/Update.html
+    apply:
+      type: none
+    zh:
+      title: 使用 Redis 缓存时不再因为一次读取失败而要求重新登录
+      detail: >-
+        只影响把 conf/config.yml 的 cache.type 设成 redis 的部署，默认的 memory 缓存无感。
+        缓存读取失败此前与"令牌不存在"是同一个结果，管理端据此判定登录状态失效，
+        表现为登录后随机跳回登录页。现在两者分开：确实读不到令牌才要求重新登录，
+        缓存后端本身不可用时提示"服务暂时不可用，请稍后重试"并保留登录状态，恢复后继续操作即可。
+        同时管理端鉴权对 Redis 的访问次数从每个请求 4 次降为 1 次，Redis 连接池大小改为跟随 CPU 核数
+        （可用 cache.redis.pool_size 指定），启动日志会打印当前使用的缓存后端，缓存错误也会记入日志与运行诊断包。
+        另外，令牌有效期改为每次访问都续期，与该配置项「空闲多久未操作即失效」的说明一致。
+    en:
+      title: A single failed cache read no longer forces a new login when Redis is used
+      detail: >-
+        This only affects deployments that set cache.type to redis in conf/config.yml; the default memory cache
+        is unaffected. A failed cache read used to be indistinguishable from "the token is not there", so the
+        console treated it as an expired session - which looked like being bounced back to the login page at
+        random shortly after signing in. The two cases are now separate: only a genuinely missing token asks for
+        a new login, while a cache backend that is temporarily unavailable reports "service temporarily
+        unavailable, please retry" and keeps the session, so work continues once it recovers. Console
+        authentication also went from four Redis round trips per request down to one, the Redis connection pool
+        now scales with CPU count (set cache.redis.pool_size to pin it), the startup log states which cache
+        backend is in use, and cache errors are recorded in the log and in the diagnostic package. Token
+        lifetime is now refreshed on every request, matching the "expires after this long without activity"
+        wording of that setting.
+  - id: v1_3_25_weblog_payload_truncate_and_index
+    version: v1.3.25
+    kind: notice
+    level: normal
+    page: ''
+    doc: https://doc.samwaf.com/quickstart/Update.html
+    apply:
+      type: none
+    zh:
+      title: 超长报文落库时截断，并为访问日志按 IP / 规则查询补索引
+      detail: >-
+        单条请求的报文列（请求体、响应体、表单、请求头、Cookie、响应头）超过 64KB 时，
+        只保留前 64KB 落库，该条日志会带上"已截断"标记，详情页据此提示报文不完整。
+        截断只发生在写入数据库这一步：检测引擎、自定义规则、Kafka 推送拿到的仍是完整报文，
+        判定结果与推送内容都不受影响。日志库体积此前没有任何单条上限，一次大文件响应就能撑出一条巨大的记录。
+        本次同时为访问日志补了三条索引：按来源 IP 查、按触发规则查、按日期查机器人流量。
+        原有索引的首列都是时间，这三类查询只能扫完整段时间再逐行过滤，数据量大时明显变慢。
+        升级后首次启动会创建索引，日志量大的实例这一步可能需要数分钟，启动日志里会打印每条索引的耗时，
+        期间请勿强制结束进程。另外 IP 标签的写入改为整批一条语句，高并发下对数据库的往返次数明显下降。
+    en:
+      title: Oversized payloads are truncated on write, plus new access-log indexes for IP and rule lookups
+      detail: >-
+        When a request's payload columns (request body, response body, form data, headers, cookies, response
+        headers) exceed 64KB, only the first 64KB is stored and the entry is flagged as truncated, which the
+        detail page uses to warn that the payload is incomplete. Truncation happens only on the database write:
+        the detection engine, custom rules and the Kafka feed still receive the complete payload, so verdicts and
+        exported records are unaffected. Until now no per-record limit existed at all, so a single large response
+        could produce one enormous row. This release also adds three indexes to the access log: by source IP, by
+        triggered rule, and by date for bot traffic. Every existing index starts with the timestamp column, so
+        those three lookups had to scan the whole time range and filter row by row, which gets slow on large
+        datasets. The indexes are built on the first start after upgrading; on instances with a large log volume
+        this can take several minutes, the startup log prints the time each index took, and the process should
+        not be killed while it runs. IP tag counters are now written with a single batched statement, cutting
+        database round trips considerably under load.
+  - id: v1_3_25_weblog_payload_split_and_iptag_merge
+    version: v1.3.25
+    kind: notice
+    level: normal
+    page: ''
+    doc: https://doc.samwaf.com/quickstart/Update.html
+    apply:
+      type: none
+    zh:
+      title: 报文改存独立表，IP 标签切换存放位置时自动合并历史
+      detail: >-
+        访问日志的报文（请求体、响应体、表单、Cookie、响应头、原始字节）不再和日志记录存在同一张表里，
+        改为写入新的报文表，按请求编号一对一存放。日志列表、按 IP / 规则检索、统计扫描都不再顺带读这些大字段，
+        看报文时才按主键取一次。升级后首次启动会自动建表，不搬历史数据：升级之前的日志报文仍在原处，
+        详情页照常能看，随保留期自然到期。日志页面的展示与筛选没有变化。
+        另外，风险日志页的"标签数据存放位置"切换后，会自动把原库里已积累的标签并到新库：
+        相同 IP + 标签的次数相加，首次访问时间取早的、最近访问时间取晚的，合并完清空原库的这部分数据。
+        以前切换会让历史标签看起来消失（数据其实还在原库），现在不会了；合并期间页面会显示"正在合并"，
+        完成后自动刷新。新安装的实例默认把标签放统计库，已有实例保持你当前的设置不变。
+    en:
+      title: Payloads move to their own table, and switching the IP tag location now merges the history
+      detail: >-
+        Access log payloads (request body, response body, form data, cookies, response headers, raw bytes) no
+        longer live in the same table as the log record. They are written to a new payload table, one row per
+        request id. Listing logs, searching by IP or rule, and statistics scans no longer drag those large
+        columns along; the payload is fetched by primary key only when someone opens it. The table is created on
+        the first start after upgrading and no history is moved: payloads recorded before the upgrade stay where
+        they are, remain visible in the detail view, and expire with the retention period as usual. Nothing
+        changes in what the log page shows or how it filters.
+        Separately, switching "tag data location" on the risk log page now merges the tags already accumulated in
+        the other database: counts for the same IP and tag are added up, the first-seen time keeps the earlier
+        value and the last-seen time the later one, and the merged rows are cleared from the source. Switching
+        used to make tag history look like it had vanished (the data was still in the old database); that no
+        longer happens. The page shows a merging indicator and refreshes itself when it finishes. New
+        installations store tags in the stats database by default; existing installations keep their current
+        setting.
+
+  - id: v1_3_25_log_tiered_storage
+    version: v1.3.25
+    kind: notice
+    level: normal
+    page: ''
+    doc: https://doc.samwaf.com/quickstart/Update.html
+    apply:
+      type: none
+    zh:
+      title: 日志分层存储：访问窄行与安全事件分表，新增观察名单，日志导出改按时间段
+      detail: >-
+        日志现在按用途分层存放：命中规则或被拦截的请求进「安全事件」表并保留完整报文（随日志保留天数）；
+        所有被记录的请求另写一行窄行进「访问日志」表（默认保留 30 天，可在日志配置里调）。
+        默认档位「全部入库」，升级后行为与之前一致；流量很大的站点可在日志配置里把「访问日志档位」调成
+        「仅安全事件」或「采样入库」，但这样会失去 CC 阈值推荐、AI 训练负样本与异常 IP 的正常行为回溯，
+        CC 阈值推荐界面在「仅安全事件」档会说明不可用原因。
+        IP 标签不再为每个 IP 记「正常」标签，放行榜的次数改由统计数据给出，标签列表更干净。
+        风险日志页可以把可疑 IP「加入观察」：观察期内该 IP 的所有请求带完整报文留痕（默认 7 天）。
+        「导出日志库」不再是整库拷贝，改为按时间段导出选定层（访问日志/安全事件/报文/历史库），产物仍是一个加密 SQLite 文件。
+        升级后首次启动自动建表，历史数据不动、照旧可查。
+    en:
+      title: Tiered log storage, an IP watchlist, and time-ranged log export
+      detail: >-
+        Logs are now stored in tiers by purpose: requests that hit a rule or get blocked go to the security-event
+        table with their full payload (kept for the log retention period); every recorded request also writes a
+        narrow row to the access-log table (kept 30 days by default, adjustable in log settings).
+        The default mode "store everything" behaves exactly as before. Very busy sites can switch the access-log
+        mode to "security events only" or "sampled" in log settings, at the cost of CC threshold
+        recommendations, AI training negative samples and the ability to look back at a suspicious IP's normal
+        traffic; the CC recommendation panel explains why it is unavailable in "security events only" mode.
+        IP tags no longer record a "normal" tag for every IP - pass counts on the pass ranking now come from
+        statistics data, keeping the tag list clean.
+        The risk log page can put a suspicious IP under observation: while observed, every request from that IP
+        is captured with its full payload (7 days by default).
+        "Export log database" no longer copies the whole database; it exports a chosen time range and tiers
+        (access log / security events / payloads / legacy) into a fresh encrypted SQLite file.
+        Tables are created on the first start after upgrading; existing data is untouched and stays readable.
+
+  - id: v1_3_25_log_source_path_analysis
+    version: v1.3.25
+    kind: notice
+    level: normal
+    page: /wafanalysis/wafanalysissourcepath
+    doc: https://doc.samwaf.com/quickstart/Update.html
+    apply:
+      type: navigate
+    zh:
+      title: 新增「来源与路径分析」：从来源和路径两个视角看流量构成
+      detail: >-
+        「数据分析 - 来源与路径分析」是本版本新增的独立页面，把访问日志按天汇总后分两个视角呈现：
+        按来源看哪些 IP 或访客打得最多（请求数、命中规则次数、去重路径数、UA 分布），
+        按路径看哪些接口被访问得最多（请求数、去重来源数、规则分布）。两个视角都可以按站点和天数筛选，
+        表格里可以直接对某个来源 IP 加黑或加白（需要先选定站点，因为黑白名单是按站点生效的）。
+        数据来自本版本新增的按天汇总表，在日志写入时同步累加，不去扫原始日志表，
+        所以即便把「访问日志档位」调成「采样入库」或「仅安全事件」，这个页面依然有数。
+        路径先模板化再汇总——数字段、UUID、hex 串归一成占位符，/user/1001 与 /user/1002 会聚成同一条；
+        每个站点每天的模板数封顶 5000，超出的归入一条 {overflow}，避免随机路径把表刷爆。
+        需要知道的是：汇总只从升级之后的流量开始积累，历史日志不回填，
+        所以刚升完级这个页面是空的，跑满一天之后才有完整的昨天数据。
+        新增的汇总表已经列入「数据保留策略」页，默认不自动清理，与现有各表的默认一致，
+        觉得占空间可以自己在那里开启定期清理。
+    en:
+      title: New Source and Path Analysis page, viewing traffic by origin and by path
+      detail: >-
+        Data Analysis - Source and Path Analysis is a new standalone page in this version. It rolls up access
+        logs per day and presents them from two angles: by source, showing which IPs or visitors send the most
+        requests (request count, rule hits, distinct paths, UA distribution), and by path, showing which
+        endpoints are hit the most (request count, distinct sources, rule distribution). Both angles filter by
+        website and number of days, and the table lets you block or allow a source IP directly - you pick the
+        website first, since block and allow lists apply per website.
+        The data comes from new daily rollup tables accumulated as logs are written rather than by scanning the
+        raw log tables, so the page still has data even when the access-log mode is set to sampled or
+        security-events-only.
+        Paths are templated before being rolled up - numeric segments, UUIDs and hex strings become
+        placeholders, so /user/1001 and /user/1002 collapse into one row. Each website is capped at 5000
+        templates per day and anything beyond that lands in a single {overflow} row, so random paths cannot
+        flood the table.
+        Worth knowing: the rollups only start accumulating from traffic after the upgrade and historical logs
+        are not backfilled, so the page is empty right after upgrading and gives a complete picture of
+        yesterday only once a full day has passed.
+        The new rollup tables are listed on the Data Retention page with automatic cleanup off by default,
+        matching every other table there; turn it on yourself if the space matters to you.
+
+  - id: v1_3_25_weblog_exclude_ip
+    version: v1.3.25
+    kind: notice
+    level: normal
+    page: /waf/wafvisitlog
+    doc: https://doc.samwaf.com/quickstart/Update.html
+    apply:
+      type: navigate
+    zh:
+      title: 可按来源IP排除日志记录：办公出口与探测机的噪音不再进日志
+      detail: >-
+        以往只能按 URL 前缀排除记录（在网站编辑里），本版本新增按来源 IP 排除，两个作用域各一份：
+        全局清单在「防护日志 - 访问日志」页的「日志配置」里，站点清单在网站编辑的「记录日志时排除IP」里。
+        清单语法与黑白名单完全一致——单个 IP、CIDR、通配符、区间，或者 group:组短码 引用一个 IP 组
+        （改组内容对所有引用它的站点立即生效），逗号或换行分隔，# 开头为注释。
+        写错的模式在保存时就被拒绝并指出是哪一条，不会静默忽略；两份清单都不需要重启，保存即生效。
+        只静音正常请求：被排除 IP 的安全事件（命中规则、被拦截）照常记录。这是刻意这样定的——
+        办公出口往往是一个 NAT 共享地址，一刀切静音等于「真被人打了也看不见」。
+        被排除的请求不写日志、不计入请求数统计、也不进新的来源与路径汇总；
+        但站点的进出流量字节仍然照计（字节计量在引擎侧，不经日志队列），所以流量图上还能看到它们，
+        这是预期行为，不是漏排。
+        默认两份清单都是空的，升级后行为与之前完全一致，不需要任何操作。
+        另外顺带说明：SamWaf 自带的访问认证探测点（`/<访问认证前缀>/ping`，恒回 204）从来不产生访问日志，
+        不需要也无法为它配置排除。
+    en:
+      title: Exclude log recording by source IP, keeping office exits and probes out of the logs
+      detail: >-
+        Until now records could only be excluded by URL prefix in the website editor. This version adds
+        exclusion by source IP, with one list per scope: the global list lives in Log Settings on the
+        Protection Logs - Access Log page, and the per-site list in the website editor as "Exclude IP When
+        Logging".
+        The syntax matches the block and allow lists exactly - a single IP, CIDR, wildcard, range, or
+        group:CODE referencing an IP group (changing the group's contents takes effect immediately for every
+        website naming it). Entries are comma- or newline-separated and # starts a comment.
+        A malformed pattern is rejected when you save, naming the offending line rather than being silently
+        ignored, and neither list needs a restart - saving is enough.
+        Only plain requests are silenced: security events from an excluded IP (rule hits, blocked requests) are
+        still recorded. That is deliberate - an office exit is often one NAT-shared address, and silencing it
+        outright would mean a real attack from behind it becomes invisible.
+        Excluded requests write no log row, are not counted in request statistics, and do not reach the new
+        source and path rollups. Their inbound and outbound bytes are still metered, because byte accounting
+        happens in the engine and never passes through the log queue, so they remain visible on the traffic
+        charts - that is expected, not a missed exclusion.
+        Both lists are empty by default, so behavior after upgrading is exactly as before and nothing needs to
+        be done. As a side note, SamWaf's own access-authentication probe endpoint (`/<access prefix>/ping`,
+        always 204) never produces an access log, so there is nothing to exclude for it.
+
+  - id: v1_3_25_log_time_partition
+    version: v1.3.25
+    kind: notice
+    level: high
+    page: /waf/wafvisitlog
+    doc: https://doc.samwaf.com/quickstart/Update.html
+    apply:
+      type: navigate
+    zh:
+      title: 日志归档改为按月切分区，过期回收改为丢整个分区（MySQL/PostgreSQL 的归档表首次开始回收）
+      detail: >-
+        日志归档以前由行数与文件大小决定什么时候切，现在改成**按月**切：一个月一个分区，
+        同一个月里真被写爆了才会提前切一次（分区名带序号）作为兜底。好处是「某段时间的日志在哪个分区」
+        变成算得出来的，不再需要挨个猜；「访问日志」页的归档下拉因此显示**时间段**而不是文件名或表名，
+        按月切的显示成 2026-09，升级前按体积切的显示它记录的起止日期，鼠标悬停仍能看到原始名字。
+        过期回收同时改成丢整个分区：SQLite 删掉整个归档文件，MySQL/PostgreSQL 丢掉整张归档表，
+        不再逐行删除加 VACUUM。判断过期用的是分片记录里那批数据真实的最晚时间，
+        所以停机几天或同月切了两次都不会把还在保留期内的数据算成过期。
+        **MySQL/PostgreSQL 用户请先看这一段**：此前归档表没有任何清理逻辑，很可能已经堆了多张
+        access_log_ 或 web_logs_ 开头的历史表；升级后第一次执行「删除历史日志」任务（每天 05:00）时，
+        其中**已超过保留期**的会被丢掉，系统日志里逐张记录表名、所用保留天数与数据截止时间。
+        这是保留期设置本来就承诺的行为，也让两种部署终于一致。如果有哪一段历史想留：
+        先把日志保留天数调长，或用数据库自己的工具把那张表复制到别处，再让清理继续。
+        另外 MySQL/PostgreSQL 上每一层是独立的表，因此可以按层各走各的保留期——
+        访问日志窄行走「访问日志保留天数」（默认 30 天），安全事件与报文走「日志保留天数」；
+        SQLite 的一个分区是一个文件、三层都在里面，只能按较长的「日志保留天数」整体回收。
+        升级前切出来的旧分片（包括最早那种只有 web_logs 的）**照旧可以查**，不需要任何迁移动作，
+        读取时会自动适配它实际有哪些表和哪些列，到期后同样整体回收。
+        历史归档文件一律**只读**打开，查询不会再改动它们（不补表、不补列、不建索引），
+        同时打开多个历史分区时内存占用也收小了。分片记录还在、文件却已不在（例如被手工删掉）的分区，
+        归档下拉里会标「文件缺失」且不可选，查询时会说明跳过了哪些分区，可在「分区管理」里删除这条记录。
+    en:
+      title: Log archives are now cut per month and expired by dropping whole partitions (MySQL/PostgreSQL archive tables start being recycled)
+      detail: >-
+        Log archives used to be cut when a row count or file size threshold was crossed. They are now cut
+        **per month**: one partition per month, with an extra numbered partition only as a fallback when a
+        single month really overflows. The point is that which partition holds a given time range becomes
+        something that can be computed instead of guessed, so the archive dropdown on the access log page now
+        shows a **time range** rather than a file or table name - 2026-09 for monthly partitions, and the
+        recorded start and end dates for shards cut by size before the upgrade. Hovering still shows the
+        original name.
+        Expiry now drops a whole partition: SQLite deletes the entire archive file and MySQL/PostgreSQL drops
+        the archive table, instead of deleting rows and running VACUUM. Expiry is judged by the real latest
+        timestamp of the data recorded for that shard, so being offline for days, or cutting twice within one
+        month, never marks data still inside the retention window as expired.
+        **MySQL/PostgreSQL users should read this part first**: archive tables previously had no cleanup at
+        all, so you may already have many history tables starting with access_log_ or web_logs_. The first run
+        of the daily 05:00 history cleanup after upgrading drops those **past their retention period**, writing
+        one log line per table with its name, the retention days applied and the data cutoff. This is what the
+        retention setting has always promised, and it finally makes both deployment types behave alike. To keep
+        a particular stretch of history, raise the log retention days first, or copy that table elsewhere with
+        your database tools, then let cleanup proceed.
+        On MySQL/PostgreSQL each tier is its own table, so tiers expire on their own schedules - access-log
+        narrow rows follow "access log retention days" (30 by default) while security events and payloads
+        follow "delete history log (days)". On SQLite one partition is one file holding all tiers, so it can
+        only be recycled as a whole on the longer "delete history log (days)".
+        Shards cut before the upgrade, including the earliest ones that only hold web_logs, **remain
+        queryable** with no migration on your part: reads adapt to whichever tables and columns a shard
+        actually has, and they are recycled whole once they expire.
+        Archived history files are always opened **read-only**: queries never modify them (no tables, columns
+        or indexes are added), and opening several history partitions at once uses much less memory. A
+        partition whose record still exists but whose file is gone (for example deleted by hand) is marked
+        "file missing" and cannot be selected in the archive dropdown; queries say which partitions were
+        skipped, and the record can be removed under Partitions.
+
+  - id: v1_3_25_log_auto_partition_and_uuid
+    version: v1.3.25
+    kind: notice
+    level: normal
+    page: /waf/wafvisitlog
+    doc: https://doc.samwaf.com/quickstart/Update.html
+    apply:
+      type: navigate
+    zh:
+      title: 查日志不用再挑分区：时间范围自动决定查哪里，按访问识别码可直接全库查找
+      detail: >-
+        「日志归档库」下拉的默认值改成了**自动（按时间范围）**：分区由你选的时间范围算出来，
+        跨多个分区时会自动合并翻页，列表上方会说明这次覆盖了哪几个分区。
+        此前日期与归档是两个互不联动的条件，选了上个月的日期却停在实时分区，结果永远是空的。
+        需要盯住某一个分区时（排障、导出），下拉里仍然可以手动锁定，并且按「实时 / 按月分区 /
+        升级前按体积切的旧分片」分了组。跨分区时列表统一按时间排序——分区之间只有时间是可比的。
+        **填了「访问识别码」时会忽略时间与分区，直接跨全部分区查找**，命中即停并告诉你是在哪个分区找到的。
+        访问识别码是日志表的主键，一次查找就是一次索引命中；最常见的场景正是访客把拦截页上的识别码
+        报给管理员——管理员手里只有这串码，并不知道那次访问是哪天、更不知道在哪个分区。
+        查不到时会明确列出三种可能：记录已过保留期被回收、识别码抄错或被截断、
+        那次请求本来就没有被记录（来源IP在排除清单里，或访问日志档位是「仅安全事件」而它是一次正常请求）。
+        另外两处顺带改了：归档下拉里同一天切出来的多个旧分片现在带上时分（2026-08-19 13:51~14:40）
+        并把条数写成「13.5 万条」，不再是七个一模一样的日期；风险日志的「访问 IP 明细」弹窗
+        补上了时间范围（默认最近 30 天），不用再一个归档一个归档地翻。
+    en:
+      title: "No more picking a partition - the time range decides where to look, and a visit identifier is looked up across all of them"
+      detail: >-
+        The archive dropdown now defaults to **Auto (by time range)**: partitions are derived from the time
+        range you pick, paging spans them automatically, and a line above the list names the partitions this
+        query covered. Previously the date and the archive were two conditions that knew nothing about each
+        other, so picking last month's dates while the archive stayed on the live partition always returned
+        nothing. A specific partition can still be locked from the dropdown when troubleshooting or exporting,
+        and the entries are grouped into Live, monthly partitions, and shards cut by size before the upgrade.
+        When a query spans partitions the list is sorted by time, since time is the only thing comparable
+        across them.
+        **Filling in the visit identifier ignores the time range and the partition and searches all of them**,
+        stopping at the first hit and telling you which partition it came from. The identifier is the primary
+        key of the log tables, so each check is a single index lookup. This is exactly the common case where a
+        visitor reports the identifier from a block page: the administrator has only that string and knows
+        neither the date nor the partition. When nothing is found, three possible reasons are stated: the
+        record passed its retention period and was recycled, the identifier was mistyped or truncated, or the
+        request was never recorded (its source IP is on an exclusion list, or the access log mode is
+        "security events only" and it was a plain request).
+        Two smaller fixes come along: several old shards cut on the same day now show their times
+        (2026-08-19 13:51~14:40) with counts written as readable numbers instead of seven identical dates, and
+        the Access IP Details dialog on the risk log page gained a time range (last 30 days by default) so it
+        no longer takes going through archives one by one.
+
+  - id: v1_3_25_cc_ban_request_logging
+    version: v1.3.25
+    kind: notice
+    level: normal
+    page: /waf/wafvisitlog
+    doc: https://doc.samwaf.com/guide/BlockingPage.html
+    apply:
+      type: navigate
+    zh:
+      title: CC 封禁期间的阻断请求可按访问识别码查询
+      detail: >-
+        CC 封禁期间，每次实际阻断请求保留独立的访问识别码，并记录来源 IP、站点、路径、方法、响应码与耗时等窄行信息。
+        这些事件同时出现在访问日志和安全事件中，不保存重复请求的完整报文；首次触发封禁的日志仍按现有规则保留报文。
+        封禁期间的请求数、拦截数与窄行磁盘占用会相应增加，通知仍沿用封禁提醒节流。
+        日志异步写入，查询需开启日志持久化、写入成功且记录尚在对应视图保留期内。
+        内置拦截页同时显示访客 IP；已有自定义模板可以自行加入 [[.SAMWAF_IP]]，其值与日志来源 IP 一致。
+        顶部访问识别码查询忽略时间范围与所选分区，其余筛选条件仍生效；详情与请求复制会反馈未命中或读取错误。
+    en:
+      title: Requests blocked during a CC ban can be looked up by visit identifier
+      detail: >-
+        Each request blocked during a CC ban retains its own visit identifier and a narrow log row containing source IP,
+        site, path, method, response status and duration. These events appear in both access logs and security events,
+        without retaining repeated full payloads. The request that initially triggers the ban keeps its payload under the existing rules.
+        Request counts, blocked counts and narrow-row disk usage increase accordingly; ban notifications retain their throttling.
+        Logs are written asynchronously and require persistence to be enabled, a successful write and an unexpired record in the selected view.
+        The built-in block page also shows the visitor IP. Existing custom templates can add [[.SAMWAF_IP]], using the same source IP as the logs.
+        The top visit-identifier lookup ignores the date range and selected partition while other filters still apply.
+        Request details and request-copy actions report missing records or read errors.
+
+  - id: v1_3_25_health_manual_test
+    version: v1.3.25
+    kind: notice
+    level: normal
+    page: /waf/wafhost
+    doc: https://doc.samwaf.com/guide/Host.html
+    apply:
+      type: navigate
+    zh:
+      title: 网站健康检测支持保存前手动测试
+      detail: >-
+        在网站编辑的「健康检测」页点击「测试健康检测」，可用当前未保存的回源与检测配置验证源站。
+        手动测试与定时健康检测共用请求和状态码判断逻辑，每个源站显示本次结果、实际连接地址、请求信息与耗时。
+        负载均衡使用本站已保存的后端列表，分批检测；手动测试超时时间为 1–120 秒。
+        即使定时检测关闭也可以手动测试；测试不保存配置、不累加连续成功失败次数，也不改变运行健康状态。
+        定时检测仍按原有配置与连续次数阈值运行。
+    en:
+      title: Test website health checks before saving
+      detail: >-
+        Click Test Health Check in the website editor to check the origin using the current unsaved origin and health settings.
+        Manual and scheduled checks share request and status-code evaluation logic. Each origin shows its result, dial address, request information and duration.
+        Load-balanced sites use their saved backend list and check it in batches. Manual check timeouts range from 1 to 120 seconds.
+        You can test while scheduled checks are disabled. Testing does not save settings, increment consecutive counters or change runtime health status.
+        Scheduled checks continue to use their existing configuration and consecutive thresholds.
+
+  - id: v1_3_25_httpauth_path_scope
+    version: v1.3.25
+    kind: notice
+    level: normal
+    page: /waf/wafhost
+    doc: https://doc.samwaf.com/quickstart/Update.html
+    apply:
+      type: navigate
+    zh:
+      title: 网站密码访问可以只保护指定路径了，还可搭配免密IP组
+      detail: >-
+        「网站密码访问」新增**保护范围**设置，站点编辑的密码访问页签里可选三种：
+        整站开启（原有行为，默认）、仅指定路径需要密码（比如只保护 /admin、/api/manage
+        这类后台与敏感接口）、除指定路径外全站需要密码（比如只放开 /healthz 给监控探针）。
+        已有站点不改配置则行为完全不变。路径清单每行一条（也支持逗号分隔），
+        普通路径按整段目录匹配：写 /admin 保护 /admin 及其全部子路径，不会误伤 /adminconsole；
+        带 * 的条目按通配匹配且 * 可以跨目录，如 *.php、/api/*/private。
+        同时新增**免密IP组**：命中所选 IP 组的来源跳过密码校验直接访问，适合内网监控、
+        健康检查这类无法登录的调用方；IP 组在「IP组」页面统一维护，组被删除后自动回落为需要密码。
+        一个兜底行为需要知道：保护范围选了「仅指定路径」但路径清单是空的，会按整站保护并在
+        系统日志里提示——配置不完整时不会让这道门静默失效。
+    en:
+      title: Site password access can now protect only specific paths, with a password-free IP group option
+      detail: >-
+        Site password access gains a **protection scope** setting in the password tab of site editing,
+        with three choices: whole site (the original behavior, and the default), only listed paths
+        require the password (protect just /admin or /api/manage style consoles and APIs), and whole
+        site except listed paths (open only /healthz for a monitor probe, for example). Existing sites
+        keep exactly the same behavior until you change the setting. The path list takes one entry per
+        line (commas also work); a plain path matches a whole directory tree, so /admin protects
+        /admin and everything below it without touching /adminconsole, while an entry containing *
+        is a wildcard match where * also crosses directories, as in *.php or /api/*/private.
+        A **password-free IP group** comes along: sources hitting the selected IP group skip the
+        password check entirely, which suits internal monitors and health checks that cannot log in.
+        Groups are managed on the IP Groups page, and deleting a group simply restores the password
+        requirement. One fallback to know: if the scope is set to "only listed paths" but the list is
+        empty, protection falls back to the whole site with a note in the system log - an incomplete
+        configuration never silently disables the gate.
+
+  - id: v1_3_25_api_query_param_case
+    version: v1.3.25
+    kind: notice
+    level: high
+    page: /oplatform/doc
+    doc: https://doc.samwaf.com/quickstart/Update.html
+    apply:
+      type: navigate
+    zh:
+      title: 通过 API 调用时，查询参数名统一为全小写
+      detail: >-
+        以下接口的查询参数名统一改为与文档一致的全小写形式，请检查你的对接脚本：
+        网站详情 / 删除 / 防御开关 / 启停开关（wafhost/host/detail、host/del、host/guardstatus、
+        host/startstatus），规则详情 / 删除 / 启用开关（wafhost/rule/detail、rule/del、rule/rulestatus），
+        攻击日志详情与报文复制（waflog/attack/detail、waflog/attack/httpcopymask）。
+        即 CODE 改为 code、REQ_UUID 改为 req_uuid、GUARD_STATUS 改为 guard_status、
+        START_STATUS 改为 start_status；rule_status 本就是小写，不变。
+        本次同时修正了开放平台文档中一批方法与路径标注有误的接口（IP/URL 黑白名单、
+        SSL 证书、主机防火墙 IP 封禁、统计与系统日志等），请以页面上的最新说明为准。
+    en:
+      title: API query parameter names are now all lower case
+      detail: >-
+        The query parameter names of the following endpoints now match the documentation exactly,
+        all lower case - check your integration scripts: site detail / delete / protection toggle /
+        start-stop toggle (wafhost/host/detail, host/del, host/guardstatus, host/startstatus),
+        rule detail / delete / enable toggle (wafhost/rule/detail, rule/del, rule/rulestatus),
+        and attack log detail plus HTTP copy-mask (waflog/attack/detail, waflog/attack/httpcopymask).
+        In other words CODE becomes code, REQ_UUID becomes req_uuid, GUARD_STATUS becomes guard_status,
+        and START_STATUS becomes start_status; rule_status was already lower case and is unchanged.
+        A set of endpoints whose documented method or path was wrong has also been corrected
+        (IP/URL block and allow lists, SSL certificates, host firewall IP blocking, statistics and
+        system logs) - use the updated descriptions on the page.
+
+  - id: v1_3_25_ssl_order_apply_method_value
+    version: v1.3.25
+    kind: notice
+    level: normal
+    page: /oplatform/doc
+    doc: https://doc.samwaf.com/quickstart/Update.html
+    apply:
+      type: navigate
+    zh:
+      title: 通过 API 申请/续期 SSL 证书时，apply_method 只接受 http01 或 dns01
+      detail: >-
+        新建（wafhost/sslorder/add）与续期（wafhost/sslorder/edit）两个接口现在会在入库前校验
+        申请方式 apply_method，取值只支持 http01（HTTP 文件验证）与 dns01（DNS 验证），
+        其余取值直接返回错误，不再建单。此前传入其它内容时订单会建立成功，随后在申请阶段
+        以 ACME 侧的 could not determine solvers 失败，回指不到入参。
+        早期文档把申请方式写成了 http/dns，容易照抄；开放平台文档现已列出正确取值。
+        界面上的申请方式本身不受影响（界面提交的本来就是 http01/dns01）。
+    en:
+      title: SSL certificate orders via API accept only http01 or dns01 as apply_method
+      detail: >-
+        The create (wafhost/sslorder/add) and renew (wafhost/sslorder/edit) endpoints now validate
+        apply_method before storing the order, and accept only http01 (HTTP file validation) or
+        dns01 (DNS validation); any other value is rejected instead of creating an order.
+        Previously any value created an order that then failed at issuance with an ACME
+        "could not determine solvers" error that pointed nowhere near the offending parameter.
+        Earlier documentation listed the method as http/dns, which is easy to copy by mistake;
+        the Open Platform documentation now states the accepted values.
+        Nothing changes in the console itself, which already submits http01/dns01.
+
+  - id: v1_3_25_ipblock_layer_removed
+    version: v1.3.25
+    kind: notice
+    level: normal
+    page: /waf/wafipBlocklist
+    doc: https://doc.samwaf.com/guide/IPBlack.html
+    apply:
+      type: navigate
+    zh:
+      title: IP 黑名单回归纯 WAF 层，系统层封禁统一到「防火墙 IP 封禁」页
+      detail: >-
+        IP 黑名单新增条目不再提供封禁层级选择，统一在 WAF 应用层拦截（按网站生效）。
+        需要系统防火墙层封禁（内核 DROP，对整机所有端口生效）时，请到
+        「网站防护 - 防火墙 IP 封禁」页面操作，该页面的规则列表即系统层封禁的完整视图。
+        此前通过黑名单「两者」层级添加的条目，WAF 层记录继续在本页正常生效与管理，
+        系统层记录保留在「防火墙 IP 封禁」页管理，两条记录互不影响。
+        黑名单新增与编辑使用全网 CIDR（如 0.0.0.0/0、::/0）时需要二次确认后保存。
+        已启用的 IP 白名单优先放行，URL 白名单等放行规则同样有效；请确认所选网站范围。
+        0.0.0.0/0 仅覆盖 IPv4，::/0 仅覆盖 IPv6。
+    en:
+      title: The IP blacklist is WAF-layer only; system-layer blocking lives on the Firewall IP Block page
+      detail: >-
+        New IP blacklist entries no longer offer a blocking layer choice and always take effect
+        at the WAF application layer (per website). For system-firewall blocking (kernel DROP,
+        effective on every port of the machine), use the Website Protection - Firewall IP Block
+        page, whose rule list is the complete view of system-layer blocks.
+        Entries previously added through the Both layer keep working: the WAF-layer record
+        remains managed on this page, and the system-layer record remains managed on the
+        Firewall IP Block page; the two are independent.
+        Adding or editing a whole-network CIDR (such as 0.0.0.0/0 or ::/0) requires a second
+        confirmation before saving. Enabled IP allowlists take precedence; URL allowlists and
+        other allow rules also remain effective. Check the selected website scope.
+        0.0.0.0/0 covers IPv4 only, and ::/0 covers IPv6 only.
+
+  - id: v1_3_25_firewall_ip_global_nocatchall
+    version: v1.3.25
+    kind: notice
+    level: normal
+    page: /waf-host/wafFirewallIPBlock
+    doc: https://doc.samwaf.com/guide/FirewallIPBlock.html
+    apply:
+      type: navigate
+    zh:
+      title: 防火墙 IP 封禁不再关联网站，并拒绝全网封禁写法
+      detail: >-
+        「防火墙 IP 封禁」页的新增、编辑与批量新增不再要求选择网站：系统防火墙封禁
+        本来就是整机全局生效（所有端口，含管理端），与网站无关，列表及搜索栏也不再展示网站。
+        存量带网站标记的记录不用动，编辑保存一次即自动归一为全局。
+        本页面拒绝覆盖整个 IP 地址空间的封禁写法
+        （0.0.0.0/0、::/0、全通配、全空间区间）：系统防火墙封禁对整机所有端口生效，
+        全网封禁会把管理端一并挡住，导致无法登录管理界面。
+    en:
+      title: Firewall IP blocks are no longer tied to a website, and whole-network blocks are rejected
+      detail: >-
+        The add, edit and batch-add dialogs on the Firewall IP Block page no longer ask for a
+        website. A system-firewall block is machine-wide by nature (every port, including the
+        console), so it has nothing to do with any single website. The website column and
+        filter are also removed. Existing records that carry a website label do not need any
+        action - saving an edit once normalizes them to Global.
+        This page rejects block entries that cover the entire IP
+        address space (0.0.0.0/0, ::/0, full wildcards, full-space ranges): a system-firewall
+        block applies to every port of the machine, and blocking the whole network would lock
+        out the console along with everything else, leaving you unable to sign in.
+
+  - id: v1_3_25_iptag_index_check
+    version: v1.3.25
+    kind: notice
+    level: normal
+    apply:
+      type: none
+    zh:
+      title: 启动时自动检查并修复 IP 标签表索引
+      detail: >-
+        每次启动会在数据库迁移完成后检查 IP 标签表（ip_tags）的唯一索引，缺失时自动补建。
+        行数较少且无重复的表直接建索引；表较大或含重复行时，旧数据改存为 ip_tags__heal，
+        后台分批并回新表，期间风险日志页的标签计数会逐步变动，完成后自动稳定，重启会从断点继续。
+        并回时同一 IP 与标签的计数相加，已不再记录的「正常」标签不会并回。
+        IP 标签写入失败现在会输出 Warn 级别日志（同类错误 10 分钟内只记一次）。
+    en:
+      title: IP tag table indexes are now checked and repaired at startup
+      detail: >-
+        After database migrations finish, every startup checks the unique index on the IP tag table
+        (ip_tags) and rebuilds it when missing. Small tables without duplicates get the index directly;
+        large tables or tables with duplicate rows keep their old data as ip_tags__heal, which is merged
+        back in batches in the background. Tag counts on the risk log page change gradually meanwhile and
+        settle when it finishes; a restart resumes from where it stopped. Counts of the same IP and tag
+        are added together, and the "normal" tags that are no longer recorded are not merged back.
+        IP tag write failures are now logged at Warn level (once per 10 minutes for the same error).
+
+  - id: v1_3_25_acme_challenge_file_guard
+    version: v1.3.25
+    kind: notice
+    level: normal
+    page: /waf-host/wafsslOrderlist
+    apply:
+      type: navigate
+    zh:
+      title: CA服务器与SSL证书订单的写操作限系统管理员，挑战文件名校验收紧
+      detail: >-
+        「CA服务器」的新增、编辑、删除与「SSL证书订单」的新建、续期、删除现仅限系统管理员角色，
+        其他角色仍可查看列表与详情；CA服务器地址新增/编辑时要求是可解析的 https 地址。
+        ACME 文件校验（http-01）的挑战文件名现在只允许字母、数字、下划线与连字符且必须落在本站点的校验目录内，
+        「SSL证书订单」的详情与列表不再向非系统管理员角色回显私钥与申请密钥材料。
+        不满足时该次写入/清理直接报错并记录日志。正常使用（Let's Encrypt、ZeroSSL 及标准内网 CA）不受影响。
+      revert: 无需调整配置；如需由其他角色管理 CA 服务器或证书订单，请调整账号角色为系统管理员。
+    en:
+      title: CA server and SSL order writes are limited to system admins; challenge file name validation tightened
+      detail: >-
+        Add, edit and delete on "CA Servers", and create, renew and delete on "SSL Certificate Orders"
+        are now limited to the system admin role; other roles can still view lists and details.
+        A CA server address must be a parseable https URL when added or edited.
+        The detail and list of "SSL Certificate Orders" no longer echo the private key or
+        the apply-key material to roles other than the system admin.
+        For ACME http-01 file validation, the challenge file name now accepts only letters, digits, underscores and hyphens
+        and must resolve inside the site's validation directory; otherwise the write or cleanup fails
+        with an error and a log entry. Normal use (Let's Encrypt, ZeroSSL and standard internal CAs)
+        is unaffected.
+      revert: No configuration change is required. To let another role manage CA servers or certificate orders, assign that account the system admin role.
+
+  - id: v1_3_25_request_body_detect_coverage
+    version: v1.3.25
+    kind: notice
+    level: high
+    page: /waf/wafvisitlog
+    apply:
+      type: navigate
+    zh:
+      title: 请求体检测覆盖分块传输与大报文
+      detail: >-
+        只要请求携带请求体就会进入 SQL 注入、命令执行、敏感词等原生检测：
+        最多读取前 1MB 作为检测输入，日志落库按「记录请求最大报文长度」上限截断，
+        两条上限互不影响；
+        未读完的原始流原样还原，反向代理转发与表单解析保持逐字节一致。
+        分块传输（chunked）与携带大报文的请求因此也会被原生规则检测，
+        其中一小部分此前放行的请求可能被规则命中，属预期内的覆盖补齐；
+        超大上传（如大文件）只多读 1MB 前缀，转发内容不变。
+        内存日志队列、Kafka 与文件导出现统一在入队前按「记录请求最大报文长度」上限截断请求体原文，
+        与落库上限保持一致。
+      revert: 无开关；如遇个别大报文请求被误拦，按既有方式在该站规则中放行对应路径或调整规则。
+    en:
+      title: Request body inspection now covers chunked transfers and large bodies
+      detail: >-
+        Any request carrying a body is read for native detection such as SQL injection, command
+        execution and sensitive-word rules:
+        at most the first 1MB is used as detection input, while log storage is truncated
+        at the existing limit - the two limits are independent. The unread remainder of the stream
+        is handed back untouched, so reverse-proxy forwarding and form parsing stay byte-identical.
+        Chunked transfers and large-body requests are therefore inspected by the native rules too,
+        and a small number of requests that previously passed may now match a rule, which is the
+        intended coverage completion. Very large uploads (e.g. big files) only add a 1MB prefix read;
+        forwarded content is unchanged. The request body carried by the in-memory log queue, Kafka
+        and file export is now truncated at the same 'max recorded request body size' limit before
+        enqueue.
+      revert: No switch is provided. If an occasional large-body request is blocked by mistake, whitelist its path for the site or tune the rule as usual.

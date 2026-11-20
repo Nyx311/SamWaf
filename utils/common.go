@@ -4,7 +4,6 @@ import (
 	"SamWaf/common/zlog"
 	"SamWaf/global"
 	"SamWaf/model"
-	"SamWaf/wafenginecore/clientip"
 	"SamWaf/wafenginecore/ipset"
 	"crypto/tls"
 	"errors"
@@ -19,8 +18,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/gin-gonic/gin"
 )
 
 // isPublicIP 判断 IP 是否为可安全对外访问的公网地址（用于防 SSRF）。
@@ -137,7 +134,8 @@ func IsSafeOutboundHost(host string) (bool, string) {
 }
 
 // IsSafeOutboundURL 校验对外请求 URL 是否安全（防 SSRF）：仅允许 http/https，
-// 且主机(域名解析后的所有IP)必须为公网。用于通知渠道 WebhookURL 等用户可控的对外地址。
+// 且主机(域名解析后的所有IP)必须为公网。只用于程序自身的固定对外地址（升级检测）；
+// 用户可配的对外地址一律走 IsAllowedOutboundURL（带 config.yml 允许清单逃生门）。
 func IsSafeOutboundURL(rawURL string) (bool, string) {
 	u, err := url.Parse(strings.TrimSpace(rawURL))
 	if err != nil {
@@ -230,6 +228,9 @@ func CheckDebugEnvInfo() bool {
 
 	return false
 }
+
+// Deprecated: 监听协议判定统一走 ResolveHostListens / HostMainProtocol（utils/hostport.go），
+// 本函数仅保留给 legacy 派生内部复用，新代码不得调用。
 func GetServerByHosts(hosts model.Hosts) string {
 	if hosts.Ssl == 1 {
 		return "https"
@@ -455,6 +456,16 @@ func IsCatchAllIPPattern(input string) bool {
 	return ipset.IsCatchAllWildcard(input)
 }
 
+// IsBlockAllIPPattern 判断是否为「封禁全网」写法：0.0.0.0/0、::/0、0/0 等
+// 归一后前缀为 0 的 CIDR，以及全通配、全空间区间。
+//
+// 只用于封禁类写入侧校验（IP黑名单、系统防火墙封禁）：系统防火墙封禁对整机所有
+// 端口生效，全网封禁会把管理端一并锁死。白名单等放行类场景不要用本函数——
+// 显式 0.0.0.0/0 在那里是「临时全放行」的合法表达（见 IsCatchAllIPPattern）。
+func IsBlockAllIPPattern(input string) bool {
+	return ipset.IsBlockAllPattern(input)
+}
+
 // IsValidIPOrNetwork 检查给定的字符串是否为有效的 IP 地址或 IP 段（CIDR）
 //
 // 严格模式：不接受通配符与区间。系统防火墙(iptables/netsh)下发、
@@ -574,14 +585,14 @@ func UpdateFileIsHasNewInfo(filePath, newContent string) error {
 	return nil
 }
 
+// AcmeChallengeTokenPattern 合法的 ACME http-01 token：base64url 字符，长度 1-255。
+// 写入侧（证书申请的 webroot provider）与流量侧（挑战文件服务）共用同一约束，
+// 避免两边口径漂移导致"写得出、服务不到"的签发失败。
+var AcmeChallengeTokenPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,255}$`)
+
 // IsValidChallengeFile 检查challenge文件是否合法
 func IsValidChallengeFile(challengeFile string) bool {
-	// 定义一个正则表达式：允许字母、数字、连字符、下划线，且长度在 1 到 255 之间
-	// 这里假设合法的文件名不含有特殊字符和空格
-	re := regexp.MustCompile(`^[a-zA-Z0-9_-]{1,255}$`)
-
-	// 判断文件名是否符合正则表达式
-	return re.MatchString(challengeFile)
+	return AcmeChallengeTokenPattern.MatchString(challengeFile)
 }
 
 // CheckPathAndCreate 检测路径如果不存在则创建
@@ -644,78 +655,3 @@ func IsIP(input string) bool {
 	return net.ParseIP(input) != nil
 }
 
-// GetManageClientIP 获取管理端客户端真实IP。
-// 安全默认：未配置代理头（GCONFIG_MANAGE_PROXY_HEADER 为空）时直接返回网络层 IP（c.RemoteIP()）。
-// 即便配置了代理头，也仅当“直连对端 c.RemoteIP() 属于可信代理网段 GCONFIG_MANAGE_TRUSTED_PROXIES”
-// 时才采信代理头；否则一律用网络层 IP。防止任意直连客户端伪造 X-Forwarded-For/X-Real-IP 绕过
-// 登录错误锁定 / 管理端 IP 白名单 / 令牌 IP 绑定。
-func GetManageClientIP(c *gin.Context) string {
-	remoteIP := c.RemoteIP()
-	// 未配置代理头 → 直接用网络层 IP
-	if global.GCONFIG_MANAGE_PROXY_HEADER == "" {
-		return remoteIP
-	}
-	// 配了代理头，但只信任来自“可信代理”的头；否则用网络层 IP
-	if !isTrustedManageProxy(remoteIP) {
-		return remoteIP
-	}
-	for _, header := range strings.Split(global.GCONFIG_MANAGE_PROXY_HEADER, ",") {
-		header = strings.TrimSpace(header)
-		if header == "" {
-			continue
-		}
-		val := c.GetHeader(header)
-		if val == "" {
-			continue
-		}
-		// 从右往左取第一个“非可信代理”的 IP：反向代理按追加语义
-		// (nginx $proxy_add_x_forwarded_for) 把真实客户端 IP 追加在右侧、客户端伪造的值留在左侧，
-		// 故取最右侧的非可信 hop 才是真实客户端；逐个跳过可信代理链。取最左会取到伪造值。
-		parts := strings.Split(val, ",")
-		for i := len(parts) - 1; i >= 0; i-- {
-			ip := strings.TrimSpace(parts[i])
-			if !IsValidIPv4(ip) && !IsValidIPv6(ip) {
-				continue
-			}
-			if isTrustedManageProxy(ip) {
-				continue // 跳过可信代理 hop
-			}
-			return ip
-		}
-	}
-	return remoteIP
-}
-
-// isTrustedManageProxy 判断直连对端 IP 是否落在管理端可信代理网段
-// GCONFIG_MANAGE_TRUSTED_PROXIES（CIDR 或单 IP，逗号分隔）内。
-// 留空 → 返回 false（不信任任何代理头，安全默认）。
-func isTrustedManageProxy(remoteIP string) bool {
-	// 管理端引用了某 CDN 厂商 → 直连对端属于该厂商中心库最新回源段即视为可信(自动跟随更新)
-	if global.GCONFIG_MANAGE_CDN_PROVIDER != "" &&
-		clientip.IsProviderIP(global.GCONFIG_MANAGE_CDN_PROVIDER, strings.TrimSpace(remoteIP)) {
-		return true
-	}
-	if global.GCONFIG_MANAGE_TRUSTED_PROXIES == "" {
-		return false
-	}
-	ip := net.ParseIP(strings.TrimSpace(remoteIP))
-	if ip == nil {
-		return false
-	}
-	for _, entry := range strings.Split(global.GCONFIG_MANAGE_TRUSTED_PROXIES, ",") {
-		entry = strings.TrimSpace(entry)
-		if entry == "" {
-			continue
-		}
-		if strings.Contains(entry, "/") {
-			if _, ipnet, err := net.ParseCIDR(entry); err == nil && ipnet.Contains(ip) {
-				return true
-			}
-			continue
-		}
-		if single := net.ParseIP(entry); single != nil && single.Equal(ip) {
-			return true
-		}
-	}
-	return false
-}

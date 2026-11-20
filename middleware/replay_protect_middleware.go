@@ -5,6 +5,7 @@ import (
 	"SamWaf/global"
 	"SamWaf/model/common/response"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -16,6 +17,12 @@ const (
 	replayTimeWindow  = 5 * time.Minute
 	replayNonceTTL    = 10 * time.Minute
 )
+
+func isLogExportDownloadPath(path string) bool {
+	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
+	return len(parts) == 6 && parts[0] == "api" && parts[1] == "v1" &&
+		parts[2] == "waflog" && parts[3] == "exports" && parts[4] != "" && parts[5] == "download"
+}
 
 func ReplayProtect() gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -36,6 +43,19 @@ func ReplayProtect() gin.HandlerFunc {
 
 		// 校验 X-Request-Time
 		tsStr := c.GetHeader(replayTimeHeader)
+		nonce := c.GetHeader(replayNonceHeader)
+		if tsStr == "" || nonce == "" {
+			// 日志下载走 window.open，浏览器带不了自定义头，时间戳与 nonce 只能放查询串
+			// （与 extractTokenStr 对同一路径的特判保持一致；仅限这条路径，其余接口仍只认头）
+			if c.Request.URL.Path == "/api/v1/waflog/attack/download" || isLogExportDownloadPath(c.Request.URL.Path) {
+				if tsStr == "" {
+					tsStr = c.Query(replayTimeHeader)
+				}
+				if nonce == "" {
+					nonce = c.Query(replayNonceHeader)
+				}
+			}
+		}
 		if tsStr == "" {
 			response.FailWithMessage("请求缺少时间标头", c)
 			c.Abort()
@@ -55,7 +75,6 @@ func ReplayProtect() gin.HandlerFunc {
 		}
 
 		// 校验 X-Request-Id（Nonce）
-		nonce := c.GetHeader(replayNonceHeader)
 		if nonce == "" || len(nonce) < 16 || len(nonce) > 128 {
 			response.FailWithMessage("请求标识无效", c)
 			c.Abort()

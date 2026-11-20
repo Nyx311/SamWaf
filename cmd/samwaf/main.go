@@ -16,11 +16,13 @@ import (
 	"SamWaf/model/spec"
 	"SamWaf/model/wafenginmodel"
 	"SamWaf/plugin"
+	"SamWaf/public"
 	"SamWaf/service/waf_service"
 	"SamWaf/supervisor"
 	"SamWaf/utils"
 	"SamWaf/wafai"
 	"SamWaf/wafappengine"
+	"SamWaf/wafcli"
 	"SamWaf/wafconfig"
 	"SamWaf/wafdb"
 	"SamWaf/wafdiag"
@@ -234,16 +236,25 @@ func (m *wafSystenService) run() {
 	//初始化cache
 	{
 		cacheStore, err := cache.NewCacheStore(global.GCACHE_TYPE, &cache.RedisCacheConfig{
-			Host:     global.GCACHE_REDIS_HOST,
-			Port:     global.GCACHE_REDIS_PORT,
-			Password: global.GCACHE_REDIS_PASSWORD,
-			DB:       global.GCACHE_REDIS_DB,
+			Host:        global.GCACHE_REDIS_HOST,
+			Port:        global.GCACHE_REDIS_PORT,
+			Password:    global.GCACHE_REDIS_PASSWORD,
+			DB:          global.GCACHE_REDIS_DB,
+			PoolSize:    global.GCACHE_REDIS_POOL_SIZE,
+			PoolTimeout: time.Duration(global.GCACHE_REDIS_POOL_TIMEOUT_SEC) * time.Second,
+			OpTimeout:   time.Duration(global.GCACHE_REDIS_OP_TIMEOUT_SEC) * time.Second,
 		})
 		if err != nil {
 			zlog.Error("初始化缓存失败，程序退出，请检查conf/config.yml缓存配置是否正确", "error", err)
 			os.Exit(1)
 		}
 		global.GCACHE_WAFCACHE = cacheStore
+		// 缓存后端决定了令牌等凭证放在哪里，排障时是第一个要确认的事实，启动就写进日志。
+		if d, ok := cacheStore.(cache.BackendDescriber); ok {
+			zlog.Info("缓存后端: " + d.Describe())
+		} else {
+			zlog.Info("缓存后端: memory(进程内)")
+		}
 	}
 	//初始化验证码服务
 	wafcaptcha.InitCaptchaService(global.GCACHE_WAFCACHE)
@@ -256,6 +267,7 @@ func (m *wafSystenService) run() {
 	// 所以升级源、SSRF 安全客户端、通知回调都从这里传进去。
 	iplocation.ConfigureUpgrader(iplocation.UpgradeConfig{
 		UpdateVersionURL: global.GUPDATE_VERSION_URL,
+		ClientQuery:      wafupdate.ClientQuery,
 		NewClient:        utils.SafeHTTPClient,
 		ValidateURL:      utils.IsSafeOutboundURL,
 		NotifyFunc: func(success bool, msg string) {
@@ -283,6 +295,7 @@ func (m *wafSystenService) run() {
 	// 注入升级上下文：避免 wafowasp → global 的循环依赖
 	wafowasp.ConfigureUpgrader(wafowasp.UpgradeConfig{
 		UpdateVersionURL: global.GUPDATE_VERSION_URL,
+		ClientQuery:      wafupdate.ClientQuery,
 		NotifyFunc: func(success bool, msg string) {
 			if global.GQEQUE_MESSAGE_DB == nil {
 				return
@@ -313,7 +326,7 @@ func (m *wafSystenService) run() {
 
 	//提前初始化
 	global.GDATA_CURRENT_LOG_DB_MAP = map[string]*gorm.DB{}
-	rversion := "初始化系统 编译器版本:" + runtime.Version() + " 程序版本号：" + global.GWAF_RELEASE_VERSION_NAME + "(" + global.GWAF_RELEASE_VERSION + ")"
+	rversion := "初始化系统 编译器版本:" + runtime.Version() + " 程序版本号：" + global.GWAF_RELEASE_VERSION_NAME + "(" + global.GWAF_RELEASE_VERSION + ") 前端版本：" + global.GWAF_WEB_VERSION
 	if global.GWAF_RELEASE == "false" {
 		rversion = rversion + " 调试版本"
 	} else {
@@ -372,6 +385,8 @@ func (m *wafSystenService) run() {
 		zlog.Error("初始化统计数据库失败，程序退出，请检查conf/config.yml数据库配置是否正确", "error", err)
 		os.Exit(1)
 	}
+	// 分层改造的边界切换要赶在接流量之前：条件是新表为空，一旦有请求写进来就不再成立
+	waftask.CutTierBoundaryIfNeeded()
 
 	// 全新安装引导：账户表为空(新用户判定)时创建默认管理员并生成随机初始口令。
 	// 放在启动初始化(核心库就绪后)执行，不再等首次登录才触发，便于新装即时拿到 data/initial_password.txt。
@@ -389,6 +404,10 @@ func (m *wafSystenService) run() {
 		zlog.Error("初始化插件系统失败", "error", err)
 		// 插件系统初始化失败不影响主程序启动
 	}
+
+	// WebSocket 在线表必须先于下面的消费协程和管理端建好：消息队列一开始消费就可能广播，
+	// 管理端一起来就可能有连接注册进来，而这里只是建两个空 map，没有任何外部依赖，放早没有副作用。
+	global.GWebSocket = gwebsocket.InitWafWebSocket()
 
 	//初始化队列引擎
 	wafqueue.InitDequeEngine()
@@ -490,8 +509,6 @@ func (m *wafSystenService) run() {
 		webmanager.StartLocalServer()
 	}()
 
-	//启动websocket
-	global.GWebSocket = gwebsocket.InitWafWebSocket()
 	//定时取规则并更新（考虑后期定时拉取公共规则 待定，可能会影响实际生产）
 
 	// 创建任务调度器
@@ -526,6 +543,7 @@ func (m *wafSystenService) run() {
 	globalobj.GWAF_RUNTIME_OBJ_WAF_TaskRegistry.RegisterTask(enums.TASK_STATS_DATA_CLEANUP, waftask.TaskStatsDataCleanup)
 	globalobj.GWAF_RUNTIME_OBJ_WAF_TaskRegistry.RegisterTask(enums.TASK_THREAT_IP_SYNC, waftask.TaskThreatIPSync)
 	globalobj.GWAF_RUNTIME_OBJ_WAF_TaskRegistry.RegisterTask(enums.TASK_ACCESS_CLEAN, waftask.TaskAccessClean)
+	globalobj.GWAF_RUNTIME_OBJ_WAF_TaskRegistry.RegisterTask(enums.TASK_HTTPAUTH_CLEAN, waftask.TaskHttpAuthClean)
 	globalobj.GWAF_RUNTIME_OBJ_WAF_TaskRegistry.RegisterTask(enums.TASK_HOSTGUARD_CLEAN_EXPIRED, waftask.TaskHostGuardCleanExpired)
 	globalobj.GWAF_RUNTIME_OBJ_WAF_TaskRegistry.RegisterTask(enums.TASK_TRAFFIC_FLUSH, waftask.TaskTrafficFlush)
 
@@ -546,6 +564,9 @@ func (m *wafSystenService) run() {
 	// cron 任务调度同样是单例（避免新旧 Worker 重复执行定时任务）；takeover 模式延迟到 ACTIVATE 再启动。
 	if !global.GWAF_RUNTIME_IS_TAKEOVER {
 		globalobj.GWAF_RUNTIME_OBJ_WAF_TaskScheduler.Start()
+		// 日志导出执行器与任务调度同一接管边界启动，蓝绿升级时只有一个 Worker 受理任务。
+		logExportWorkerLifecycle.start(waf_service.WafLogExportServiceApp.Start)
+		reportWorkerLifecycle.start(startReportWorker)
 		// 主机登录防护的日志采集同样是独占单例：两个进程同时 tail 同一份 auth.log，
 		// 同一条失败会被计两次，而 memory 缓存下两边计数器互不可见，阈值等于被腰斩。
 		wafhostguard.Start()
@@ -675,6 +696,10 @@ func (m *wafSystenService) run() {
 					rules := msg.Content.([]model.Rules)
 					globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.UpdateHostRules(msg.HostCode, rules)
 					zlog.Debug("远程配置", zap.Any("Rule", rules))
+					break
+				case enums.ChanTypeAntiCCRule:
+					globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.ApplyCCRules(msg.HostCode)
+					zlog.Debug("远程配置", zap.Any("AntiCCRule", msg.HostCode))
 					break
 				case enums.ChanTypeAnticc:
 					globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.ApplyAntiCCConfig(msg.HostCode, msg.Content.(model.AntiCC))
@@ -866,9 +891,10 @@ func (m *wafSystenService) run() {
 			}
 			break
 		case host := <-global.GWAF_CHAN_HOST:
-			// 防护开关热更新(copy-on-write，按 host:port key 定位)
+			// 站点字段热更新(copy-on-write，按 host:port key 定位；全局网站的 key 是「全局网站:0」，同样命中)
+			// 具体搬哪些字段见 wafenginecore.ApplyHostHotUpdate——新增请求期要读的字段必须在那里登记
 			globalobj.GWAF_RUNTIME_OBJ_WAF_ENGINE.UpdateHostByKey(host.Host+":"+strconv.Itoa(host.Port), func(h *wafenginmodel.HostSafe) {
-				h.Host.GUARD_STATUS = host.GUARD_STATUS
+				wafenginecore.ApplyHostHotUpdate(h, host)
 			})
 			zlog.Debug("规则", zap.Any("主机", host))
 			break
@@ -1067,11 +1093,49 @@ func (s *supervisorService) Stop(svc service.Service) error {
 // 还是后续 Supervisor 的 DRAIN 指令触发。
 var gracefulOnce sync.Once
 
+// workerLogExportLifecycle 将启动与停止串行化，停止后不再接受ACTIVATE启动。
+type workerLogExportLifecycle struct {
+	mu       sync.Mutex
+	stopping bool
+}
+
+func (l *workerLogExportLifecycle) start(start func()) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if !l.stopping {
+		start()
+	}
+}
+
+func (l *workerLogExportLifecycle) stop(stop func()) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.stopping {
+		return
+	}
+	l.stopping = true
+	stop()
+}
+
+var logExportWorkerLifecycle workerLogExportLifecycle
+var reportWorkerLifecycle workerLogExportLifecycle
+
+func startReportWorker() {
+	collector := waf_service.NewReportCollector()
+	if err := waf_service.WafReportServiceApp.Start(collector); err != nil {
+		zlog.Error("安全运营报告执行器启动失败", "error", err)
+	}
+}
+
 // Graceful 优雅停止的统一入口：先排空业务连接(StopAllProxyServer 已支持 Shutdown 排空)，
 // 回收各引擎/队列/任务资源，最后关闭数据库连接。供信号、服务 Stop 和升级 DRAIN 复用。
 func (m *wafSystenService) Graceful() {
 	gracefulOnce.Do(func() {
 		zlog.Info("[Graceful] 开始优雅停止：排空业务连接并回收资源 ...")
+		reportWorkerLifecycle.stop(waf_service.WafReportServiceApp.Stop)
+		zlog.Info("Shutdown SamWaf LogExport...")
+		logExportWorkerLifecycle.stop(waf_service.WafLogExportServiceApp.Stop)
+		zlog.Info("Shutdown SamWaf LogExport finished")
 		m.stopSamWaf()           // 内部 CloseWaf→StopAllProxyServer 已优雅排空在途连接
 		wafsafeclear.SafeClear() // 最后关闭数据库连接
 		zlog.Info("[Graceful] 优雅停止完成")
@@ -1086,10 +1150,21 @@ func (m *wafSystenService) Graceful() {
 // @in              header
 // @name            X-API-Key
 func main() {
+	if wafcli.IsAutomationCommand(os.Args) {
+		wafcli.SetResultOutput(os.Stdout)
+		os.Stdout = os.Stderr
+		defer func() {
+			if recover() != nil {
+				os.Exit(wafcli.ReportStartupFailure())
+			}
+		}()
+	}
+	global.GWAF_WEB_VERSION = public.WebFrontendVersion()
 	fmt.Println(`
 ==========================================
   SamWaf Web Application Firewall ` + global.GWAF_RELEASE_VERSION + `
-  Version Name: ` + global.GWAF_RELEASE_VERSION_NAME + ` 
+  Version Name: ` + global.GWAF_RELEASE_VERSION_NAME + `
+  Web UI Version: ` + global.GWAF_WEB_VERSION + `
 ==========================================
 `)
 	//加载配置
@@ -1105,6 +1180,9 @@ func main() {
 	// 免得三个进程抢同一个 supervisor.log 的滚动 rename。
 	if len(os.Args) > 1 && os.Args[1] == supervisor.HandoffRestartArg {
 		zlog.FileName = "handoff.log"
+	}
+	if wafcli.IsAutomationCommand(os.Args) {
+		zlog.FileName = "cli.log"
 	}
 	//初始化日志
 	zlog.InitZLog(global.GWAF_LOG_DEBUG_ENABLE, global.GWAF_LOG_OUTPUT_FORMAT)
@@ -1201,174 +1279,11 @@ func main() {
 	}()
 
 	if len(os.Args) > 1 {
-		command := os.Args[1]
-		switch command {
-
-		case "install", "start", "stop", "uninstall", "restart": // 以服务方式运行
-			err := service.Control(s, command)
-			if err != nil {
-				log.Fatal(err)
-			}
-			fmt.Printf("Samwaf has successfully executed the '%s' command.\n", command)
-			break
-		case supervisor.HandoffRestartArg:
-			// 自升级交接助手（Windows，隐藏命令，由 Supervisor 自己拉起）。
-			// 老 Supervisor 交接前起本进程后就退出了；本进程轮询把服务重新 start 起来，
-			// 让 Supervisor 换到新二进制。期间 Worker 作为孤儿继续转发业务，不中断。
-			runHandoffRestart(s)
-		case "rolling-restart": // 零停机滚动重启：通知运行中的 Supervisor 换 Worker（业务不中断），亦用于测试升级编排
-			if err := supervisor.TriggerUpgrade(dataDir); err != nil {
-				fmt.Println("滚动重启触发失败:", err)
-				os.Exit(1)
-			}
-			fmt.Println("已触发零停机滚动重启，请观察日志：新 Worker 就绪后旧 Worker 将优雅排空退出。")
-		case "rekey": //把遗留(旧格式)敏感字段升级为当前数据密钥(DEK)的新格式，供手动补跑迁移
-			if err := wafsec.InitDataKey(utils.GetCurrentDir(), global.GCONFIG_DATA_KEY_FILE); err != nil {
-				fmt.Println("数据密钥初始化失败:", err)
-				os.Exit(1)
-			}
-			if _, err := wafdb.InitCoreDb(""); err != nil {
-				fmt.Println("核心数据库初始化失败:", err)
-				os.Exit(1)
-			}
-			n := wafdb.RekeyDataKey(global.GWAF_LOCAL_DB)
-			fmt.Printf("已把 %d 行遗留敏感字段升级为当前数据密钥格式。\n", n)
-			fmt.Println("注意：本命令不做密钥轮换；请勿在替换 data_key 文件后运行它。")
-		case "rekey-legacy": //把落库敏感字段重写回旧通讯密钥格式(降级到旧版二进制前执行)
-			if err := wafsec.InitDataKey(utils.GetCurrentDir(), global.GCONFIG_DATA_KEY_FILE); err != nil {
-				fmt.Println("数据密钥初始化失败:", err)
-				os.Exit(1)
-			}
-			if _, err := wafdb.InitCoreDb(""); err != nil {
-				fmt.Println("核心数据库初始化失败:", err)
-				os.Exit(1)
-			}
-			n := wafdb.RekeyToLegacy(global.GWAF_LOCAL_DB)
-			fmt.Printf("已把 %d 行敏感字段重写回旧格式，现在可以安全降级到旧版本。\n", n)
-		case "resetpwd": //重制密码
-			wafdb.InitCoreDb("")
-			wafdb.ResetAdminPwd()
-		case "resetotp": //重置安全码
-			wafdb.InitCoreDb("")
-			wafdb.ResetAdminOTP()
-		case "repairdb": //修复数据库
-			fmt.Println("\n⚠️  数据库修复工具")
-			fmt.Println("如果您遇到数据库损坏错误")
-			fmt.Println("可以使用此工具尝试修复。\n")
-			wafdb.RepairAllDatabases("")
-		case "execsql": //执行SQL语句
-			fmt.Println("\n💻 SQL 执行工具")
-			fmt.Println("可以在指定数据库上执行 SQL 语句\n")
-			wafdb.ExecuteSQLCommand("")
-		case "migratedb": // 离线迁移：SQLite→MySQL / SQLite→PostgreSQL / MySQL→PostgreSQL
-			opts := wafdb.MigrateOptions{}
-			for _, arg := range os.Args[2:] {
-				switch {
-				case arg == "--dry-run":
-					opts.DryRun = true
-				case arg == "--force":
-					opts.Force = true
-				case strings.HasPrefix(arg, "--from="):
-					opts.From = strings.TrimPrefix(arg, "--from=")
-				case strings.HasPrefix(arg, "--to="):
-					opts.To = strings.TrimPrefix(arg, "--to=")
-				}
-			}
-			if err := wafdb.RunMigrateDB(opts); err != nil {
-				fmt.Println("迁移失败:", err)
-				os.Exit(1)
-			}
-		case "rollback": //版本回退
-			fmt.Println("================================================")
-			fmt.Println("         SamWaf 版本回退工具")
-			fmt.Println("================================================")
-			fmt.Printf("当前运行版本: %s\n\n", global.GWAF_RELEASE_VERSION)
-
-			list, err := wafupdate.ListBackups()
-			if err != nil {
-				fmt.Println("获取备份列表失败:", err)
-				return
-			}
-			if len(list) == 0 {
-				fmt.Println("没有可用的备份版本，无法回退")
-				return
-			}
-
-			fmt.Printf("%-4s %-15s %-22s %-10s %s\n", "序号", "版本", "备份时间", "大小(MB)", "备注")
-			fmt.Println("------------------------------------------------------------------------")
-			for i, b := range list {
-				note := ""
-				if b.Version == global.GWAF_RELEASE_VERSION {
-					note = "[当前版本]"
-				}
-				fmt.Printf("%-4d %-15s %-22s %-10.2f %s\n",
-					i+1,
-					b.Version,
-					b.BackupTime.Format("2006-01-02 15:04:05"),
-					float64(b.FileSize)/(1024*1024),
-					note)
-			}
-			fmt.Println("------------------------------------------------------------------------")
-
-			fmt.Print("\n请输入要回退的序号，或输入 'q' 退出: ")
-			var input string
-			fmt.Scanln(&input)
-			if input == "q" || input == "Q" {
-				fmt.Println("已退出版本回退工具")
-				return
-			}
-
-			idx := 0
-			_, parseErr := fmt.Sscanf(input, "%d", &idx)
-			if parseErr != nil || idx < 1 || idx > len(list) {
-				fmt.Printf("无效的序号: %s\n", input)
-				return
-			}
-
-			target := list[idx-1]
-			if target.Version == global.GWAF_RELEASE_VERSION {
-				fmt.Printf("所选版本 %s 与当前运行版本相同，无需回退\n", target.Version)
-				return
-			}
-
-			fmt.Printf("\n即将回退到: %s（%s）\n", target.Version, target.BackupTime.Format("2006-01-02 15:04:05"))
-			fmt.Print("确认回退？回退后需要手动重启服务 (y/n): ")
-			var confirm string
-			fmt.Scanln(&confirm)
-			if confirm != "y" && confirm != "Y" {
-				fmt.Println("已取消")
-				return
-			}
-
-			fmt.Printf("正在回退到版本 %s...\n", target.Version)
-			if rollbackErr := wafupdate.RollbackExecutable(target.Version); rollbackErr != nil {
-				fmt.Println("回退失败:", rollbackErr)
-				return
-			}
-			fmt.Println("回退成功，请重启服务 (samwaf start 或 samwaf restart)")
-		default:
-			fmt.Printf("Command '%s' is not recognized.\n", command)
-			fmt.Println("\n可用命令:")
-			fmt.Println("  install   - 安装为系统服务")
-			fmt.Println("  start     - 启动服务")
-			fmt.Println("  stop      - 停止服务")
-			fmt.Println("  restart   - 重启服务")
-			fmt.Println("  rolling-restart - 零停机滚动重启(换 Worker，业务不中断)")
-			fmt.Println("  uninstall - 卸载服务")
-			fmt.Println("  resetpwd  - 重置管理员密码")
-			fmt.Println("  resetotp  - 重置安全码")
-			fmt.Println("  repairdb  - 修复损坏的数据库")
-			fmt.Println("  execsql   - 执行SQL语句（支持SELECT/UPDATE/DELETE等）")
-			fmt.Println("  migratedb - 离线迁移数据库（不带参数则交互式选择迁移方向）")
-			fmt.Println("              支持方向: SQLite→MySQL / SQLite→PostgreSQL / MySQL→PostgreSQL")
-			fmt.Println("              --from=sqlite|mysql     迁移源（缺省则交互式选择）")
-			fmt.Println("              --to=mysql|postgres     迁移目标（缺省则交互式选择）")
-			fmt.Println("              --dry-run  只做预估，不写入数据")
-			fmt.Println("              --force    目标表已有数据时强制覆盖")
-			fmt.Println("  rollback  - 回退到历史版本 (--list 列出, --version=v1.x.x 指定版本)")
-			fmt.Println("")
-		}
-		return
+		os.Exit(wafcli.Execute(wafcli.Deps{
+			ServiceControl: func(action string) error { return service.Control(s, action) },
+			HandoffRestart: func() { runHandoffRestart(s) },
+			DataDir:        dataDir,
+		}))
 	}
 
 	if service.Interactive() {
@@ -1479,6 +1394,9 @@ func activateSingletons() {
 		if globalobj.GWAF_RUNTIME_OBJ_WAF_TaskScheduler != nil {
 			globalobj.GWAF_RUNTIME_OBJ_WAF_TaskScheduler.Start()
 		}
+		// 日志导出执行器同属独占单例：与任务调度一同只在活动 Worker 中运行。
+		logExportWorkerLifecycle.start(waf_service.WafLogExportServiceApp.Start)
+		reportWorkerLifecycle.start(startReportWorker)
 		// 主机登录防护的日志采集也必须等旧 Worker 彻底退出后才启动，
 		// 否则两个进程同时读同一份 auth.log，失败次数被重复计入，阈值等于打了对折。
 		wafhostguard.Start()

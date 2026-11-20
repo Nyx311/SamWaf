@@ -8,10 +8,26 @@ import (
 	"SamWaf/innerbean"
 	"SamWaf/model"
 	"SamWaf/model/baseorm"
+	"SamWaf/wafdb"
+	"sync/atomic"
 	"time"
 
 	"gorm.io/gorm"
 )
+
+// ipTagWarnInterval 同类写入失败的告警间隔：这条路径每个批次都会走，不限流会刷屏。
+const ipTagWarnInterval = 10 * time.Minute
+
+var lastIPTagWarn atomic.Int64
+
+func warnIPTagUpsert(err error, n int) {
+	now := time.Now().UnixNano()
+	last := lastIPTagWarn.Load()
+	if now-last < int64(ipTagWarnInterval) || !lastIPTagWarn.CompareAndSwap(last, now) {
+		return
+	}
+	zlog.Warn("IP标签写入失败", "错误", err.Error(), "条数", n)
+}
 
 // 从日志流批量聚合统计并写入统计库（不依赖日志入库）。
 // 会按以下维度做增量统计：
@@ -137,12 +153,12 @@ func CollectStatsFromLogs(logs []*innerbean.WebLog) {
 		}
 		cityAgg[ck]++
 
-		// IPTag 聚合
-		rule := lg.RULE
-		if rule == "" {
-			rule = "正常"
+		// IPTag 聚合：只记风险标签（RULE 非空，含「自定义规则放行/验证通过/ACME证书校验」这类）。
+		// 未命中规则的请求不再生成「正常」标签——放行数量由 stats_ip_days 承担（同一份数据的
+		// 重复记录，也是 ip_tags 行数与写入量的大头，D7）；存量「正常」行由启动任务清掉。
+		if lg.RULE != "" {
+			ipTagAgg[ipTagKey{IP: lg.SRC_IP, Rule: lg.RULE}]++
 		}
-		ipTagAgg[ipTagKey{IP: lg.SRC_IP, Rule: rule}]++
 
 		// 站点天级聚合
 		sdk := siteDayKey{
@@ -324,23 +340,13 @@ func CollectStatsFromLogs(logs []*innerbean.WebLog) {
 	zlog.Debug("城市聚合处理完成", "更新记录数", cityUpdateCount, "插入记录数", cityInsertCount)
 
 	// 4) IPTag 增量（根据配置选择数据库）
-	ipTagUpdateCount := 0
-	ipTagInsertCount := 0
+	// 走唯一索引 uni_iptags_full 的 upsert：原来每个标签先 UPDATE 再按 RowsAffected 补 INSERT，
+	// 一批里有多少个 IP 就是多少次往返；改成整批一条语句后往返固定为一次。
 	ipTagDB := global.GetIPTagDB() // 使用封装方法获取数据库连接
-	for k, delta := range ipTagAgg {
-		tx := ipTagDB.Model(&model.IPTag{}).
-			Where("tenant_id = ? and user_code = ? and ip = ? and ip_tag = ?",
-				global.GWAF_TENANT_ID, global.GWAF_USER_CODE, k.IP, k.Rule).
-			Updates(map[string]interface{}{
-				"Cnt":         gorm.Expr("Cnt + ?", delta),
-				"UPDATE_TIME": now,
-			})
-		if tx.Error != nil {
-			zlog.Debug("IP标签更新失败", "错误", tx.Error.Error(), "IP", k.IP, "规则", k.Rule)
-			continue
-		}
-		if tx.RowsAffected == 0 {
-			err := ipTagDB.Create(&model.IPTag{
+	if len(ipTagAgg) > 0 {
+		rows := make([]model.IPTag, 0, len(ipTagAgg))
+		for k, delta := range ipTagAgg {
+			rows = append(rows, model.IPTag{
 				BaseOrm: baseorm.BaseOrm{
 					Id:          uuid.GenUUID(),
 					USER_CODE:   global.GWAF_USER_CODE,
@@ -352,17 +358,14 @@ func CollectStatsFromLogs(logs []*innerbean.WebLog) {
 				IPTag:   k.Rule,
 				Cnt:     delta,
 				Remarks: "",
-			}).Error
-			if err != nil {
-				zlog.Debug("IP标签插入失败", "错误", err.Error(), "IP", k.IP, "规则", k.Rule)
-			} else {
-				ipTagInsertCount++
-			}
+			})
+		}
+		if err := wafdb.UpsertIPTags(ipTagDB, rows); err != nil {
+			warnIPTagUpsert(err, len(rows))
 		} else {
-			ipTagUpdateCount++
+			zlog.Debug("IP标签处理完成", "条数", len(rows))
 		}
 	}
-	zlog.Debug("IP标签处理完成", "更新记录数", ipTagUpdateCount, "插入记录数", ipTagInsertCount)
 
 	// 5) 站点天级聚合 增量
 	siteDayUpdateCount := 0
@@ -476,7 +479,7 @@ func CollectStatsFromLogs(logs []*innerbean.WebLog) {
 		"主机聚合", map[string]interface{}{"更新": hostUpdateCount, "插入": hostInsertCount},
 		"IP聚合", map[string]interface{}{"更新": ipUpdateCount, "插入": ipInsertCount},
 		"城市聚合", map[string]interface{}{"更新": cityUpdateCount, "插入": cityInsertCount},
-		"IP标签", map[string]interface{}{"更新": ipTagUpdateCount, "插入": ipTagInsertCount},
+		"IP标签", map[string]interface{}{"upsert": len(ipTagAgg)},
 		"站点天聚合", map[string]interface{}{"更新": siteDayUpdateCount, "插入": siteDayInsertCount},
 		"站点小时聚合", map[string]interface{}{"更新": siteHourUpdateCount, "插入": siteHourInsertCount})
 }

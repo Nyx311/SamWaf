@@ -153,12 +153,20 @@ func (receiver *WafSslConfigService) CreateNewIdInner(config model.SslConfig) {
 	global.GWAF_LOCAL_DB.Create(&config)
 	zlog.Info(fmt.Sprintf("%s 原来证书已备份", config.Domains))
 }
-func (receiver *WafSslConfigService) CreateInner(config model.SslConfig) {
+
+// CreateInner 新增证书夹条目，返回落库后可供主机绑定的证书夹ID。
+// 序列号已存在时不重复落库，返回的是库里那条已有记录的ID：
+// 调用方拿这个ID去绑主机，才不会绑到一个库里并不存在的ID上。
+func (receiver *WafSslConfigService) CreateInner(config model.SslConfig) (string, error) {
 	//检测如果证书编号已经存在不需在进行添加了
-	err := global.GWAF_LOCAL_DB.First(&model.SslConfig{}, "serial_no = ?", config.SerialNo).Error
-	if err == nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+	var exist model.SslConfig
+	err := global.GWAF_LOCAL_DB.First(&exist, "serial_no = ?", config.SerialNo).Error
+	if err == nil {
 		zlog.Info(fmt.Sprintf("%s 证书已经存在不进行再次备份", config.Domains))
-		return
+		return exist.Id, nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return "", err
 	}
 	if config.CertPath == "" {
 		config.CertPath = filepath.Join(utils.GetCurrentDir(), "ssl", config.Id, "domain.crt")
@@ -167,8 +175,11 @@ func (receiver *WafSslConfigService) CreateInner(config model.SslConfig) {
 		config.KeyPath = filepath.Join(utils.GetCurrentDir(), "ssl", config.Id, "domain.key")
 	}
 	//必须传指针：按值传给 Create 会导致 GORM 回写字段默认值时对不可寻址反射值 SetInt 而 panic
-	global.GWAF_LOCAL_DB.Create(&config)
+	if err = global.GWAF_LOCAL_DB.Create(&config).Error; err != nil {
+		return "", err
+	}
 	zlog.Info(fmt.Sprintf("%s 原来证书已备份", config.Domains))
+	return config.Id, nil
 }
 
 func (receiver *WafSslConfigService) CheckIsExistApi(serialNo string) error {
@@ -328,8 +339,8 @@ func (receiver *WafSslConfigService) GetListApi(req request.SslConfigSearchReq) 
 	global.GWAF_LOCAL_DB.Model(&model.SslConfig{}).Where(whereField, whereValues...).Limit(req.PageSize).Offset(req.PageSize * (req.PageIndex - 1)).Order("valid_to desc").Find(&list)
 	global.GWAF_LOCAL_DB.Model(&model.SslConfig{}).Where(whereField, whereValues...).Count(&total)
 
-	// 初始化返回结果列表
-	var repList []response.WafSslConfigRep
+	// 初始化返回结果列表（空列表也要序列化成 [] 而不是 null，前端直接当数组用）
+	repList := make([]response.WafSslConfigRep, 0)
 
 	// 遍历查询结果，构建返回数据
 	for _, sslConfig := range list {

@@ -8,6 +8,8 @@ import (
 	"SamWaf/model"
 	"SamWaf/model/request"
 	"SamWaf/service/waf_service"
+	"SamWaf/utils"
+	"SamWaf/wafdb"
 	"SamWaf/wafenginecore"
 	"SamWaf/wafhostguard"
 	"SamWaf/wafipban"
@@ -84,6 +86,24 @@ func setConfigIntValue(name string, value int64, change int) {
 		break
 	case "db_file_size":
 		global.GDATA_SHARE_DB_FILE_SIZE = value
+		break
+	case "access_log_retention_days":
+		if value < 1 {
+			value = 1
+		}
+		global.GDATA_ACCESS_LOG_RETENTION_DAYS = value
+		break
+	case "analysis_scan_path_threshold":
+		if value < 1 {
+			value = 1
+		}
+		global.GDATA_ANALYSIS_SCAN_PATH_THRESHOLD = value
+		break
+	case "analysis_ua_threshold":
+		if value < 1 {
+			value = 1
+		}
+		global.GDATA_ANALYSIS_UA_THRESHOLD = value
 		break
 	case "auto_load_ssl_file":
 		global.GCONFIG_RECORD_AUTO_LOAD_SSL = value
@@ -206,6 +226,9 @@ func setConfigIntValue(name string, value int64, change int) {
 	case "log_persist_enable":
 		global.GCONFIG_LOG_PERSIST_ENABLED = value
 		break
+	case "log_fold_per_minute":
+		global.GCONFIG_LOG_FOLD_PER_MINUTE = value
+		break
 	case "enable_proxy_protocol":
 		global.GCONFIG_ENABLE_PROXY_PROTOCOL = value
 		break
@@ -213,13 +236,25 @@ func setConfigIntValue(name string, value int64, change int) {
 		global.GCONFIG_ENABLE_SYSTEM_STATS_PUSH = value
 		break
 	case "ip_tag_db":
+		if value != 0 {
+			value = 1
+		}
+		changed := global.GDATA_IP_TAG_DB != value
 		global.GDATA_IP_TAG_DB = value
+		if changed {
+			// 归属换了：把另一个库里的历史标签并过来，否则界面按新库查，看起来像"切一下历史就没了"。
+			// 合并可能要搬几十万行，放后台跑，界面用 GDATA_IP_TAG_MERGING 显示"合并中"。
+			go waf_service.MergeIPTagsInto(value)
+		}
 		break
 	case "ip_failure_ban_enabled":
 		global.GCONFIG_IP_FAILURE_BAN_ENABLED = value
 		break
 	case "ip_failure_ban_lock_time":
 		global.GCONFIG_IP_FAILURE_BAN_LOCK_TIME = value
+		break
+	case "rule_ban_mode":
+		global.GCONFIG_RULE_BAN_MODE = value
 		break
 	case "host_guard_enabled":
 		global.GCONFIG_HOST_GUARD_ENABLED = value
@@ -347,8 +382,19 @@ func setConfigStringValue(name string, value string, change int) {
 	case "record_log_type":
 		global.GWAF_RUNTIME_RECORD_LOG_TYPE = value
 		break
+	case "access_log_mode":
+		if value != "off" && value != "sample" {
+			value = "db"
+		}
+		global.GDATA_ACCESS_LOG_MODE = value
+		break
 	case "attack_tag_exclude":
 		global.GCONFIG_ATTACK_TAG_EXCLUDE = value
+		break
+	case "exclude_ip_log":
+		global.GCONFIG_EXCLUDE_IP_LOG = value
+		// 同步编译全局排除快照，保存即生效，无需重启
+		wafenginecore.SetGlobalIPLogExclude(value)
 		break
 	case "gwaf_proxy_header":
 		global.GCONFIG_RECORD_PROXY_HEADER = value
@@ -526,6 +572,10 @@ var legacyMigrateOnce sync.Once
 // 单独取常量而不是读全局变量：全局变量在迁移执行时可能已被库里的旧值覆盖成 5，
 // 那样迁移就成了"5 改成 5"的空操作。
 const defaultTokenExpireMinutes int64 = 30
+
+// defaultBatchInsert 批量插入数量的出厂默认值，与 global/global.go 的初始值保持一致。
+// 单独取常量而不是读全局变量：迁移执行时全局变量可能已被库里的旧值覆盖成 100。
+const defaultBatchInsert int64 = 500
 
 // syncConfigMeta 把配置项的说明性字段（分类/类型/可选项/备注）同步成代码里的最新文案。
 // 只在确实不一致时写库，且绝不触碰 Value —— 用户设过的值不受影响。
@@ -720,6 +770,10 @@ func TaskLoadSetting(initLoad bool) {
 	legacyMigrateOnce.Do(func() {
 		migrateLegacyIntConfig("token_expire_time", 5, defaultTokenExpireMinutes,
 			"旧默认值5分钟过短，易造成反复登录", configMap)
+		// 批量插入旧默认100偏小：有积压时每轮取不满就等下一轮的睡眠，消费速率上不去。
+		// 落库语句另有固定分块，调大取值不会放大单条 SQL；用户自己改过的值不动。
+		migrateLegacyIntConfig("batch_insert", 100, defaultBatchInsert,
+			"批量插入旧默认偏小，高写入量下限制消费吞吐", configMap)
 	})
 
 	updateConfigIntItem(initLoad, "system", "record_max_req_body_length", global.GCONFIG_RECORD_MAX_BODY_LENGTH, "记录请求最大报文", "int", "", configMap)
@@ -734,8 +788,12 @@ func TaskLoadSetting(initLoad bool) {
 	updateConfigIntItem(initLoad, "system", "dns_timeout", global.GWAF_RUNTIME_DNS_TIMEOUT, "DNS 查询超时时间 单位毫秒", "int", "", configMap)
 
 	updateConfigStringItem(initLoad, "system", "record_log_type", global.GWAF_RUNTIME_RECORD_LOG_TYPE, "日志记录类型", "options", "all|全部,abnormal|非正常", configMap)
+	updateConfigStringItem(initLoad, "system", "access_log_mode", global.GDATA_ACCESS_LOG_MODE, "访问日志窄行档位：db=全部请求入库(默认,保留期见下项)；sample=安全事件+采样入库；off=只留安全事件(高流量推荐，但会失去CC阈值推荐/AI训练负样本/异常IP的正常行为回溯)。db/sample 档均按站点每天采样 500 条正常请求报文供 AI 训练", "options", "db|全部入库,sample|采样入库,off|仅安全事件", configMap)
+	updateConfigIntItem(initLoad, "system", "access_log_retention_days", global.GDATA_ACCESS_LOG_RETENTION_DAYS, "访问日志窄行保留天数（默认30）。安全事件仍按「日志保留天数」走；本项直接决定CC阈值推荐能回看多少天", "int", "", configMap)
+	updateConfigIntItem(initLoad, "system", "analysis_scan_path_threshold", global.GDATA_ANALYSIS_SCAN_PATH_THRESHOLD, "来源分析：一天摸过多少个不同路径模板判为「疑似扫目录」（默认20）。只影响界面提示与筛选，不改拦截行为", "int", "", configMap)
+	updateConfigIntItem(initLoad, "system", "analysis_ua_threshold", global.GDATA_ANALYSIS_UA_THRESHOLD, "来源分析：一天用过多少种UA指纹判为「疑似换UA试探」（默认5）。只影响界面提示与筛选，不改拦截行为", "int", "", configMap)
 	updateConfigStringItem(initLoad, "system", "gwaf_proxy_header", global.GCONFIG_RECORD_PROXY_HEADER, "获取访客IP头信息（按照顺序）比如:X-Forwarded-For,X-Real-IP ,留空则提取的是直接访客IP", "string", "", configMap)
-	updateConfigStringItem(initLoad, "system", "gwaf_manage_proxy_header", global.GCONFIG_MANAGE_PROXY_HEADER, "管理端获取客户端IP头信息（按优先级逗号分隔，如 X-Forwarded-For,X-Real-IP,CF-Connecting-IP），留空则直接取网络IP。安全起见需配合 conf/config.yml 的 security.manage_trusted_proxies：仅当直连来源属可信代理时才采信此头", "string", "", configMap)
+	updateConfigStringItem(initLoad, "system", "gwaf_manage_proxy_header", global.GCONFIG_MANAGE_PROXY_HEADER, "管理端获取客户端IP头信息（按优先级逗号分隔，如 X-Forwarded-For,X-Real-IP,CF-Connecting-IP），留空则直接取网络IP。安全起见需配合 conf/config.yml 的 security.manage_trusted_proxies：仅当直连来源属可信代理时才采信此头（容器/内网部署可直接填 private）", "string", "", configMap)
 
 	updateConfigIntItem(initLoad, "kafka", "kafka_enable", global.GCONFIG_RECORD_KAFKA_ENABLE, "kafka 是否激活", "int", "", configMap)
 	updateConfigStringItem(initLoad, "kafka", "kafka_url", global.GCONFIG_RECORD_KAFKA_URL, "kafka url地址", "string", "", configMap)
@@ -805,13 +863,18 @@ func TaskLoadSetting(initLoad bool) {
 	//数据库相关
 	updateConfigIntItem(initLoad, "database", "batch_insert", global.GDATA_BATCH_INSERT, "数据库批量插入数量", "int", "", configMap)
 	updateConfigIntItem(initLoad, "database", "log_persist_enable", global.GCONFIG_LOG_PERSIST_ENABLED, "是否开启日志持久化（1开启 0关闭）", "options", "0|关闭,1|开启", configMap)
+	updateConfigIntItem(initLoad, "database", "log_fold_per_minute", global.GCONFIG_LOG_FOLD_PER_MINUTE, "同类安全事件折叠：同一「站点+IP+规则」每分钟最多落库的完整明细条数，超出的不落库但计数与出口照常（0=不折叠，默认0；攻击高发时可设5）", "int", "", configMap)
 	updateConfigIntItem(initLoad, "database", "ip_tag_db", global.GDATA_IP_TAG_DB, "IP Tag 存放位置 0 是主库  1是读取 stat库", "int", "", configMap)
 	updateConfigStringItem(initLoad, "system", "attack_tag_exclude", global.GCONFIG_ATTACK_TAG_EXCLUDE, "风险日志不算风险的标签(逗号分隔,如ACME证书校验)，这些标签不出现在规则筛选里也不计入阻止数量；正常 始终排除", "string", "", configMap)
+	updateConfigStringItem(initLoad, "system", "exclude_ip_log", global.GCONFIG_EXCLUDE_IP_LOG, "全局排除记录日志的IP（所有站点生效）：单IP/CIDR/通配符/区间，或 group:组短码 引用IP组；逗号或换行分隔，# 开头为注释。只静音正常请求，安全事件照常记录；站点级清单在网站编辑里", "string", "", configMap)
 
 	// IP失败封禁相关配置
 	updateConfigStringItem(initLoad, "security", "ip_failure_status_codes", global.GCONFIG_IP_FAILURE_STATUS_CODES, "失败状态码配置，支持多个用|分隔，也支持正则表达式，例如：401|403|404|444|429|503 或 ^4[0-9]{2}$", "string", "", configMap)
 	updateConfigIntItem(initLoad, "security", "ip_failure_ban_enabled", global.GCONFIG_IP_FAILURE_BAN_ENABLED, "是否启用IP失败封禁（1启用 0禁用）", "options", "0|禁用,1|启用", configMap)
 	updateConfigIntItem(initLoad, "security", "ip_failure_ban_lock_time", global.GCONFIG_IP_FAILURE_BAN_LOCK_TIME, "IP失败封禁锁定时间（单位：分钟，默认10分钟）", "int", "", configMap)
+
+	// 规则封禁相关配置（自定义规则 RF.Ban(分钟) 命中后临时封禁客户端IP）
+	updateConfigIntItem(initLoad, "security", "rule_ban_mode", global.GCONFIG_RULE_BAN_MODE, "规则封禁执行动作（0返回拦截页 1直接断开连接）", "options", "0|拦截页,1|直接断开", configMap)
 
 	// 主机远程登录爆破防护(SSH/RDP)。封禁时长不在这里配，由「封禁阶梯」表接管(5分→15分→60分→1天→永久)
 	updateConfigIntItem(initLoad, "hostguard", "host_guard_enabled", global.GCONFIG_HOST_GUARD_ENABLED, "主机远程登录爆破防护总开关（保护SamWaf所在机器自身的SSH/RDP。启用前请先确认白名单已包含你的管理IP，否则可能把自己锁在门外）", "options", "0|禁用,1|启用", configMap)
@@ -880,6 +943,23 @@ func TaskLoadSetting(initLoad bool) {
 	// 提醒反向代理后的部署在 conf/config.yml 配置 security.manage_trusted_proxies，
 	// 以免 IP白名单/登录锁定误按代理IP生效（该项放 config.yml 便于被白名单挡住时改文件+重启自救）。
 	if initLoad && global.GCONFIG_MANAGE_PROXY_HEADER != "" && global.GCONFIG_MANAGE_TRUSTED_PROXIES == "" {
-		zlog.Warn("管理端已配置代理头(gwaf_manage_proxy_header)但未设可信代理网段：出于安全，代理头将被忽略、按网络层IP识别客户端。若本机在反向代理之后，请在 conf/config.yml 填写 security.manage_trusted_proxies（如 10.0.0.0/8）后重启")
+		zlog.Warn("管理端已配置代理头(gwaf_manage_proxy_header)但未设可信代理网段：出于安全，代理头将被忽略、按网络层IP识别客户端。若本机在反向代理之后，请在 conf/config.yml 填写 security.manage_trusted_proxies（如 10.0.0.0/8，容器部署可填 private）后重启")
+	}
+	// 可信代理网段过宽 → 无法据此判定代理头里哪个 IP 是客户端，代理头不予采信。
+	if initLoad {
+		if broad, entry := utils.ManageTrustedProxiesHasOverBroad(global.GCONFIG_MANAGE_TRUSTED_PROXIES); broad {
+			zlog.Warn("管理端可信代理网段包含过宽条目(" + entry + ")：这种网段无法用来判定代理头里的哪个IP是客户端，代理头将不被采信、仍按网络层IP识别客户端(管理端IP白名单/登录失败锁定/令牌IP绑定也按它判定)。请在 conf/config.yml 把 security.manage_trusted_proxies 改成上游代理自身的地址，容器部署可填 private")
+		}
+	}
+
+	// 把落在另一个库里的 IP 标签收回当前归属。按内容判断、源库空即返回，
+	// 所以更早版本切换归属时留下的历史也能在这里被收回来，重复跑无副作用。
+	// 合并前先清存量「正常」行（分层后不再记它）：那是表里的大头，清完合并要搬的行数能少几个数量级。
+	if initLoad {
+		go func() {
+			wafdb.RunIPTagBackfill()
+			waf_service.CleanLegacyBenignIPTags()
+			waf_service.MergeIPTagsInto(global.GDATA_IP_TAG_DB)
+		}()
 	}
 }

@@ -16,4 +16,6 @@ func (receiver *WafBlockingPageRouter) InitWafBlockingPageRouter(group *gin.Rout
 	router.GET("/api/v1/wafhost/blockingpage/detail", api.GetDetailApi)
 	router.POST("/api/v1/wafhost/blockingpage/edit", api.ModifyApi)
 	router.GET("/api/v1/wafhost/blockingpage/del", api.DelApi)
+	router.GET("/api/v1/wafhost/blockingpage/unmatchedbuiltin", api.GetUnmatchedBuiltinApi)
+	router.GET("/api/v1/wafhost/blockingpage/backendunavailablebuiltin", api.GetBackendUnavailableBuiltinApi)
 }

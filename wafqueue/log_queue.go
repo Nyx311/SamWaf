@@ -16,6 +16,8 @@ import (
 */
 func ProcessLogDequeEngine() {
 	loopCount := 0
+	// 同类安全事件折叠过滤器：每个「站点+IP+规则」键每分钟只落前 K 条明细（log_fold.go）。
+	foldFilter := newLogFoldFilter(200000)
 	for {
 		loopCount++
 		select {
@@ -30,6 +32,7 @@ func ProcessLogDequeEngine() {
 					zlog.Warn("日志队列诊断: GDATA_CURRENT_CHANGE=true，队列处理器被阻塞！",
 						"loop", loopCount, "persist_enable", global.GCONFIG_LOG_PERSIST_ENABLED)
 				}
+				time.Sleep(100 * time.Millisecond)
 
 			} else {
 				var webLogArray []*innerbean.WebLog
@@ -67,10 +70,12 @@ func ProcessLogDequeEngine() {
 						}
 					}
 					if global.GCONFIG_LOG_PERSIST_ENABLED == 1 {
-						err := global.GWAF_LOCAL_LOG_DB.CreateInBatches(webLogArray, len(webLogArray)).Error
-						if err != nil {
-							zlog.Error("日志队列写入数据库失败!", "err", err.Error(), "count", len(webLogArray))
-						}
+						// 分层落库：安全事件进 security_event（带报文），窄行进 access_log（按档位），
+						// web_logs 不再写入（旧数据只读到期删）。
+						// 全部在副本上动手，下面的统计与出口仍拿完整的原始对象。
+						storeTiered(foldFilter.filterForStore(webLogArray))
+						// 蓄水池采到的正常请求报文攒在内存里，到点整池刷成 event_payload(kind=sample)
+						negSampler.FlushIfDue()
 					} else {
 						if loopCount%100 == 1 {
 							zlog.Warn("日志队列诊断: GCONFIG_LOG_PERSIST_ENABLED=0，日志不入库！",
@@ -79,6 +84,9 @@ func ProcessLogDequeEngine() {
 					}
 					// 日志流做统计
 					waftask.CollectStatsFromLogs(webLogArray)
+					// 分析层天级汇总（行为 / 目标 / 手法三视角）。键在本包算好再传过去：
+					// waftask 不能反向 import 本包，而键必须与窄行同源。
+					waftask.CollectAnalysisStats(AnalysisRowsFromLogs(webLogArray))
 					global.GNOTIFY_KAKFA_SERVICE.ProcessBatchLogs(webLogArray)
 					// 文件日志写入
 					global.GNOTIFY_LOG_FILE_WRITER.ProcessBatchLogs(webLogArray)
@@ -94,7 +102,10 @@ func ProcessLogDequeEngine() {
 						"batch_insert", global.GDATA_BATCH_INSERT)
 				}
 			}
-			time.Sleep(100 * time.Millisecond)
+			// 只在队列取空时歇一轮；有积压时立即取下一批，不在空等里浪费消费时间
+			if global.GQEQUE_LOG_DB.Empty() {
+				time.Sleep(100 * time.Millisecond)
+			}
 			global.GWAF_MEASURE_PROCESS_DEQUEENGINE.WriteData(time.Now().UnixNano() / 1e6)
 		}
 	}

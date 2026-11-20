@@ -128,9 +128,30 @@ func IsAllowedOutboundURL(rawURL string) (bool, string) {
 	}
 	ok, reason := IsSafeOutboundHost(host)
 	if !ok {
+		// 主机名解析到内网时，若所有非公网解析结果都落在清单的 IP/CIDR 条目内，同样放行。
+		// 连接期 safeOutboundDialContext 对每个真实拨号 IP 做同一判定，两层口径一致。
+		if isHostCoveredByAllowlist(host) {
+			return true, ""
+		}
 		return false, reason + "（确需访问内网源请在 config.yml 的 security.outbound_allowed_hosts 中声明该主机）"
 	}
 	return true, ""
+}
+
+// isHostCoveredByAllowlist 主机名的每条解析结果要么是公网、要么落在清单 IP/CIDR 条目内时才放行。
+// 解析失败/无结果一律 false（fail-closed，与 IsSafeOutboundHost 同口径）。
+func isHostCoveredByAllowlist(host string) bool {
+	ips, err := net.LookupIP(host)
+	if err != nil || len(ips) == 0 {
+		return false
+	}
+	for _, ip := range ips {
+		if isPublicIP(ip) || isOutboundIPAllowlisted(ip) {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 // PrecheckOutboundURL 保存配置时的对外地址预检（协议 / 主机字面量），供 api·service 层早报错用。
@@ -232,28 +253,40 @@ func outboundProxyAddrs() map[string]bool {
 // DNS 再改指内网"的重绑定/TOCTOU：先解析、逐个判定，再直连已判定过的那个 IP，
 // 保证"校验的 IP"与"真正连的 IP"是同一个。
 func safeOutboundDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	return dialOutbound(ctx, network, addr, true, nil)
+}
+
+func dialOutbound(ctx context.Context, network, addr string, allowProxy bool, guard func(string) error) (net.Conn, error) {
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
 		return nil, err
 	}
 	dialer := &net.Dialer{Timeout: outboundDialTimeout, KeepAlive: outboundKeepAlive}
+	dial := func(address string) (net.Conn, error) {
+		if guard != nil {
+			if err := guard(address); err != nil {
+				return nil, err
+			}
+		}
+		return dialer.DialContext(ctx, network, address)
+	}
 
 	// 连到代理本身的那一跳：真正的目标主机由 Transport 交给代理，这里判不了也不该判。
 	// 被 NO_PROXY 排除的主机不会走到这个分支（Transport 会直连），仍受完整判定约束。
-	if outboundProxyAddrs()[strings.ToLower(addr)] {
+	if allowProxy && outboundProxyAddrs()[strings.ToLower(addr)] {
 		return dialer.DialContext(ctx, network, addr)
 	}
 
-	// 主机名命中带外清单：运营方明确授权的内网镜像，按原样连接
-	if IsOutboundHostAllowlisted(host) {
+	allowHost := IsOutboundHostAllowlisted(host)
+	if allowProxy && allowHost {
 		return dialer.DialContext(ctx, network, addr)
 	}
 
 	if ip := net.ParseIP(host); ip != nil {
-		if !isPublicIP(ip) && !isOutboundIPAllowlisted(ip) {
+		if !allowHost && !isPublicIP(ip) && !isOutboundIPAllowlisted(ip) {
 			return nil, fmt.Errorf("目标IP %s 属于内网/环回/保留地址，已拒绝", host)
 		}
-		return dialer.DialContext(ctx, network, addr)
+		return dial(addr)
 	}
 
 	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
@@ -266,13 +299,13 @@ func safeOutboundDialContext(ctx context.Context, network, addr string) (net.Con
 	// 只要应答里混进一个内网地址就整体拒绝：允许"挑公网的连"等于给
 	// 攻击者一个稳定的重试窗口，最终仍会连上内网。
 	for _, ia := range ips {
-		if !isPublicIP(ia.IP) && !isOutboundIPAllowlisted(ia.IP) {
+		if !allowHost && !isPublicIP(ia.IP) && !isOutboundIPAllowlisted(ia.IP) {
 			return nil, fmt.Errorf("主机名 %s 解析到内网/保留地址 %s，已拒绝", host, ia.IP.String())
 		}
 	}
 	var lastErr error
 	for _, ia := range ips {
-		conn, e := dialer.DialContext(ctx, network, net.JoinHostPort(ia.IP.String(), port))
+		conn, e := dial(net.JoinHostPort(ia.IP.String(), port))
 		if e == nil {
 			return conn, nil
 		}
@@ -293,6 +326,33 @@ var safeOutboundTransport = &http.Transport{
 	IdleConnTimeout:       30 * time.Second,
 	TLSHandshakeTimeout:   10 * time.Second,
 	ExpectContinueTimeout: 1 * time.Second,
+}
+
+// SafeOutboundDirectTransport creates an isolated direct transport with numeric connection guards.
+func SafeOutboundDirectTransport(guard func(string) error) *http.Transport {
+	transport := safeOutboundTransport.Clone()
+	transport.Proxy = nil
+	transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return dialOutbound(ctx, network, addr, false, guard)
+	}
+	return transport
+}
+
+// SafeOutboundProxyTransport creates an isolated transport that follows system proxy
+// settings (HTTP_PROXY/HTTPS_PROXY/NO_PROXY, absent proxy = direct dial), keeping the
+// numeric connection guard on every non-proxy dial. The proxy hop itself is deployment
+// configuration and is exempt from the guard, same as dialOutbound's proxy branch.
+func SafeOutboundProxyTransport(guard func(string) error) *http.Transport {
+	transport := safeOutboundTransport.Clone()
+	transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return dialOutbound(ctx, network, addr, true, guard)
+	}
+	return transport
+}
+
+// HasSystemProxy reports whether any system proxy environment variable is configured.
+func HasSystemProxy() bool {
+	return len(outboundProxyAddrs()) > 0
 }
 
 // SafeOutboundHTTPClient 返回用于"用户可配对外地址"的 HTTP 客户端，三层防护：

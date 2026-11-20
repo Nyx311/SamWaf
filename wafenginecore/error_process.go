@@ -11,12 +11,22 @@ import (
 	"encoding/json"
 	"fmt"
 	"go.uber.org/zap"
+	"html"
 	"io"
+	"net"
 	"net/http"
 	"strconv"
 	"text/template"
 	"time"
 )
+
+func templateSourceIP(srcIP string) string {
+	ip := net.ParseIP(srcIP)
+	if ip == nil {
+		return ""
+	}
+	return html.EscapeString(ip.String())
+}
 
 func renderTemplate(templateContent string, data map[string]interface{}) ([]byte, error) {
 	tmpl, err := template.New("blockingPageTemplate").Delims("[[", "]]").Parse(templateContent)
@@ -33,9 +43,29 @@ func renderTemplate(templateContent string, data map[string]interface{}) ([]byte
 	return renderedCode.Bytes(), nil
 }
 
+func enqueueBlockNotify(weblog *innerbean.WebLog, ruleName string, messageType ...string) {
+	if len(messageType) > 0 && messageType[0] == model.MSG_TYPE_ATTACK_INFO {
+		global.GQEQUE_MESSAGE_DB.Enqueue(innerbean.AttackInfoMessageInfo{
+			BaseMessageInfo: innerbean.BaseMessageInfo{OperaType: "攻击信息", Server: global.GWAF_CUSTOM_SERVER_NAME},
+			Domain:          weblog.HOST,
+			AttackType:      ruleName,
+			Url:             weblog.URL,
+			Ip:              weblog.SRC_IP,
+			Time:            time.Now().Format("2006-01-02 15:04:05"),
+		})
+		return
+	}
+	global.GQEQUE_MESSAGE_DB.Enqueue(innerbean.RuleMessageInfo{
+		BaseMessageInfo: innerbean.BaseMessageInfo{OperaType: "命中保护规则", Server: global.GWAF_CUSTOM_SERVER_NAME},
+		Domain:          weblog.HOST,
+		RuleInfo:        ruleName,
+		Ip:              fmt.Sprintf("%s (%s)", weblog.SRC_IP, utils.GetCountry(weblog.SRC_IP)),
+	})
+}
+
 // EchoErrorInfo  ruleName 对内记录  blockInfo 对外展示  attackType 攻击类型
 // 返回值：实际下发的 HTTP 状态码（供调用方记录 weblog）
-func EchoErrorInfo(w http.ResponseWriter, r *http.Request, weblogbean *innerbean.WebLog, ruleName string, blockInfo string, hostsafe *wafenginmodel.HostSafe, globalHostSafe *wafenginmodel.HostSafe, isLog bool, attackType string) int {
+func EchoErrorInfo(w http.ResponseWriter, r *http.Request, weblogbean *innerbean.WebLog, ruleName string, blockInfo string, hostsafe *wafenginmodel.HostSafe, globalHostSafe *wafenginmodel.HostSafe, isLog bool, attackType string, messageType ...string) int {
 	resBytes := []byte("")
 	var responseCode int = 403
 	// 反向代理环路：未配置专属拦截页时，默认按标准 508 Loop Detected 返回（仿 444 的按类型特判）；
@@ -47,6 +77,7 @@ func EchoErrorInfo(w http.ResponseWriter, r *http.Request, weblogbean *innerbean
 	renderData := map[string]interface{}{
 		"SAMWAF_REQ_UUID":   weblogbean.REQ_UUID,
 		"SAMWAF_BLOCK_INFO": blockInfo,
+		"SAMWAF_IP":         templateSourceIP(weblogbean.SRC_IP),
 	}
 
 	// 优先根据攻击类型查找对应的拦截页面
@@ -131,12 +162,7 @@ func EchoErrorInfo(w http.ResponseWriter, r *http.Request, weblogbean *innerbean
 				if isLog {
 					go func() {
 						// 发送推送消息
-						global.GQEQUE_MESSAGE_DB.Enqueue(innerbean.RuleMessageInfo{
-							BaseMessageInfo: innerbean.BaseMessageInfo{OperaType: "命中保护规则", Server: global.GWAF_CUSTOM_SERVER_NAME},
-							Domain:          weblogbean.HOST,
-							RuleInfo:        ruleName,
-							Ip:              fmt.Sprintf("%s (%s)", weblogbean.SRC_IP, utils.GetCountry(weblogbean.SRC_IP)),
-						})
+						enqueueBlockNotify(weblogbean, ruleName, messageType...)
 					}()
 
 					datetimeNow := time.Now()
@@ -148,6 +174,7 @@ func EchoErrorInfo(w http.ResponseWriter, r *http.Request, weblogbean *innerbean
 					weblogbean.STATUS_CODE = 444
 					weblogbean.TASK_FLAG = 1
 					weblogbean.GUEST_IDENTIFICATION = "可疑用户"
+					truncateWebLogBodyForQueue(weblogbean)
 					global.GQEQUE_LOG_DB.Enqueue(weblogbean)
 				}
 				return 444
@@ -167,12 +194,7 @@ func EchoErrorInfo(w http.ResponseWriter, r *http.Request, weblogbean *innerbean
 	if isLog {
 		go func() {
 			// 发送推送消息
-			global.GQEQUE_MESSAGE_DB.Enqueue(innerbean.RuleMessageInfo{
-				BaseMessageInfo: innerbean.BaseMessageInfo{OperaType: "命中保护规则", Server: global.GWAF_CUSTOM_SERVER_NAME},
-				Domain:          weblogbean.HOST,
-				RuleInfo:        ruleName,
-				Ip:              fmt.Sprintf("%s (%s)", weblogbean.SRC_IP, utils.GetCountry(weblogbean.SRC_IP)),
-			})
+			enqueueBlockNotify(weblogbean, ruleName, messageType...)
 		}()
 
 		datetimeNow := time.Now()
@@ -185,19 +207,21 @@ func EchoErrorInfo(w http.ResponseWriter, r *http.Request, weblogbean *innerbean
 		weblogbean.STATUS_CODE = responseCode
 		weblogbean.TASK_FLAG = 1
 		weblogbean.GUEST_IDENTIFICATION = "可疑用户"
+		truncateWebLogBodyForQueue(weblogbean)
 		global.GQEQUE_LOG_DB.Enqueue(weblogbean)
 	}
 	return responseCode
 }
 
 // EchoResponseErrorInfo  ruleName 对内记录  blockInfo 对外展示  attackType 攻击类型
-func EchoResponseErrorInfo(resp *http.Response, weblogbean *innerbean.WebLog, ruleName string, blockInfo string, hostsafe *wafenginmodel.HostSafe, globalHostSafe *wafenginmodel.HostSafe, isLog bool, attackType string) {
+func EchoResponseErrorInfo(resp *http.Response, weblogbean *innerbean.WebLog, ruleName string, blockInfo string, hostsafe *wafenginmodel.HostSafe, globalHostSafe *wafenginmodel.HostSafe, isLog bool, attackType string, messageType ...string) {
 	resBytes := []byte("")
 	var responseCode int = 403
 
 	renderData := map[string]interface{}{
 		"SAMWAF_REQ_UUID":   weblogbean.REQ_UUID,
 		"SAMWAF_BLOCK_INFO": blockInfo,
+		"SAMWAF_IP":         templateSourceIP(weblogbean.SRC_IP),
 	}
 
 	// 优先根据攻击类型查找对应的拦截页面
@@ -284,12 +308,7 @@ func EchoResponseErrorInfo(resp *http.Response, weblogbean *innerbean.WebLog, ru
 		if isLog {
 			go func() {
 				// 发送推送消息
-				global.GQEQUE_MESSAGE_DB.Enqueue(innerbean.RuleMessageInfo{
-					BaseMessageInfo: innerbean.BaseMessageInfo{OperaType: "命中保护规则", Server: global.GWAF_CUSTOM_SERVER_NAME},
-					Domain:          weblogbean.HOST,
-					RuleInfo:        ruleName,
-					Ip:              fmt.Sprintf("%s (%s)", weblogbean.SRC_IP, utils.GetCountry(weblogbean.SRC_IP)),
-				})
+				enqueueBlockNotify(weblogbean, ruleName, messageType...)
 			}()
 
 			datetimeNow := time.Now()
@@ -301,6 +320,7 @@ func EchoResponseErrorInfo(resp *http.Response, weblogbean *innerbean.WebLog, ru
 			weblogbean.STATUS_CODE = 444
 			weblogbean.TASK_FLAG = 1
 			weblogbean.GUEST_IDENTIFICATION = "可疑用户"
+			truncateWebLogBodyForQueue(weblogbean)
 			global.GQEQUE_LOG_DB.Enqueue(weblogbean)
 		}
 		return
@@ -317,12 +337,7 @@ func EchoResponseErrorInfo(resp *http.Response, weblogbean *innerbean.WebLog, ru
 	if isLog {
 		go func() {
 			// 发送推送消息
-			global.GQEQUE_MESSAGE_DB.Enqueue(innerbean.RuleMessageInfo{
-				BaseMessageInfo: innerbean.BaseMessageInfo{OperaType: "命中保护规则", Server: global.GWAF_CUSTOM_SERVER_NAME},
-				Domain:          weblogbean.HOST,
-				RuleInfo:        ruleName,
-				Ip:              fmt.Sprintf("%s (%s)", weblogbean.SRC_IP, utils.GetCountry(weblogbean.SRC_IP)),
-			})
+			enqueueBlockNotify(weblogbean, ruleName, messageType...)
 		}()
 
 		datetimeNow := time.Now()
@@ -335,6 +350,7 @@ func EchoResponseErrorInfo(resp *http.Response, weblogbean *innerbean.WebLog, ru
 		weblogbean.STATUS_CODE = responseCode
 		weblogbean.TASK_FLAG = 1
 		weblogbean.GUEST_IDENTIFICATION = "可疑用户"
+		truncateWebLogBodyForQueue(weblogbean)
 		global.GQEQUE_LOG_DB.Enqueue(weblogbean)
 	}
 }

@@ -3,6 +3,7 @@ package api
 import (
 	"SamWaf/enums"
 	"SamWaf/global"
+	"SamWaf/model"
 	"SamWaf/model/common/response"
 	"SamWaf/model/request"
 	response2 "SamWaf/model/response"
@@ -127,8 +128,8 @@ func (w *WafIPFailureApi) GetBanIpListApi(c *gin.Context) {
 			continue
 		}
 
-		// 只显示满足条件的IP（即有阈值记录的IP，表示是被规则封禁的）
-		if record.TriggerMinutes == 0 || record.TriggerCount == 0 {
+		// 只显示满足条件的IP（带封禁阈值戳，即规则真实命中过；判据与归属地查询一致）
+		if !wafipban.IsBannedRecord(record) {
 			continue
 		}
 
@@ -185,7 +186,12 @@ func (w *WafIPFailureApi) RemoveIPFailureBanIPApi(c *gin.Context) {
 		// 直接清除失败记录窗口累积
 		manager := wafipban.GetIPFailureManager()
 		manager.ClearIPFailure(req.Ip)
-		global.GCACHE_WAFCACHE.Remove(enums.CACHE_CCVISITBAN_PRE + req.Ip)
+		// CC 封禁键按作用域分开存放，逐一清理（含升级前的旧格式键）
+		for cacheKey := range global.GCACHE_WAFCACHE.ListAvailableKeysWithPrefix(enums.CACHE_CCVISITBAN_PRE) {
+			if _, _, banIp, ok := model.ParseCCBanKey(cacheKey); ok && banIp == req.Ip {
+				global.GCACHE_WAFCACHE.Remove(cacheKey)
+			}
+		}
 		response.OkWithMessage(req.Ip+" 移除成功", c)
 	} else {
 		response.FailWithMessage("解析失败", c)

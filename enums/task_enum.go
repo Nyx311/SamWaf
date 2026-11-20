@@ -3,8 +3,8 @@ package enums
 const (
 	TASK_RUNTIME_QPS_CLEAN            = "task_runtime_qps_clean"            //清空运行QPS
 	TASK_HOST_QPS_CLEAN               = "task_host_qps_clean"               //清空主机QPS
-	TASK_SHARE_DB                     = "task_share_db"                     //分库检测(每天兜底)
-	TASK_SHARE_DB_CHECK               = "task_share_db_check"               //分库高频检测(每5分钟按大小切库)
+	TASK_SHARE_DB                     = "task_share_db"                     //分区检测(每天兜底)
+	TASK_SHARE_DB_CHECK               = "task_share_db_check"               //分区高频检测(每5分钟；按周期切，体积超限兜底)
 	TASK_COUNTER                      = "task_counter"                      //统计
 	TASK_DELAY_INFO                   = "task_delay_info"                   //延迟统计信息
 	TASK_LOAD_CONFIG                  = "task_load_config"                  //获取配置信息
@@ -27,6 +27,7 @@ const (
 	TASK_STATS_DATA_CLEANUP           = "task_stats_data_cleanup"           //清理统计数据（按保留策略）
 	TASK_THREAT_IP_SYNC               = "task_threat_ip_sync"               //威胁情报IP订阅同步
 	TASK_ACCESS_CLEAN                 = "task_access_clean"                 //统一访问认证：清理过期会话/令牌/票据与审计日志
+	TASK_HTTPAUTH_CLEAN               = "task_httpauth_clean"               //网站密码访问：标记到期会话并清理历史行
 	TASK_HOSTGUARD_CLEAN_EXPIRED      = "task_hostguard_clean_expired"      //主机防爆破：解封到期封禁(每分钟，因最短阶梯只有5分钟)
 	TASK_TRAFFIC_FLUSH                = "task_traffic_flush"                //站点流量计量落库(30秒一次，引擎侧字节计量与日志解耦)
 )

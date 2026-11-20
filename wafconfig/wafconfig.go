@@ -103,6 +103,9 @@ func LoadAndInitConfig() {
 		}
 		configChanged = true
 	}
+	loadAdminTitles(config)
+	loadLogExportConfig(config)
+
 	if config.IsSet("notice.isenable") {
 		global.GWAF_NOTICE_ENABLE = config.GetBool("notice.isenable")
 	} else {
@@ -132,6 +135,25 @@ func LoadAndInitConfig() {
 		}
 	} else {
 		config.Set("drain_time_out", global.GCONFIG_RECORD_DRAIN_TIMEOUT)
+		configChanged = true
+	}
+
+	// 应用内升级替换二进制后，界面等待服务重新就绪的上限（秒）。由升级进度接口下发给前端。
+	// 只读 config.yml、不进数据库/API：容器或低配机器重启慢，属部署环境差异，运营方带外调整。
+	if config.IsSet("update_restart_timeout") {
+		if v := config.GetInt64("update_restart_timeout"); v > 0 {
+			global.GCONFIG_UPDATE_RESTART_TIMEOUT = v
+		}
+	} else {
+		config.Set("update_restart_timeout", global.GCONFIG_UPDATE_RESTART_TIMEOUT)
+		configChanged = true
+	}
+
+	// 版本/清单检查请求是否附带运行环境标识
+	if config.IsSet("update_env_report") {
+		global.GCONFIG_UPDATE_ENV_REPORT = config.GetBool("update_env_report")
+	} else {
+		config.Set("update_env_report", global.GCONFIG_UPDATE_ENV_REPORT)
 		configChanged = true
 	}
 
@@ -278,8 +300,8 @@ func LoadAndInitConfig() {
 		configChanged = true
 	}
 
-	//用户可配的对外拉取地址允许清单（主机名/IP/CIDR，逗号分隔）。覆盖：批量任务远端来源、
-	//威胁情报订阅、CDN 回源段拉取。默认只允许公网目标；确有内网镜像源的部署，
+	//用户可配的对外地址允许清单（主机名/IP/CIDR，逗号分隔）。覆盖：通知渠道 Webhook、
+	//批量任务远端来源、威胁情报订阅、CDN 回源段拉取。默认只允许公网目标；确有内网目标的部署，
 	if config.IsSet("security.outbound_allowed_hosts") {
 		global.GCONFIG_OUTBOUND_ALLOWED_HOSTS = config.GetString("security.outbound_allowed_hosts")
 	} else {
@@ -420,6 +442,15 @@ func LoadAndInitConfig() {
 	}
 	if config.IsSet("cache.redis.password") {
 		global.GCACHE_REDIS_PASSWORD = config.GetString("cache.redis.password")
+	}
+	if config.IsSet("cache.redis.pool_size") {
+		global.GCACHE_REDIS_POOL_SIZE = config.GetInt("cache.redis.pool_size")
+	}
+	if config.IsSet("cache.redis.pool_timeout_seconds") {
+		global.GCACHE_REDIS_POOL_TIMEOUT_SEC = config.GetInt("cache.redis.pool_timeout_seconds")
+	}
+	if config.IsSet("cache.redis.op_timeout_seconds") {
+		global.GCACHE_REDIS_OP_TIMEOUT_SEC = config.GetInt("cache.redis.op_timeout_seconds")
 	}
 	if config.IsSet("cache.redis.db") {
 		global.GCACHE_REDIS_DB = config.GetInt("cache.redis.db")
