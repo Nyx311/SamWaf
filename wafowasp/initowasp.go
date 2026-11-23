@@ -162,7 +162,7 @@ func (w *WafOWASP) ProcessRequest(r *http.Request, weblog *innerbean.WebLog, ret
 		}
 		retained = true
 		if it != nil {
-			return w.handleInterruption(tx, it)
+			return w.handleInterruption(tx, it, weblog)
 		}
 	} else if tx.IsRequestBodyAccessible() {
 		if err := w.processRequestBody(tx, r, weblog); err != nil {
